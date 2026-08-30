@@ -1,0 +1,17 @@
+{
+  "snapshot_id": "fixture-incomplete-probe",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "",
+  "product_name": "",
+  "product_version": "",
+  "machine_type": null,
+  "cpu": null,
+  "igpu": null,
+  "dgpus": [],
+  "audio": [],
+  "ethernet": [],
+  "wifi": [],
+  "bluetooth": [],
+  "storage": [],
+  "raw_evidence": {}
+}

@@ -1,0 +1,31 @@
+id: thinkpad-t480s
+vendor: LENOVO
+family: kaby-lake-r
+display_name: "Lenovo ThinkPad T480s"
+machine_types:
+  - "20L7"
+  - "20L8"
+product_names:
+  - "ThinkPad T480s"
+  - "20L7"
+  - "20L8"
+cpu_generations:
+  - "Kaby Lake Refresh"
+  - "Kaby Lake"
+default_macos_status:
+  sonoma: EXPERIMENTAL
+  sequoia: EXPERIMENTAL
+  tahoe: EXPERIMENTAL
+known_components:
+  graphics:
+    - intel-uhd-620
+  audio:
+    - realtek-alc257
+  ethernet:
+    - intel-i219-lm
+  wifi:
+    - intel-ac-8265
+options:
+  has_mx150_option: false
+  has_touchscreen_option: true
+  has_thunderbolt: true

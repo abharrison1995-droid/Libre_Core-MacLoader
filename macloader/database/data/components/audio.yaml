@@ -1,0 +1,29 @@
+components:
+  - id: realtek-alc257
+    category: audio
+    name: "Realtek ALC257 High Definition Audio"
+    match_rules:
+      codec_ids:
+        - "10ec:0257"
+      pci_ids:
+        - "8086:9d71"
+        - "8086:9d70"
+        - "8086:a348"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via AppleALC. Multiple candidate layout-ids exist (e.g. 11, 86)."
+        unresolved_requirements:
+          - "Exact layout ID selection deferred to v0.0.5 EFI generator and physical verification"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via AppleALC. Multiple candidate layout-ids exist (e.g. 11, 86)."
+        unresolved_requirements:
+          - "Exact layout ID selection deferred to v0.0.5 EFI generator and physical verification"
+      tahoe:
+        state: CONDITIONAL
+        reason: "AppleHDA was removed in macOS Tahoe; standard AppleALC alone is insufficient for analogue audio."
+        known_limitations:
+          - "Requires AppleHDA reinjection/root patching or VoodooHDA workaround on macOS Tahoe"
+        unresolved_requirements:
+          - "Audio routing stack deferred to v0.0.5 EFI policy research"

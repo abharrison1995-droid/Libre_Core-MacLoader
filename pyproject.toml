@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libre-core-macloader"
+version = "0.0.3"
+description = "Hardware detection and OpenCore/macOS compatibility engine for ThinkPad laptops"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "textual>=0.40.0",
+    "typing_extensions>=4.6.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0"
+]
+
+[project.scripts]
+macloader = "macloader.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["macloader*"]
+
+[tool.setuptools.package-data]
+macloader = ["database/data/**/*.yaml"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,0 +1,88 @@
+{
+  "snapshot_id": "fixture-t480-mx150",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "LENOVO",
+  "product_name": "20L6001VUS",
+  "product_version": "ThinkPad T480",
+  "machine_type": "20L6",
+  "bios_version": "N24ET63W (1.38 )",
+  "bios_date": "10/12/2022",
+  "serial_number": "[REDACTED-SERIAL]",
+  "uuid": "[REDACTED-UUID]",
+  "cpu": {
+    "model_name": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+    "vendor": "GenuineIntel",
+    "cores": 4,
+    "threads": 8,
+    "generation": "Kaby Lake Refresh"
+  },
+  "igpu": {
+    "name": "Intel UHD Graphics 620",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "5917",
+      "device_class": "0300"
+    },
+    "is_igpu": true,
+    "is_dgpu": false
+  },
+  "dgpus": [
+    {
+      "name": "Nvidia GeForce MX150",
+      "pci": {
+        "vendor_id": "10de",
+        "device_id": "1d10",
+        "pci_slot": "0000:01:00.0",
+        "device_class": "0302"
+      },
+      "is_igpu": false,
+      "is_dgpu": true
+    }
+  ],
+  "audio": [
+    {
+      "name": "Realtek ALC257 High Definition Audio",
+      "codec_name": "Realtek ALC257",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "9d71"
+      }
+    }
+  ],
+  "ethernet": [
+    {
+      "name": "Intel I219-LM PCI Express Gigabit Ethernet",
+      "kind": "ethernet",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "15d7"
+      }
+    }
+  ],
+  "wifi": [
+    {
+      "name": "Intel Dual Band Wireless-AC 8265",
+      "kind": "wifi",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "24fd"
+      }
+    }
+  ],
+  "bluetooth": [
+    {
+      "name": "Intel Bluetooth Wireless Controller",
+      "kind": "bluetooth",
+      "usb": {
+        "vendor_id": "8087",
+        "product_id": "0a2b"
+      }
+    }
+  ],
+  "storage": [
+    {
+      "model": "Crucial MX500 SATA SSD 1TB",
+      "kind": "sata"
+    }
+  ]
+}

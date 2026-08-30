@@ -1,0 +1,9 @@
+id: tahoe
+version_name: "macOS 16 Tahoe"
+major_version: 16
+min_opencore_version: "1.0.7"
+status: EXPERIMENTAL
+notes:
+  - "Final macOS release with x86-64 support; requires OpenCore 1.0.7+"
+  - "AppleHDA was removed in macOS Tahoe; analogue audio requires VoodooHDA or AppleHDA reinjection"
+  - "Intel Wi-Fi is experimental due to network framework changes"

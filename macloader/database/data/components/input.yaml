@@ -1,0 +1,48 @@
+components:
+  - id: elan-touchscreen
+    category: input
+    name: "ELAN / Synaptics I2C Touchscreen"
+    match_rules:
+      kinds:
+        - "touchscreen"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via VoodooI2C and VoodooI2CHID."
+        required_actions:
+          - "Will require VoodooI2C and VoodooI2CHID in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via VoodooI2C and VoodooI2CHID."
+        required_actions:
+          - "Will require VoodooI2C and VoodooI2CHID in future EFI BuildPlan"
+      tahoe:
+        state: CONDITIONAL
+        reason: "I2C multitouch input under macOS Tahoe requires validation against newer HID subsystem changes."
+        required_actions:
+          - "Will require VoodooI2C and VoodooI2CHID in future EFI BuildPlan"
+
+  - id: thinkpad-trackpad-trackpoint
+    category: input
+    name: "ThinkPad UltraNav Keyboard, Trackpad & TrackPoint"
+    match_rules:
+      kinds:
+        - "trackpad"
+        - "trackpoint"
+        - "keyboard"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via VoodooPS2Controller / VoodooRMI."
+        required_actions:
+          - "Will require VoodooPS2Controller in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via VoodooPS2Controller / VoodooRMI."
+        required_actions:
+          - "Will require VoodooPS2Controller in future EFI BuildPlan"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Supported via VoodooPS2Controller / VoodooRMI."
+        required_actions:
+          - "Will require VoodooPS2Controller in future EFI BuildPlan"

@@ -1,0 +1,83 @@
+components:
+  - id: intel-uhd-620
+    category: graphics
+    name: "Intel UHD Graphics 620"
+    match_rules:
+      pci_ids:
+        - "8086:5917"
+        - "8086:3ea0"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via WhateverGreen. Acceleration available for Kaby Lake-R."
+        required_actions:
+          - "Will require WhateverGreen in future EFI BuildPlan"
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via WhateverGreen. Acceleration available for Kaby Lake-R."
+        required_actions:
+          - "Will require WhateverGreen in future EFI BuildPlan"
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Requires WhateverGreen and potential graphics compatibility stack."
+        required_actions:
+          - "Will require WhateverGreen in future EFI BuildPlan"
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+
+  - id: intel-hd-620
+    category: graphics
+    name: "Intel HD Graphics 620"
+    match_rules:
+      pci_ids:
+        - "8086:5916"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via WhateverGreen with Kaby Lake native graphics."
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via WhateverGreen with Kaby Lake native graphics."
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Experimental on macOS Tahoe."
+        unresolved_requirements:
+          - "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator"
+
+  - id: nvidia-geforce-mx150
+    category: graphics
+    name: "Nvidia GeForce MX150 (Pascal dGPU)"
+    match_rules:
+      pci_ids:
+        - "10de:1d10"
+        - "10de:1d12"
+    macos_policies:
+      sonoma:
+        state: CONDITIONAL
+        reason: "Nvidia Pascal discrete GPU is unsupported on macOS and must be powered down/disabled."
+        required_actions:
+          - "Must be disabled via ACPI SSDT-dGPU-Off or -wegnoegpu in future EFI BuildPlan"
+        known_limitations:
+          - "No discrete GPU acceleration under macOS; system operates solely on Intel iGPU"
+      sequoia:
+        state: CONDITIONAL
+        reason: "Nvidia Pascal discrete GPU is unsupported on macOS and must be powered down/disabled."
+        required_actions:
+          - "Must be disabled via ACPI SSDT-dGPU-Off or -wegnoegpu in future EFI BuildPlan"
+        known_limitations:
+          - "No discrete GPU acceleration under macOS; system operates solely on Intel iGPU"
+      tahoe:
+        state: CONDITIONAL
+        reason: "Nvidia Pascal discrete GPU is unsupported on macOS and must be powered down/disabled."
+        required_actions:
+          - "Must be disabled via ACPI SSDT-dGPU-Off or -wegnoegpu in future EFI BuildPlan"
+        known_limitations:
+          - "No discrete GPU acceleration under macOS; system operates solely on Intel iGPU"

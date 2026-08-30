@@ -1,0 +1,60 @@
+components:
+  - id: intel-ac-8265
+    category: wifi
+    name: "Intel Dual Band Wireless-AC 8265"
+    match_rules:
+      pci_ids:
+        - "8086:24fd"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless (AirportItlwm or itlwm + HeliPort)."
+        required_actions:
+          - "Will require AirportItlwm or itlwm in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless (AirportItlwm or itlwm + HeliPort)."
+        required_actions:
+          - "Will require AirportItlwm or itlwm in future EFI BuildPlan"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "macOS Tahoe changes wireless subsystems; native AirportItlwm is experimental and may require itlwm companion or root patching."
+        known_limitations:
+          - "Continuity / AirDrop features are limited or unsupported on Intel wireless"
+        unresolved_requirements:
+          - "Tahoe wireless driver stack deferred to v0.0.5 EFI generator research"
+
+  - id: intel-ac-9260-9560
+    category: wifi
+    name: "Intel Wireless-AC 9260 / 9560"
+    match_rules:
+      pci_ids:
+        - "8086:2526"
+        - "8086:9526"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless."
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless."
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Experimental on macOS Tahoe."
+
+  - id: intel-ax200
+    category: wifi
+    name: "Intel Wi-Fi 6 AX200"
+    match_rules:
+      pci_ids:
+        - "8086:2723"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless."
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via OpenIntelWireless."
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Experimental on macOS Tahoe."

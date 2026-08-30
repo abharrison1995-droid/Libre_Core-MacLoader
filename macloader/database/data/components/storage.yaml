@@ -1,0 +1,51 @@
+components:
+  - id: samsung-pm981
+    category: storage
+    name: "Samsung PM981 / PM981a NVMe SSD"
+    match_rules:
+      pci_ids:
+        - "144d:a808"
+        - "144d:a809"
+      model_patterns:
+        - "*PM981*"
+        - "*PM981a*"
+    macos_policies:
+      sonoma:
+        state: CONDITIONAL
+        reason: "Samsung PM981 controller can cause kernel panics on macOS out of the box; NVMeFix provides workarounds."
+        required_actions:
+          - "Will require NVMeFix.kext in future EFI BuildPlan"
+        known_limitations:
+          - "Known power management and write timeout risks remain on PM981 drives; replacement or rigorous testing advised"
+      sequoia:
+        state: CONDITIONAL
+        reason: "Samsung PM981 controller can cause kernel panics on macOS out of the box; NVMeFix provides workarounds."
+        required_actions:
+          - "Will require NVMeFix.kext in future EFI BuildPlan"
+        known_limitations:
+          - "Known power management and write timeout risks remain on PM981 drives; replacement or rigorous testing advised"
+      tahoe:
+        state: CONDITIONAL
+        reason: "Samsung PM981 controller can cause kernel panics on macOS out of the box; NVMeFix provides workarounds."
+        required_actions:
+          - "Will require NVMeFix.kext in future EFI BuildPlan"
+        known_limitations:
+          - "Known power management and write timeout risks remain on PM981 drives; replacement or rigorous testing advised"
+
+  - id: standard-nvme
+    category: storage
+    name: "Standard NVMe / AHCI Storage Controller"
+    match_rules:
+      device_classes:
+        - "0108"
+        - "0106"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Standard NVMe/SATA storage supported natively by macOS."
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Standard NVMe/SATA storage supported natively by macOS."
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Standard NVMe/SATA storage supported natively by macOS."

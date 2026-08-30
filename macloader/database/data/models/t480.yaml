@@ -1,0 +1,33 @@
+id: thinkpad-t480
+vendor: LENOVO
+family: kaby-lake-r
+display_name: "Lenovo ThinkPad T480"
+machine_types:
+  - "20L5"
+  - "20L6"
+product_names:
+  - "ThinkPad T480"
+  - "20L5"
+  - "20L6"
+cpu_generations:
+  - "Kaby Lake Refresh"
+  - "Kaby Lake"
+default_macos_status:
+  sonoma: EXPERIMENTAL
+  sequoia: EXPERIMENTAL
+  tahoe: EXPERIMENTAL
+known_components:
+  graphics:
+    - intel-uhd-620
+    - nvidia-geforce-mx150
+  audio:
+    - realtek-alc257
+  ethernet:
+    - intel-i219-lm
+    - intel-i219-v
+  wifi:
+    - intel-ac-8265
+options:
+  has_mx150_option: true
+  has_touchscreen_option: true
+  has_thunderbolt: true

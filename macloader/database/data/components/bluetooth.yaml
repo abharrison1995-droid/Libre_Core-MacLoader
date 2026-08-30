@@ -1,0 +1,27 @@
+components:
+  - id: intel-bluetooth
+    category: bluetooth
+    name: "Intel Bluetooth Controller"
+    match_rules:
+      usb_ids:
+        - "8087:0a2b"
+        - "8087:0aaa"
+        - "8087:0026"
+        - "8087:0029"
+        - "8087:0032"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelBluetoothFirmware, IntelBTPatcher, and BlueToolFixup."
+        required_actions:
+          - "Will require IntelBluetoothFirmware and BlueToolFixup in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelBluetoothFirmware and BlueToolFixup."
+        required_actions:
+          - "Will require IntelBluetoothFirmware and BlueToolFixup in future EFI BuildPlan"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Experimental on macOS Tahoe via BlueToolFixup."
+        required_actions:
+          - "Will require IntelBluetoothFirmware and BlueToolFixup in future EFI BuildPlan"

@@ -1,0 +1,43 @@
+{
+  "snapshot_id": "fixture-x1-carbon",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "LENOVO",
+  "product_name": "20KH002JUS",
+  "product_version": "ThinkPad X1 Carbon 6th",
+  "machine_type": "20KH",
+  "bios_version": "N23ET82W (1.57 )",
+  "bios_date": "08/10/2022",
+  "serial_number": "[REDACTED-SERIAL]",
+  "uuid": "[REDACTED-UUID]",
+  "cpu": {
+    "model_name": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "vendor": "GenuineIntel",
+    "cores": 4,
+    "threads": 8,
+    "generation": "Kaby Lake Refresh"
+  },
+  "igpu": {
+    "name": "Intel UHD Graphics 620",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "5917"
+    },
+    "is_igpu": true
+  },
+  "audio": [
+    {
+      "name": "Realtek ALC285",
+      "codec_name": "Realtek ALC285"
+    }
+  ],
+  "wifi": [
+    {
+      "name": "Intel Wireless-AC 8265",
+      "kind": "wifi",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "24fd"
+      }
+    }
+  ]
+}

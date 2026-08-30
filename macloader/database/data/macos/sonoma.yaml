@@ -1,0 +1,8 @@
+id: sonoma
+version_name: "macOS 14 Sonoma"
+major_version: 14
+min_opencore_version: "0.9.5"
+status: EXPERIMENTAL
+notes:
+  - "Broadcom legacy wireless dropped; Intel wireless requires AirportItlwm or itlwm"
+  - "Full graphics acceleration supported on Kaby Lake-R UHD 620 via WhateverGreen"

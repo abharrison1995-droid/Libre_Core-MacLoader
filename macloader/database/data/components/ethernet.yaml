@@ -1,0 +1,48 @@
+components:
+  - id: intel-i219-lm
+    category: ethernet
+    name: "Intel I219-LM Gigabit Ethernet"
+    match_rules:
+      pci_ids:
+        - "8086:15d7"
+        - "8086:15b7"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"
+
+  - id: intel-i219-v
+    category: ethernet
+    name: "Intel I219-V Gigabit Ethernet"
+    match_rules:
+      pci_ids:
+        - "8086:15d8"
+        - "8086:15b8"
+    macos_policies:
+      sonoma:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"
+      sequoia:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"
+      tahoe:
+        state: EXPERIMENTAL
+        reason: "Supported via IntelMausi kext."
+        required_actions:
+          - "Will require IntelMausi.kext in future EFI BuildPlan"

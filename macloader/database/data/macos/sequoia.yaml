@@ -1,0 +1,9 @@
+id: sequoia
+version_name: "macOS 15 Sequoia"
+major_version: 15
+min_opencore_version: "1.0.0"
+status: EXPERIMENTAL
+notes:
+  - "Requires OpenCore 1.0.0+ for boot compatibility"
+  - "Intel Wi-Fi requires Sequoia-specific AirportItlwm or itlwm"
+  - "Graphics acceleration supported on Kaby Lake-R UHD 620 via WhateverGreen"

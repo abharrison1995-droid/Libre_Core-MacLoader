@@ -1,0 +1,314 @@
+macloader_dependency_set: "2026.08-a"
+
+dependencies:
+  - id: opencore
+    project_name: "OpenCorePkg"
+    upstream_repository: "https://github.com/acidanthera/OpenCorePkg"
+    license: "BSD-3-Clause"
+    version: "1.0.7"
+    release_tag: "1.0.7"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "EFI/BOOT/BOOTx64.efi"
+      - "EFI/OC/OpenCore.efi"
+      - "EFI/OC/Drivers/OpenRuntime.efi"
+      - "EFI/OC/Drivers/ResetNvramEntry.efi"
+      - "EFI/OC/Tools/OpenShell.efi"
+    artifacts:
+      RELEASE:
+        asset_name: "OpenCore-1.0.7-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip"
+        sha256: "2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e"
+        size_bytes: 10437696
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "OpenCore-1.0.7-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-DEBUG.zip"
+        sha256: "3644db831dd18344896d7a86077b8c338c0eaa01b1579d7fa00785598cac1f2b"
+        size_bytes: 11806430
+        archive_type: "zip"
+
+  - id: lilu
+    project_name: "Lilu"
+    upstream_repository: "https://github.com/acidanthera/Lilu"
+    license: "BSD-3-Clause"
+    version: "1.7.2"
+    release_tag: "1.7.2"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "Lilu.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "Lilu-1.7.2-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip"
+        sha256: "53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8"
+        size_bytes: 781360
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "Lilu-1.7.2-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-DEBUG.zip"
+        sha256: "8e95c1c045b8fb9d414a085d7bb5e5095d6666113b9432d56a31c5567c29e71e"
+        size_bytes: 845210
+        archive_type: "zip"
+
+  - id: whatevergreen
+    project_name: "WhateverGreen"
+    upstream_repository: "https://github.com/acidanthera/WhateverGreen"
+    license: "BSD-3-Clause"
+    version: "1.7.0"
+    release_tag: "1.7.0"
+    date_verified: "2026-08-29"
+    dependencies:
+      - "lilu"
+    subcomponents:
+      - "WhateverGreen.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "WhateverGreen-1.7.0-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/WhateverGreen/releases/download/1.7.0/WhateverGreen-1.7.0-RELEASE.zip"
+        sha256: "6d6ffe8334ad60f784a662794e67b2560b79d757d506841dc8ca9994ab39979b"
+        size_bytes: 571730
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "WhateverGreen-1.7.0-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/WhateverGreen/releases/download/1.7.0/WhateverGreen-1.7.0-DEBUG.zip"
+        sha256: "1351be213b3531b790d9652a65d836e6e224e23cf63ecdb3cf6c823f990ad3ae"
+        size_bytes: 618450
+        archive_type: "zip"
+
+  - id: virtualsmc
+    project_name: "VirtualSMC"
+    upstream_repository: "https://github.com/acidanthera/VirtualSMC"
+    license: "BSD-3-Clause"
+    version: "1.3.7"
+    release_tag: "1.3.7"
+    date_verified: "2026-08-29"
+    dependencies:
+      - "lilu"
+    subcomponents:
+      - "Kexts/VirtualSMC.kext"
+      - "Kexts/SMCBatteryManager.kext"
+      - "Kexts/SMCProcessor.kext"
+      - "Kexts/SMCSuperIO.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "VirtualSMC-1.3.7-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/VirtualSMC/releases/download/1.3.7/VirtualSMC-1.3.7-RELEASE.zip"
+        sha256: "12f1d379969f926306fa92d94ddbf33b32b31176589dc42089d864a26b31b700"
+        size_bytes: 1377786
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "VirtualSMC-1.3.7-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/VirtualSMC/releases/download/1.3.7/VirtualSMC-1.3.7-DEBUG.zip"
+        sha256: "721b0231cfb5f639ff3448f2b7f3a8b417e4f0d6199a531cfb1c1d4ce5e574bc"
+        size_bytes: 1475102
+        archive_type: "zip"
+
+  - id: applealc
+    project_name: "AppleALC"
+    upstream_repository: "https://github.com/acidanthera/AppleALC"
+    license: "BSD-3-Clause"
+    version: "1.9.7"
+    release_tag: "1.9.7"
+    date_verified: "2026-08-29"
+    dependencies:
+      - "lilu"
+    subcomponents:
+      - "AppleALC.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "AppleALC-1.9.7-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/AppleALC/releases/download/1.9.7/AppleALC-1.9.7-RELEASE.zip"
+        sha256: "81a8ba79986130e8c845fff595950226cbc30e588f8d37089e467f776469c29d"
+        size_bytes: 3752348
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "AppleALC-1.9.7-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/AppleALC/releases/download/1.9.7/AppleALC-1.9.7-DEBUG.zip"
+        sha256: "9827ef4847e38a4b60e227e7f7724219c6d3ba0d7db326d9c72e2945d8b76c8c"
+        size_bytes: 3820150
+        archive_type: "zip"
+
+  - id: intelmausi
+    project_name: "IntelMausi"
+    upstream_repository: "https://github.com/acidanthera/IntelMausi"
+    license: "GPL-2.0"
+    version: "1.0.8"
+    release_tag: "1.0.8"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "IntelMausi.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "IntelMausi-1.0.8-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/IntelMausi/releases/download/1.0.8/IntelMausi-1.0.8-RELEASE.zip"
+        sha256: "cc02ea7e972ead536a51e5f6725e79f121026dbf36a766e97044ef2483fd29bc"
+        size_bytes: 869695
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "IntelMausi-1.0.8-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/IntelMausi/releases/download/1.0.8/IntelMausi-1.0.8-DEBUG.zip"
+        sha256: "d5351a44c79805903b413158c541fe33ca688b14a8ce901dbdcf7d727b2cbb10"
+        size_bytes: 894100
+        archive_type: "zip"
+
+  - id: nvmefix
+    project_name: "NVMeFix"
+    upstream_repository: "https://github.com/acidanthera/NVMeFix"
+    license: "BSD-3-Clause"
+    version: "1.1.3"
+    release_tag: "1.1.3"
+    date_verified: "2026-08-29"
+    dependencies:
+      - "lilu"
+    subcomponents:
+      - "NVMeFix.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "NVMeFix-1.1.3-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/NVMeFix/releases/download/1.1.3/NVMeFix-1.1.3-RELEASE.zip"
+        sha256: "e1d5657ab7ac31f69771708f7b80bf218ab9aa0b8e4c4fe6ff943983037e3dfb"
+        size_bytes: 108136
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "NVMeFix-1.1.3-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/NVMeFix/releases/download/1.1.3/NVMeFix-1.1.3-DEBUG.zip"
+        sha256: "2fbb4814d4eb0c1692df860ef718c50bb4db1f8ee8aa95a76e7ea8a4746f3a61"
+        size_bytes: 120540
+        archive_type: "zip"
+
+  - id: voodoops2
+    project_name: "VoodooPS2"
+    upstream_repository: "https://github.com/acidanthera/VoodooPS2"
+    license: "GPL-2.0"
+    version: "2.3.7"
+    release_tag: "2.3.7"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "VoodooPS2Controller.kext"
+      - "VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Keyboard.kext"
+      - "VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Trackpad.kext"
+      - "VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Mouse.kext"
+      - "VoodooPS2Controller.kext/Contents/PlugIns/VoodooInput.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "VoodooPS2Controller-2.3.7-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/VoodooPS2/releases/download/2.3.7/VoodooPS2Controller-2.3.7-RELEASE.zip"
+        sha256: "d5483298736ba4b3b82c7203d9a46968c668fb7af732b8b22c2096deb0acf83f"
+        size_bytes: 632757
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "VoodooPS2Controller-2.3.7-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/VoodooPS2/releases/download/2.3.7/VoodooPS2Controller-2.3.7-DEBUG.zip"
+        sha256: "8e8d479eaec6cb66929fe792bf553531b5c468166c4293f0b2f960f2526e8ad1"
+        size_bytes: 681400
+        archive_type: "zip"
+
+  - id: voodooi2c
+    project_name: "VoodooI2C"
+    upstream_repository: "https://github.com/VoodooI2C/VoodooI2C"
+    license: "GPL-3.0"
+    version: "2.9.1"
+    release_tag: "v2.9.1"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "VoodooI2C.kext"
+      - "VoodooI2CHID.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "VoodooI2C-2.9.1-RELEASE.zip"
+        source_url: "https://github.com/VoodooI2C/VoodooI2C/releases/download/v2.9.1/VoodooI2C-2.9.1-RELEASE.zip"
+        sha256: "368e5eb60794583c340764813bd7e8244e94d3d3c06ea5b67034addd539487f4"
+        size_bytes: 1338392
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "VoodooI2C-2.9.1-DEBUG.zip"
+        source_url: "https://github.com/VoodooI2C/VoodooI2C/releases/download/v2.9.1/VoodooI2C-2.9.1-DEBUG.zip"
+        sha256: "c1be486a693b48227b61dcfc2e26dbd2ca887aa843329f64bf75eb1ee8fbe4ee"
+        size_bytes: 1412030
+        archive_type: "zip"
+
+  - id: itlwm
+    project_name: "itlwm"
+    upstream_repository: "https://github.com/OpenIntelWireless/itlwm"
+    license: "GPL-2.0"
+    version: "2.3.0"
+    release_tag: "v2.3.0"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "itlwm.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "itlwm_v2.3.0_stable.kext.zip"
+        source_url: "https://github.com/OpenIntelWireless/itlwm/releases/download/v2.3.0/itlwm_v2.3.0_stable.kext.zip"
+        sha256: "31ed2e5b4bca92645bfab0a397a1f50212c72a04ea15591c061fe74233e4f82b"
+        size_bytes: 15094333
+        archive_type: "zip"
+
+  - id: airportitlwm
+    project_name: "AirportItlwm"
+    upstream_repository: "https://github.com/OpenIntelWireless/itlwm"
+    license: "GPL-2.0"
+    version: "2.3.0"
+    release_tag: "v2.3.0"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "AirportItlwm.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "AirportItlwm_v2.3.0_stable_Sonoma14.4.kext.zip"
+        source_url: "https://github.com/OpenIntelWireless/itlwm/releases/download/v2.3.0/AirportItlwm_v2.3.0_stable_Sonoma14.4.kext.zip"
+        sha256: "7ef12a8037eb9bc795828c348f4fa0728b8ade57aa0984b037816ef91c2d5119"
+        size_bytes: 15120597
+        archive_type: "zip"
+
+  - id: intel_bluetooth_firmware
+    project_name: "IntelBluetoothFirmware"
+    upstream_repository: "https://github.com/OpenIntelWireless/IntelBluetoothFirmware"
+    license: "GPL-2.0"
+    version: "2.4.0"
+    release_tag: "v2.4.0"
+    date_verified: "2026-08-29"
+    dependencies: []
+    subcomponents:
+      - "IntelBluetoothFirmware.kext"
+      - "IntelBTPatcher.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "IntelBluetooth-v2.4.0.zip"
+        source_url: "https://github.com/OpenIntelWireless/IntelBluetoothFirmware/releases/download/v2.4.0/IntelBluetooth-v2.4.0.zip"
+        sha256: "78418daa11f620012fc53ba68cbd643c2642a45f2f96c594fd01aaf2bc68fe2b"
+        size_bytes: 11440164
+        archive_type: "zip"
+
+  - id: bluetoolfixup
+    project_name: "BlueToolFixup (BrcmPatchRAM)"
+    upstream_repository: "https://github.com/acidanthera/BrcmPatchRAM"
+    license: "GPL-2.0"
+    version: "2.7.2"
+    release_tag: "2.7.2"
+    date_verified: "2026-08-29"
+    dependencies:
+      - "lilu"
+    subcomponents:
+      - "BlueToolFixup.kext"
+    artifacts:
+      RELEASE:
+        asset_name: "BrcmPatchRAM-2.7.2-RELEASE.zip"
+        source_url: "https://github.com/acidanthera/BrcmPatchRAM/releases/download/2.7.2/BrcmPatchRAM-2.7.2-RELEASE.zip"
+        sha256: "e1c1c55347526d031a8ae2fdd1f52efa3019161e497fb38e1cfa809752f8af21"
+        size_bytes: 5422378
+        archive_type: "zip"
+      DEBUG:
+        asset_name: "BrcmPatchRAM-2.7.2-DEBUG.zip"
+        source_url: "https://github.com/acidanthera/BrcmPatchRAM/releases/download/2.7.2/BrcmPatchRAM-2.7.2-DEBUG.zip"
+        sha256: "8e8ca929be608930811e5f082a6eb0bfa5eb80357f897bc8a7fbc265e3efcaec"
+        size_bytes: 5612400
+        archive_type: "zip"

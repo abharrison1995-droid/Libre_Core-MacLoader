@@ -1,0 +1,26 @@
+{
+  "snapshot_id": "fixture-dell-xps-13",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "Dell Inc.",
+  "product_name": "XPS 13 9370",
+  "product_version": "1.0",
+  "machine_type": null,
+  "bios_version": "1.21.0",
+  "serial_number": "[REDACTED-SERIAL]",
+  "uuid": "[REDACTED-UUID]",
+  "cpu": {
+    "model_name": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+    "vendor": "GenuineIntel",
+    "cores": 4,
+    "threads": 8,
+    "generation": "Kaby Lake Refresh"
+  },
+  "igpu": {
+    "name": "Intel UHD Graphics 620",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "5917"
+    },
+    "is_igpu": true
+  }
+}

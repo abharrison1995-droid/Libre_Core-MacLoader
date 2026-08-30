@@ -1,0 +1,64 @@
+{
+  "snapshot_id": "fixture-t480-pm981",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "LENOVO",
+  "product_name": "20L5001CUS",
+  "product_version": "ThinkPad T480",
+  "machine_type": "20L5",
+  "bios_version": "N24ET63W (1.38 )",
+  "bios_date": "10/12/2022",
+  "serial_number": "[REDACTED-SERIAL]",
+  "uuid": "[REDACTED-UUID]",
+  "cpu": {
+    "model_name": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+    "vendor": "GenuineIntel",
+    "cores": 4,
+    "threads": 8,
+    "generation": "Kaby Lake Refresh"
+  },
+  "igpu": {
+    "name": "Intel UHD Graphics 620",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "5917"
+    },
+    "is_igpu": true
+  },
+  "dgpus": [],
+  "audio": [
+    {
+      "name": "Realtek ALC257",
+      "codec_name": "Realtek ALC257"
+    }
+  ],
+  "ethernet": [
+    {
+      "name": "Intel I219-V",
+      "kind": "ethernet",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "15d8"
+      }
+    }
+  ],
+  "wifi": [
+    {
+      "name": "Intel Dual Band Wireless-AC 8265",
+      "kind": "wifi",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "24fd"
+      }
+    }
+  ],
+  "storage": [
+    {
+      "model": "SAMSUNG MZVLB512HAJQ-000L7 PM981 NVMe SSD 512GB",
+      "kind": "nvme",
+      "pci": {
+        "vendor_id": "144d",
+        "device_id": "a808"
+      }
+    }
+  ]
+}
