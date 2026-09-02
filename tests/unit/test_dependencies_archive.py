@@ -41,3 +41,16 @@ def test_validate_rejects_absolute_path(tmp_path: Path) -> None:
     with pytest.raises(ArchiveSecurityError) as exc:
         validate_zip_archive(zip_file)
     assert "Insecure absolute path" in str(exc.value)
+
+
+def test_safe_extract_zip_end_to_end_rejects_traversal(tmp_path: Path) -> None:
+    # Regression test for the safe_extract_zip() destination-path check
+    # (Path.is_relative_to() instead of a raw string prefix comparison).
+    zip_file = tmp_path / "traversal.zip"
+    with zipfile.ZipFile(zip_file, "w") as zf:
+        zf.writestr("../../escape.txt", "malicious payload")
+
+    extract_dir = tmp_path / "extracted"
+    with pytest.raises(ArchiveSecurityError):
+        safe_extract_zip(zip_file, extract_dir)
+    assert not (tmp_path / "escape.txt").exists()

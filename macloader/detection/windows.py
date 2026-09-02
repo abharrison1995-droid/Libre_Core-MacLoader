@@ -94,10 +94,10 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             try:
                 cpu_data = json.loads(cpu_json)
                 if isinstance(cpu_data, list):
-                    cpu_data = cpu_data[0]
+                    cpu_data = cpu_data[0] if cpu_data else {}
                 cpu_name = normalize_dmi_string(cpu_data.get("Name", "Intel Core Processor"))
-                cores = int(cpu_data.get("NumberOfCores", 4))
-                threads = int(cpu_data.get("NumberOfLogicalProcessors", 8))
+                cores = int(cpu_data.get("NumberOfCores") or 4)
+                threads = int(cpu_data.get("NumberOfLogicalProcessors") or 8)
                 gen = "Kaby Lake Refresh" if "8" in cpu_name and "U" in cpu_name else "Kaby Lake"
                 cpu = CpuInfo(
                     model_name=cpu_name,
@@ -124,8 +124,11 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     # Extract VEN_xxxx&DEV_xxxx
                     ven_match = re.search(r"VEN_([0-9a-fA-F]{4})", pnp_id)
                     dev_match = re.search(r"DEV_([0-9a-fA-F]{4})", pnp_id)
-                    ven_id = ven_match.group(1).lower() if ven_match else "8086"
-                    dev_id = dev_match.group(1).lower() if dev_match else "5917"
+                    if not ven_match or not dev_match:
+                        logger.debug(f"Could not parse PNPDeviceID for video controller: {pnp_id}")
+                        continue
+                    ven_id = ven_match.group(1).lower()
+                    dev_id = dev_match.group(1).lower()
                     pci = PciDevice(vendor_id=ven_id, device_id=dev_id, device_name=v_name)
 
                     if ven_id == "8086":

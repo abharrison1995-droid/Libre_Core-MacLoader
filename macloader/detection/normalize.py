@@ -20,7 +20,7 @@ def normalize_hex_id(value: Optional[str], length: int = 4) -> Optional[str]:
     if len(val) < length:
         val = val.zfill(length)
     elif len(val) > length:
-        val = val[-length:]
+        val = val[:length]
     return val
 
 

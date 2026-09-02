@@ -107,7 +107,7 @@ class CompatibilityEngine:
                 policy = comp.macos_policies[os_key]
                 component_results.append(
                     ComponentCompatibilityResult(
-                        category="graphics",
+                        category="graphics_dgpu",
                         component_id=comp.id,
                         component_name=dgpu.name,
                         decision=SupportDecision(
@@ -222,7 +222,7 @@ class CompatibilityEngine:
         # 8. Storage Evaluation
         if snapshot.storage:
             for st in snapshot.storage:
-                is_pm981 = "PM981" in st.model.upper() or (st.pci and st.pci.canonical_id in ("144d:a808", "144d:a809"))
+                is_pm981 = "PM981" in (st.model or "").upper() or (st.pci and st.pci.canonical_id in ("144d:a808", "144d:a809"))
                 comp_id = "samsung-pm981" if is_pm981 else "standard-nvme"
                 comp = self.db.get_component(comp_id)
                 if comp and os_key in comp.macos_policies:
@@ -312,18 +312,22 @@ class CompatibilityEngine:
         planned_components: List[dict] = []
         unresolved_requirements: List[str] = []
 
-        # Graphics capability
-        required_capabilities.append("accelerated_intel_uhd_620")
-        planned_components.append({
-            "category": "graphics",
-            "name": "Intel UHD Graphics 620",
-            "driver_requirement": "WhateverGreen.kext",
-        })
-        unresolved_requirements.append("Exact framebuffer and device-id injection policy deferred to v0.0.5")
+        # Graphics capability (only when an iGPU was actually detected).
+        # iGPU results use category "graphics"; dGPU results use "graphics_dgpu" —
+        # so this no longer needs to guess based on component_id substrings.
+        has_igpu = any(cr.category == "graphics" for cr in report.component_results)
+        if has_igpu:
+            required_capabilities.append("accelerated_intel_uhd_620")
+            planned_components.append({
+                "category": "graphics",
+                "name": "Intel UHD Graphics 620",
+                "driver_requirement": "WhateverGreen.kext",
+            })
+            unresolved_requirements.append("Exact framebuffer and device-id injection policy deferred to v0.0.5")
 
         # dGPU handling
         for comp_res in report.component_results:
-            if comp_res.category == "graphics" and "mx150" in comp_res.component_id.lower():
+            if comp_res.category == "graphics_dgpu":
                 required_capabilities.append("disable_discrete_gpu")
                 planned_components.append({
                     "category": "graphics_dgpu",

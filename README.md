@@ -89,17 +89,25 @@ macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --maco
 
 # Fetch and cache verified dependency archives with SHA-256 validation
 macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia
+macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --json
 
 # Operate in strict offline mode from cache
 macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --offline
 
 # Verify cache integrity
 macloader deps verify --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia
+macloader deps verify --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --json
 
 # View or clear local cache stats
 macloader deps cache
 macloader deps cache --clear
+macloader deps cache --json
+
+# resolve/fetch/verify also accept --variant (RELEASE or DEBUG builds, default RELEASE)
+macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --variant DEBUG
 ```
+
+Note: `plan` defaults to `--macos tahoe` (forward-looking), while `support`/`deps` commands default to `--macos sequoia`.
 
 ---
 

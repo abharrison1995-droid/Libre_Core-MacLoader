@@ -20,6 +20,13 @@ def test_normalize_hex_id() -> None:
     assert normalize_hex_id("invalid_hex") is None
 
 
+def test_normalize_hex_id_truncates_leading_chars_when_overlong() -> None:
+    # Overlong hex IDs must be truncated from the right, keeping the
+    # leading (most significant) characters — not the trailing ones.
+    assert normalize_hex_id("12345", length=4) == "1234"
+    assert normalize_hex_id("0012a8086", length=4) == "0012"
+
+
 def test_normalize_dmi_string() -> None:
     assert normalize_dmi_string("  LENOVO  ") == "LENOVO"
     assert normalize_dmi_string("ThinkPad T480s\x00\n") == "ThinkPad T480s"

@@ -1,12 +1,12 @@
 """Safe streaming downloader with SHA-256 validation and mockable transport."""
 
-import hashlib
 import logging
 from pathlib import Path
 from typing import Callable, Optional
 import urllib.error
 import urllib.request
 
+from macloader.dependencies.cache import compute_file_sha256
 from macloader.domain.dependencies import DependencyArtifact
 from macloader.exceptions import ArtifactDownloadError, ChecksumMismatchError
 
@@ -41,11 +41,7 @@ class Downloader:
                             out_f.write(chunk)
 
             # Compute and verify SHA-256
-            h = hashlib.sha256()
-            with part_path.open("rb") as f:
-                while chunk := f.read(65536):
-                    h.update(chunk)
-            actual_sha = h.hexdigest().lower()
+            actual_sha = compute_file_sha256(part_path)
 
             if actual_sha != artifact.sha256.lower():
                 raise ChecksumMismatchError(

@@ -110,7 +110,7 @@ def render_compatibility_report(report: CompatibilityReport, console: Console) -
             req_actions = " | Action: " + "; ".join(comp.decision.required_actions)
         notes = f"{comp.decision.reason}{req_actions}"
         table.add_row(
-            comp.category.capitalize(),
+            comp.category.replace("_", " ").capitalize(),
             comp.component_name,
             _state_badge(comp.decision.state),
             notes,

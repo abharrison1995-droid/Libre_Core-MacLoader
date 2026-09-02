@@ -1,7 +1,6 @@
 """Linux hardware detection provider utilizing sysfs, DMI, /proc, and PCI utilities."""
 
 import logging
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -419,7 +418,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 bus_hex = bus_match.group(1) if bus_match else "0000"
 
                 name_lower = name.lower()
-                if "touchscreen" in name_lower or "elan" in name_lower and "touch" in name_lower:
+                if "touchscreen" in name_lower or ("elan" in name_lower and "touch" in name_lower):
                     input_list.append(InputDeviceInfo(name=name, bus="i2c", kind="touchscreen"))
                 elif "trackpoint" in name_lower or "dualpoint stick" in name_lower:
                     input_list.append(InputDeviceInfo(name=name, bus="ps2", kind="trackpoint"))

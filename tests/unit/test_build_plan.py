@@ -4,6 +4,7 @@ from pathlib import Path
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.database.loader import Database
 from macloader.detection.fixture import FixtureHardwareProvider
+from macloader.domain.compatibility import CompatibilityReport, CompatibilityState, SupportDecision
 
 
 def test_generate_build_plan_t480s_tahoe(t480s_baseline_fixture: Path, db: Database) -> None:
@@ -34,3 +35,23 @@ def test_generate_build_plan_t480_mx150(t480_mx150_fixture: Path, db: Database) 
     assert plan.target_model == "Lenovo ThinkPad T480"
     assert "disable_discrete_gpu" in plan.required_capabilities
     assert any(c.get("category") == "graphics_dgpu" for c in plan.planned_components)
+
+
+def test_generate_build_plan_omits_graphics_when_no_igpu_detected(db: Database) -> None:
+    # Regression test: generate_build_plan() must not unconditionally claim
+    # Intel UHD 620 graphics support when no iGPU was actually detected.
+    engine = CompatibilityEngine(db=db)
+    report = CompatibilityReport(
+        snapshot_id="test-no-igpu",
+        target_macos="sequoia",
+        model_id="thinkpad-t480",
+        model_name="Lenovo ThinkPad T480",
+        overall_state=CompatibilityState.CONDITIONAL,
+        model_decision=SupportDecision(target="model:thinkpad-t480", state=CompatibilityState.CONDITIONAL, reason="test"),
+        component_results=[],
+        can_generate_build_plan=True,
+    )
+    plan = engine.generate_build_plan(report)
+
+    assert "accelerated_intel_uhd_620" not in plan.required_capabilities
+    assert not any(c.get("category") == "graphics" for c in plan.planned_components)

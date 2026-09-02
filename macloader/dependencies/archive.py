@@ -49,7 +49,7 @@ def safe_extract_zip(
         for member in namelist:
             # Check destination resolution
             dest_path = (target_dir / member).resolve()
-            if not str(dest_path).startswith(str(resolved_target)):
+            if not dest_path.is_relative_to(resolved_target):
                 raise ArchiveSecurityError(
                     f"Extraction path escape attempt: member '{member}' resolves to '{dest_path}' outside '{target_dir}'"
                 )

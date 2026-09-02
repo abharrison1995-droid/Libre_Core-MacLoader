@@ -15,7 +15,7 @@ UUID_REGEX = re.compile(
 )
 
 
-def _sanitize_string(text: str, serial_placeholder: str = "[REDACTED-SERIAL]") -> str:
+def _sanitize_string(text: str) -> str:
     """Redact UUIDs and MAC addresses from arbitrary text."""
     text = UUID_REGEX.sub("[REDACTED-UUID]", text)
     text = MAC_ADDRESS_REGEX.sub("xx:xx:xx:xx:xx:xx", text)
@@ -61,15 +61,10 @@ def sanitize_hardware_snapshot(snapshot: HardwareSnapshot) -> HardwareSnapshot:
         raw_dict["uuid"] = "[REDACTED-UUID]"
 
     # Redact network MAC addresses
-    for net in raw_dict.get("ethernet", []):
-        if net.get("mac_address"):
-            net["mac_address"] = "xx:xx:xx:xx:xx:xx"
-    for wifi in raw_dict.get("wifi", []):
-        if wifi.get("mac_address"):
-            wifi["mac_address"] = "xx:xx:xx:xx:xx:xx"
-    for bt in raw_dict.get("bluetooth", []):
-        if bt.get("mac_address"):
-            bt["mac_address"] = "xx:xx:xx:xx:xx:xx"
+    for section in ("ethernet", "wifi", "bluetooth"):
+        for device in raw_dict.get(section, []):
+            if device.get("mac_address"):
+                device["mac_address"] = "xx:xx:xx:xx:xx:xx"
 
     # Redact storage serial numbers
     for storage in raw_dict.get("storage", []):
