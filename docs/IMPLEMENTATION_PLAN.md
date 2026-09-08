@@ -4,7 +4,7 @@ Updated: 2026-09-08, after the user-supplied six-agent Terra review. Baseline is
 
 This is the active execution plan. It supersedes earlier statements that G0 is closed and that the builder/recovery/media modules are wholly absent or complete. The engineering specification remains the product contract. Historical review resolutions remain in [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md); the open issue register below governs current work.
 
-## Current progress and evidence
+### Current progress and evidence
 
 | Area | Implemented progress | Remaining qualification / status |
 |---|---|---|
@@ -12,12 +12,12 @@ This is the active execution plan. It supersedes earlier statements that G0 is c
 | Plans and dependency contracts | Canonical plan/catalog/policy digests, exact resolver-set binding in acquisition and EFI publication, component/toolchain/identity manifest binding, strict serialized readiness checks | Real ocvalidate qualification and release validation remain open (S03-S04, G1-G2) |
 | Downloader/cache/archive | Streaming dependency hashes, limits, safe paths, atomic file/index publication, file locking | Lock ownership and concurrent miss handling remain defective; archive copies are redundant (S06-S07, S11) |
 | EFI builder and CLI | `macloader/build/efi.py`, `build`/`validate`, staging, manifests, plan-bound extraction, structural/config validation, qualified-validator contract and private identity reference; builder unit tests; candidate source included | Hosted clean-checkout evidence and real G1/G2 ocvalidate/toolchain/identity qualification remain pending |
-| Recovery | `RecoveryAsset` and `RecoveryAcquirer` implement size/hash checks and an injectable transport | Preliminary helper; whole-file hashing, no total deadline, no tested official product discovery/CLI flow (S05, S12, G4) |
+| Recovery | `RecoveryAsset` and `RecoveryAcquirer` implement bounded streaming hash, monotonic deadline, cancellation, disk-space preflight, safe symlink rejection, verified Apple redirect policy, and atomic temporary staging | S05 core hardening implemented with 13 focused regression tests; official product discovery and USB integration remain open (S12, G4) |
 | Removable media | Device/write-plan contracts, typed confirmation and injected write callback | Preliminary guard; no real host adapters, live identity re-enumeration, integrated validation gate or safety tests (S12, G5) |
 | CI and packaging | Windows/Linux Python 3.11/3.14 workflow and wheel/sdist smoke jobs defined; dev typing tools present; candidate source included | Local checks green; hosted results and clean-host evidence pending (S01, S13) |
 | Workflow and hardware | CLI exists | Textual TUI, BIOS/installation guidance, distribution qualification and physical acceptance remain open (G6-G7) |
 
-Re-run during this implementation batch: `python -m pytest -q` = **79 passed**; `python -m mypy macloader tests` = **clean across 64 files**, on this Windows environment. These results establish local regression/type status, not correctness of untested safety paths or hosted clean-checkout behavior. The candidate `.gitignore` scopes root output to `/build/`, and the builder is included in the index; CLI imports it at module load.
+Re-run during this implementation batch: `python -m pytest -q` = **95 passed**; `python -m mypy macloader tests` = **clean across 65 files**, on this Windows environment. These results establish local regression/type status, not correctness of untested safety paths or hosted clean-checkout behavior. The candidate `.gitignore` scopes root output to `/build/`, and the builder is included in the index; CLI imports it at module load.
 
 No hosted CI, clean-checkout wheel test, live Recovery qualification, matching ocvalidate execution, USB write or physical installation was performed during this planning update. Existing application changes are preserved. This update changes documentation; the defects below remain open.
 
