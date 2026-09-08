@@ -12,9 +12,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from macloader.dependencies.archive import safe_extract_zip, validate_zip_archive
+from macloader.dependencies.archive import (
+    DEFAULT_MAX_ARTIFACT_EXPANDED_BYTES,
+    DEFAULT_MAX_BUILD_EXPANDED_BYTES,
+    safe_extract_zip,
+    validate_zip_archive,
+)
 from macloader.dependencies.cache import compute_file_sha256
 from macloader.dependencies.resolver import DependencyResolver
 from macloader.database.loader import Database, get_database
@@ -28,7 +33,7 @@ from macloader.domain.contracts import (
     canonical_json_digest,
 )
 from macloader.domain.dependencies import ResolvedDependency, ResolvedDependencySet
-from macloader.exceptions import BuildPlanError
+from macloader.exceptions import ArchiveSecurityError, BuildPlanError
 
 
 @dataclass
@@ -42,9 +47,17 @@ class EfiBuildResult:
 class EfiBuilder:
     """Construct only from an actionable, complete dependency lock."""
 
-    def __init__(self, db: Optional[Database] = None, identity_store_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        db: Optional[Database] = None,
+        identity_store_dir: Optional[Path] = None,
+        max_artifact_expanded_bytes: int = DEFAULT_MAX_ARTIFACT_EXPANDED_BYTES,
+        max_build_expanded_bytes: int = DEFAULT_MAX_BUILD_EXPANDED_BYTES,
+    ) -> None:
         self.db = db or get_database()
         self.identity_store_dir = identity_store_dir
+        self.max_artifact_expanded_bytes = max_artifact_expanded_bytes
+        self.max_build_expanded_bytes = max_build_expanded_bytes
 
     def build(
         self,
@@ -127,6 +140,16 @@ class EfiBuilder:
 
             kexts: List[str] = []
             drivers: List[str] = []
+            total_build_bytes = 0
+
+            def _track_build_bytes(chunk_len: int) -> None:
+                nonlocal total_build_bytes
+                total_build_bytes += chunk_len
+                if total_build_bytes > self.max_build_expanded_bytes:
+                    raise BuildPlanError(
+                        f"EFI build exceeded maximum peak disk budget ({self.max_build_expanded_bytes} bytes)"
+                    )
+
             for dependency in dependencies.resolved_dependencies:
                 archive_path = artifact_paths.get(dependency.dependency_id)
                 if archive_path is None or not archive_path.is_file() or archive_path.is_symlink():
@@ -139,13 +162,16 @@ class EfiBuilder:
                     dependency.dependency_id,
                     dependency.artifact.sha256.lower(),
                     dependency.artifact.size_bytes,
+                    staging_root=staging,
+                    cumulative_bytes_tracker=_track_build_bytes,
                 )
                 for component in spec_components:
-                    name = Path(component).name
-                    if name.endswith(".kext"):
-                        kexts.append(name)
-                    elif component.startswith("EFI/OC/Drivers/") and name.endswith(".efi"):
-                        drivers.append(name)
+                    normalized_component = component.replace("\\", "/")
+                    if normalized_component.endswith(".kext"):
+                        kext_rel = normalized_component.removeprefix("Kexts/")
+                        kexts.append(kext_rel)
+                    elif normalized_component.startswith("EFI/OC/Drivers/") and Path(normalized_component).name.endswith(".efi"):
+                        drivers.append(Path(normalized_component).name)
                 (licenses / f"{dependency.dependency_id}.txt").write_text(
                     f"{dependency.project_name}\nLicense: recorded in the verified catalog\n", encoding="utf-8"
                 )
@@ -298,9 +324,10 @@ class EfiBuilder:
                     errors.append(f"Malformed {label} configuration entry")
                     continue
                 name = entry[key]
-                if name in seen:
+                case_key = name.casefold()
+                if case_key in seen:
                     errors.append(f"Duplicate {label} configuration entry: {name}")
-                seen.add(name)
+                seen.add(case_key)
                 raw_candidate = base / name
                 if raw_candidate.is_symlink():
                     errors.append(f"Configured {label} is a symlink: {name}")
@@ -324,41 +351,80 @@ class EfiBuilder:
         dependency_id: str,
         expected_sha256: str,
         expected_size: int,
-    ) -> None:
+        staging_root: Optional[Path] = None,
+        cumulative_bytes_tracker: Optional[Callable[[int], None]] = None,
+    ) -> int:
+        root_staging = staging_root or efi_root.parent
         with tempfile.TemporaryDirectory(prefix=f"macloader-{dependency_id}-") as temp_name:
             temp = Path(temp_name)
             snapshot = temp / "archive.zip"
-            shutil.copyfile(archive_path, snapshot, follow_symlinks=False)
+            try:
+                shutil.copyfile(archive_path, snapshot, follow_symlinks=False)
+            except OSError as exc:
+                raise BuildPlanError(f"Unable to snapshot archive for {dependency_id}: {exc}") from exc
+
             if snapshot.stat().st_size != expected_size or compute_file_sha256(snapshot) != expected_sha256:
                 raise BuildPlanError(f"Verified archive changed or does not match the lock for {dependency_id}")
-            names = validate_zip_archive(snapshot)
-            selected: List[str] = []
-            matches: List[tuple[str, str]] = []
+
+            try:
+                names = validate_zip_archive(snapshot, max_expanded_bytes=self.max_artifact_expanded_bytes)
+            except ArchiveSecurityError as exc:
+                raise BuildPlanError(f"Archive security validation failed for {dependency_id}: {exc}") from exc
+
+            member_map: Dict[str, Path] = {}
             for component in components:
-                candidates = [name for name in names if name.rstrip("/") == component or name.rstrip("/").endswith("/" + component)]
+                normalized_comp = component.replace("\\", "/")
+                candidates = [name for name in names if name.rstrip("/") == normalized_comp or name.rstrip("/").endswith("/" + normalized_comp)]
                 if not candidates:
-                    nested = [name for name in names if ("/" + component + "/") in name]
+                    nested = [name for name in names if ("/" + normalized_comp + "/") in name or name.startswith(normalized_comp + "/")]
                     if nested:
                         nested_name = min(nested, key=len)
-                        prefix = nested_name.split("/" + component + "/", 1)[0] + "/"
-                        candidates = [prefix + component + "/"]
+                        if ("/" + normalized_comp + "/") in nested_name:
+                            prefix = nested_name.split("/" + normalized_comp + "/", 1)[0] + "/"
+                            candidates = [prefix + normalized_comp + "/"]
+                        else:
+                            candidates = [normalized_comp + "/"]
                 if not candidates:
                     raise BuildPlanError(f"Component {component} is missing from {archive_path.name}")
                 candidate = min(candidates, key=len).rstrip("/")
-                prefix = candidate[: -len(component)] if candidate.endswith(component) else ""
-                matches.append((candidate, prefix))
-                selected.extend(name for name in names if name.startswith(prefix + component))
-            expanded = temp / "expanded"
-            safe_extract_zip(snapshot, expanded, sorted(set(selected)))
-            for candidate, prefix in matches:
-                source = expanded / (prefix + candidate[len(prefix):])
-                component = candidate[len(prefix):].rstrip("/")
-                destination = efi_root.parent / component if component.startswith("EFI/") else efi_root / "OC" / "Kexts" / Path(component).name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if source.is_dir():
-                    shutil.copytree(source, destination, dirs_exist_ok=True)
-                elif source.is_file():
-                    shutil.copy2(source, destination)
+                prefix = candidate[: -len(normalized_comp)] if candidate.endswith(normalized_comp) else ""
+
+                if normalized_comp.startswith("EFI/"):
+                    base_dest = efi_root.parent / normalized_comp
+                else:
+                    kext_rel = normalized_comp.removeprefix("Kexts/")
+                    base_dest = efi_root / "OC" / "Kexts" / kext_rel
+
+                is_dir = (
+                    candidate.endswith(".kext")
+                    or any(name.startswith(candidate + "/") for name in names)
+                    or (candidate + "/") in names
+                )
+                if is_dir:
+                    for name in names:
+                        if name == candidate or name == candidate + "/" or name.startswith(candidate + "/"):
+                            rel_within = name[len(candidate):].lstrip("/")
+                            target = base_dest / rel_within if rel_within else base_dest
+                            if name in member_map and member_map[name] != target:
+                                raise BuildPlanError(f"Ambiguous destination for archive member: {name}")
+                            member_map[name] = target
+                else:
+                    if candidate in member_map and member_map[candidate] != base_dest:
+                        raise BuildPlanError(f"Ambiguous destination for archive member: {candidate}")
+                    member_map[candidate] = base_dest
+
+            try:
+                bytes_extracted = safe_extract_zip(
+                    snapshot,
+                    target_dir=root_staging,
+                    member_map=member_map,
+                    is_trusted_snapshot=True,
+                    max_expanded_bytes=self.max_artifact_expanded_bytes,
+                    cumulative_bytes_tracker=cumulative_bytes_tracker,
+                )
+            except ArchiveSecurityError as exc:
+                raise BuildPlanError(f"Extraction security error for {dependency_id}: {exc}") from exc
+            return bytes_extracted
 
     @staticmethod
     def _new_identity() -> Dict[str, str]:
