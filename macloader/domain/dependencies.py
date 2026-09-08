@@ -152,12 +152,14 @@ class ResolvedDependencySet:
     warnings: List[str] = field(default_factory=list)
     is_complete: bool = True
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    plan_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "target_model": self.target_model,
             "target_macos": self.target_macos,
             "policy_version": self.policy_version,
+            "plan_digest": self.plan_digest,
             "catalog_digest": self.catalog_digest,
             "variant": self.variant.value,
             "resolved_dependencies": [d.to_dict() for d in self.resolved_dependencies],
@@ -180,13 +182,15 @@ class ResolvedDependencySet:
             schema_version=CONTRACT_SCHEMA_VERSION,
             policy_version=self.policy_version,
             catalog_digest=self.catalog_digest,
-            entries=[
+            plan_digest=self.plan_digest,
+            entries=tuple(
                 ArtifactLockEntry(
                     dependency_id=item.dependency_id, version=item.version, variant=item.variant.value,
                     asset_name=item.artifact.asset_name, source_url=item.artifact.source_url,
                     sha256=item.artifact.sha256, size_bytes=item.artifact.size_bytes,
+                    subcomponents=tuple(item.subcomponents),
                 ) for item in self.resolved_dependencies
-            ],
+            ),
         )
 
     @classmethod
@@ -197,17 +201,29 @@ class ResolvedDependencySet:
             raise ValueError("Resolved dependency set requires a non-empty catalog_digest")
         if not isinstance(policy_version, str) or not policy_version.strip():
             raise ValueError("Resolved dependency set requires a non-empty policy_version")
+        plan_digest = data.get("plan_digest", "")
+        if not isinstance(plan_digest, str) or not plan_digest.strip():
+            raise ValueError("Resolved dependency set requires a non-empty plan_digest; re-resolve this legacy lock")
+        is_complete = data.get("is_complete", True)
+        if not isinstance(is_complete, bool):
+            raise ValueError("Resolved dependency set is_complete must be a boolean")
+        unresolved_requirements = data.get("unresolved_requirements", [])
+        if not isinstance(unresolved_requirements, list) or not all(isinstance(item, str) for item in unresolved_requirements):
+            raise ValueError("Resolved dependency set unresolved_requirements must be a list of strings")
+        if is_complete != (not unresolved_requirements):
+            raise ValueError("Resolved dependency set is_complete does not match unresolved_requirements")
         return cls(
             target_model=data["target_model"],
             target_macos=data["target_macos"],
             policy_version=policy_version,
+            plan_digest=plan_digest,
             catalog_digest=catalog_digest,
             variant=ArtifactVariant(data["variant"]),
             resolved_dependencies=[
                 ResolvedDependency.from_dict(d) for d in data.get("resolved_dependencies", [])
             ],
-            unresolved_requirements=list(data.get("unresolved_requirements", [])),
+            unresolved_requirements=list(unresolved_requirements),
             warnings=list(data.get("warnings", [])),
-            is_complete=bool(data.get("is_complete", True)),
+            is_complete=is_complete,
             timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         )

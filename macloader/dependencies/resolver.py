@@ -60,11 +60,21 @@ class DependencyResolver:
         """Resolve all external dependencies required for the supplied BuildPlan and target macOS."""
         if not self.catalog:
             raise DependencyNotFoundError("Dependency catalog unavailable.")
-        if not plan.is_actionable or plan.support_state in (CompatibilityState.BLOCKED, CompatibilityState.UNKNOWN):
+        if not plan.support_state.is_usable or plan.support_state in (CompatibilityState.BLOCKED, CompatibilityState.UNKNOWN):
             raise DependencyNotFoundError(
                 "Dependency resolution is blocked because the hardware plan is not actionable "
                 f"(state={plan.support_state.value})."
             )
+        model = self.db.get_model(plan.target_model)
+        if model is None:
+            model = next(
+                (candidate for candidate in self.db.models.values() if candidate.display_name.lower() == plan.target_model.lower()),
+                None,
+            )
+        if model is None:
+            raise DependencyNotFoundError(f"Dependency resolution is blocked because the hardware model is not in the verified catalog: '{plan.target_model}'")
+        if not plan.policy_version or plan.policy_version != self.catalog.policy_version:
+            raise DependencyNotFoundError("Dependency resolution is blocked because the BuildPlan policy is stale or missing")
 
         target_macos = plan.target_macos.lower()
         os_profile = self.db.get_macos(target_macos)
@@ -207,7 +217,7 @@ class DependencyResolver:
                     reason=reason,
                     required_by=req_by,
                     is_transitive=is_transitive,
-                    subcomponents=spec.subcomponents,
+                    subcomponents=list(spec.subcomponents),
                 )
             )
 
@@ -218,6 +228,7 @@ class DependencyResolver:
             target_model=plan.target_model,
             target_macos=plan.target_macos,
             policy_version=self.catalog.policy_version,
+            plan_digest=plan.canonical_digest(),
             catalog_digest=catalog_digest,
             variant=variant,
             resolved_dependencies=resolved_list,

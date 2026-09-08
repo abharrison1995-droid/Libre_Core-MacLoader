@@ -55,13 +55,13 @@ def test_full_dependency_pipeline_with_mock_downloads(tmp_path: Path, t480s_base
                 return
         dest_path.write_bytes(b"fallback")
 
-    results = orchestrator.fetch_dependencies(dep_set, transport=mock_matching_transport)
+    results = orchestrator.fetch_dependencies(dep_set, transport=mock_matching_transport, plan=plan)
     assert len(results) == len(dep_set.resolved_dependencies)
 
     # 5. Verify cached dependencies
-    status = orchestrator.verify_cached_dependencies(dep_set)
+    status = orchestrator.verify_cached_dependencies(dep_set, plan=plan)
     assert all(status.values()) is True
 
     # 6. Fetch in offline mode should now succeed completely from cache without network
-    offline_results = orchestrator.fetch_dependencies(dep_set, offline=True)
+    offline_results = orchestrator.fetch_dependencies(dep_set, offline=True, plan=plan)
     assert len(offline_results) == len(dep_set.resolved_dependencies)

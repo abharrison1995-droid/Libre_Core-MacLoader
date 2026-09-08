@@ -254,7 +254,7 @@ def deps_fetch_cmd(
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan=plan, variant=ArtifactVariant(variant.upper()))
 
-        results = orchestrator.fetch_dependencies(dep_set=dep_set, offline=offline)
+        results = orchestrator.fetch_dependencies(dep_set=dep_set, offline=offline, plan=plan)
 
         if json_mode:
             res_dict = {
@@ -307,7 +307,7 @@ def deps_verify_cmd(
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan=plan, variant=ArtifactVariant(variant.upper()))
 
-        status = orchestrator.verify_cached_dependencies(dep_set=dep_set)
+        status = orchestrator.verify_cached_dependencies(dep_set=dep_set, plan=plan)
         all_ok = bool(status) and all(status.values())
 
         if json_mode:
@@ -387,7 +387,7 @@ def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline:
         dep_set = orchestrator.resolve_dependencies(plan)
         if not dep_set.is_complete:
             raise click.ClickException("EFI build blocked: unresolved requirements remain in the dependency plan")
-        artifact_paths = orchestrator.fetch_dependencies(dep_set, offline=offline)
+        artifact_paths = orchestrator.fetch_dependencies(dep_set, offline=offline, plan=plan)
         result = orchestrator.build_efi(plan, dep_set, artifact_paths, output)
         click.echo(json.dumps({"status": result.validation.status, "output": str(result.output_dir), "manifest": result.manifest.to_dict()}, indent=2))
     except MacLoaderError as e:

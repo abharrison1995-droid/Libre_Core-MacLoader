@@ -88,7 +88,7 @@ def test_offline_fetch_mode_raises_on_cache_miss(tmp_path: Path, t480s_baseline_
     dep_set = orchestrator.resolve_dependencies(plan)
 
     with pytest.raises(ArtifactDownloadError) as exc:
-        orchestrator.fetch_dependencies(dep_set, offline=True)
+        orchestrator.fetch_dependencies(dep_set, offline=True, plan=plan)
     assert "Offline mode: the following required artifacts are missing" in str(exc.value)
 
 

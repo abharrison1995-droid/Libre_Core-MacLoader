@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 CONTRACT_SCHEMA_VERSION = "0.1"
@@ -22,12 +22,13 @@ class ArtifactLockEntry:
     source_url: str
     sha256: str
     size_bytes: int
+    subcomponents: Tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "dependency_id": self.dependency_id, "version": self.version, "variant": self.variant,
             "asset_name": self.asset_name, "source_url": self.source_url, "sha256": self.sha256,
-            "size_bytes": self.size_bytes,
+            "size_bytes": self.size_bytes, "subcomponents": list(self.subcomponents),
         }
 
 
@@ -36,12 +37,13 @@ class ArtifactLock:
     schema_version: str
     policy_version: str
     catalog_digest: str
-    entries: List[ArtifactLockEntry] = field(default_factory=list)
+    entries: Tuple[ArtifactLockEntry, ...] = field(default_factory=tuple)
+    plan_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema_version": self.schema_version, "policy_version": self.policy_version,
-            "catalog_digest": self.catalog_digest,
+            "catalog_digest": self.catalog_digest, "plan_digest": self.plan_digest,
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
@@ -70,6 +72,10 @@ class ToolchainSelection:
             "host_platform": self.host_platform, "host_architecture": self.host_architecture,
             "provenance": dict(self.provenance),
         }
+
+    @property
+    def digest(self) -> str:
+        return _digest(self.to_dict())
 
 
 @dataclass(frozen=True)
@@ -108,11 +114,14 @@ class BuildManifest:
     artifact_lock_digest: str
     validation_report: str
     output_paths: Dict[str, str] = field(default_factory=dict)
+    toolchain_digest: str = ""
+    identity_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema_version": self.schema_version, "build_digest": self.build_digest,
             "target_model": self.target_model, "target_macos": self.target_macos,
             "artifact_lock_digest": self.artifact_lock_digest, "validation_report": self.validation_report,
+            "toolchain_digest": self.toolchain_digest, "identity_digest": self.identity_digest,
             "output_paths": dict(self.output_paths),
         }

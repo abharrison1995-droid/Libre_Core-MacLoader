@@ -1,6 +1,7 @@
 """High-level orchestrator coordinating detection, compatibility, BuildPlan, and dependency workflows."""
 
 import logging
+import platform
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
@@ -24,6 +25,8 @@ from macloader.domain.dependencies import (
     DependencySpec,
     ResolvedDependencySet,
 )
+from macloader.domain.contracts import ToolchainSelection
+from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.exceptions import ArtifactDownloadError
 
@@ -39,7 +42,7 @@ class Orchestrator:
         self._resolver: Optional[DependencyResolver] = None
         self._cache: Optional[CacheManager] = None
         self._cache_dir = cache_dir
-        self.builder = EfiBuilder()
+        self.builder = EfiBuilder(db=self.db)
 
     @property
     def resolver(self) -> DependencyResolver:
@@ -106,12 +109,17 @@ class Orchestrator:
         dep_set: ResolvedDependencySet,
         offline: bool = False,
         transport: Optional[Callable[[str, Path], None]] = None,
+        *,
+        plan: Optional[BuildPlan] = None,
     ) -> Dict[str, Path]:
         """Acquire and cache all resolved dependencies, verifying their SHA-256 integrity."""
         downloader = Downloader(transport=transport)
         results: Dict[str, Path] = {}
         missing_offline: List[str] = []
 
+        if plan is None:
+            raise ArtifactDownloadError("Dependency acquisition requires the BuildPlan bound to the lock")
+        self._validate_dependency_set(plan, dep_set)
         if not dep_set.resolved_dependencies:
             raise ArtifactDownloadError("Cannot fetch an empty resolved dependency set.")
         if not dep_set.catalog_digest or dep_set.catalog_digest != self.resolver.catalog_digest():
@@ -154,9 +162,15 @@ class Orchestrator:
 
         return results
 
-    def verify_cached_dependencies(self, dep_set: ResolvedDependencySet) -> Dict[str, bool]:
+    def verify_cached_dependencies(self, dep_set: ResolvedDependencySet, *, plan: Optional[BuildPlan] = None) -> Dict[str, bool]:
         """Verify the integrity of all cached artifacts belonging to the resolved set."""
         status_map: Dict[str, bool] = {}
+        if plan is None:
+            return {dep.dependency_id: False for dep in dep_set.resolved_dependencies}
+        try:
+            self._validate_dependency_set(plan, dep_set)
+        except ArtifactDownloadError:
+            return {dep.dependency_id: False for dep in dep_set.resolved_dependencies}
         if not dep_set.catalog_digest or dep_set.catalog_digest != self.resolver.catalog_digest():
             return {dep.dependency_id: False for dep in dep_set.resolved_dependencies}
         for dep in dep_set.resolved_dependencies:
@@ -172,5 +186,35 @@ class Orchestrator:
                 )
         return status_map
 
-    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None) -> EfiBuildResult:
-        return self.builder.build(plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity)
+    def _validate_dependency_set(self, plan: BuildPlan, dep_set: ResolvedDependencySet) -> None:
+        if dep_set.plan_digest != plan.canonical_digest():
+            raise ArtifactDownloadError("Resolved dependency set is bound to a different BuildPlan")
+        expected = self.resolver.resolve(plan, dep_set.variant)
+        signature = lambda item: (
+            item.dependency_id.lower(), item.project_name, item.version, item.variant.value,
+            tuple(item.subcomponents), item.artifact.to_dict(), item.reason, item.required_by, item.is_transitive,
+        )
+        if [signature(item) for item in dep_set.resolved_dependencies] != [signature(item) for item in expected.resolved_dependencies]:
+            raise ArtifactDownloadError("Resolved dependency set does not exactly match the current BuildPlan resolution")
+        if dep_set.unresolved_requirements != expected.unresolved_requirements:
+            raise ArtifactDownloadError("Resolved dependency set unresolved requirements are stale")
+
+    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None, toolchain: Optional[ToolchainSelection] = None) -> EfiBuildResult:
+        if dep_set.plan_digest != plan.canonical_digest():
+            raise ArtifactDownloadError("Dependency lock is bound to a different BuildPlan")
+        if toolchain is None:
+            opencore = self.db.get_dependency_spec("opencore")
+            if opencore is None:
+                raise ArtifactDownloadError("OpenCore toolchain policy is unavailable")
+            toolchain = ToolchainSelection(
+                schema_version=CONTRACT_SCHEMA_VERSION,
+                opencore_version=opencore.version,
+                ocvalidate_version=opencore.version,
+                acpi_compiler=None,
+                identity_tool=None,
+                recovery_tool=None,
+                host_platform=platform.system().lower(),
+                host_architecture=platform.machine().lower(),
+                provenance={"source": "verified-catalog", "qualification": "pending-s03"},
+            )
+        return self.builder.build(plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity, toolchain=toolchain)

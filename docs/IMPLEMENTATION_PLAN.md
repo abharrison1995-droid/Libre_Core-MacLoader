@@ -9,7 +9,7 @@ This is the active execution plan. It supersedes earlier statements that G0 is c
 | Area | Implemented progress | Remaining qualification / status |
 |---|---|---|
 | Detection and compatibility | Stricter model/component matching, uncertainty propagation, Windows inventory expansion, Linux fixes, input/Bluetooth capabilities | Substantial progress; malformed CIM, sysfs failures, raw evidence and CPU parity remain open (S08-S10, S14) |
-| Plans and dependency contracts | Canonical digests, catalog/policy identity, stale-set checks in acquisition, strict catalog validation | Partial trust boundary: direct EFI builds do not bind exact plan/catalog/lock; serialized readiness needs validation (S02) |
+| Plans and dependency contracts | Canonical plan/catalog/policy digests, exact resolver-set binding in acquisition and EFI publication, component/toolchain/identity manifest binding, strict serialized readiness checks | Real ocvalidate qualification and release validation remain open (S03-S04, G1-G2) |
 | Downloader/cache/archive | Streaming dependency hashes, limits, safe paths, atomic file/index publication, file locking | Lock ownership and concurrent miss handling remain defective; archive copies are redundant (S06-S07, S11) |
 | EFI builder and CLI | `macloader/build/efi.py`, `build`/`validate`, staging, manifests, basic config and identity output; builder unit tests; candidate source now included | Hosted clean-checkout evidence remains pending; no matching ocvalidate, full config/ACPI policy or qualified identity lifecycle (S02-S04, G1-G2) |
 | Recovery | `RecoveryAsset` and `RecoveryAcquirer` implement size/hash checks and an injectable transport | Preliminary helper; whole-file hashing, no total deadline, no tested official product discovery/CLI flow (S05, S12, G4) |
@@ -17,7 +17,7 @@ This is the active execution plan. It supersedes earlier statements that G0 is c
 | CI and packaging | Windows/Linux Python 3.11/3.14 workflow and wheel/sdist smoke jobs defined; dev typing tools present; candidate source included | Local checks green; hosted results and clean-host evidence pending (S01, S13) |
 | Workflow and hardware | CLI exists | Textual TUI, BIOS/installation guidance, distribution qualification and physical acceptance remain open (G6-G7) |
 
-Re-run during this update: `python -m pytest -q` = **79 passed**; `python -m mypy macloader tests` = **clean across 64 files**, on this Windows environment. These results agree with the supplied Terra review. They establish local regression/type status, not correctness of untested safety paths or hosted clean-checkout behavior. The candidate `.gitignore` scopes root output to `/build/`, and the builder is included in the index; CLI imports it at module load.
+Re-run during this implementation batch: `python -m pytest -q` = **79 passed**; `python -m mypy macloader tests` = **clean across 64 files**, on this Windows environment. These results establish local regression/type status, not correctness of untested safety paths or hosted clean-checkout behavior. The candidate `.gitignore` scopes root output to `/build/`, and the builder is included in the index; CLI imports it at module load.
 
 No hosted CI, clean-checkout wheel test, live Recovery qualification, matching ocvalidate execution, USB write or physical installation was performed during this planning update. Existing application changes are preserved. This update changes documentation; the defects below remain open.
 
@@ -25,7 +25,7 @@ No hosted CI, clean-checkout wheel test, live Recovery qualification, matching o
 
 | Gate | Current state | What closes it |
 |---|---|---|
-| G0 foundation | **Reopened / mostly implemented** | S01, S06-S10 and residual contract/regression issues fixed; clean-checkout verification succeeds |
+| G0 foundation | **Reopened / mostly implemented** | S01-S02 and S06-S10 local repairs are implemented; clean-checkout verification and later validation gates remain |
 | G1 policy/toolchain | Partial contracts exist; platform evidence pending | Frozen T480s/Sequoia policy, verified upstream artifacts and host tools |
 | G2 T480s EFI | Prototype exists; **not valid for release** | S02-S04/S11 fixed; complete generated config/ACPI/identity and actual matching ocvalidate pass |
 | G3 T480 variants | Detection fixtures exist; generated variants unqualified | Model-specific builds and negative validation matrix |
