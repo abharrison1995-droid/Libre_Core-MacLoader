@@ -257,3 +257,33 @@ No for release metadata; yes for the remaining G1 policy and toolchain decisions
 ### Follow-up
 - Inspect the selected RELEASE archive members and license files against the catalog destinations.
 - Pin and record matching `Sample.plist`, `ocvalidate`, ACPI compiler, identity tooling and Recovery tooling on the supported host.
+
+---
+
+## Research Item 008 — G1 host-tool availability baseline
+
+### Question
+Are the host executables required for real G1/G2 qualification already available on the current Windows host?
+
+### Sources
+- PowerShell `Get-Command` lookup on the current build host
+- Date inspected: 2026-09-09
+
+### Findings
+- Python 3.14 and Git are available.
+- No `ocvalidate`, `iasl`/`iasl.exe`, or `macserial`/`macserial.exe` is installed or discoverable on `PATH`.
+- The repository's Python validator stubs remain test fixtures only and do not qualify an OpenCore toolchain.
+
+### Decision
+- Keep G1 and G2 qualification open until matching, pinned host tools are acquired and their versions, architectures, sources and SHA-256 values are recorded.
+- Do not promote a caller-supplied or test-only validator to `qualified` based on local availability.
+
+### Confidence
+`HIGH` for this host's current `PATH` state; `PENDING` for the toolchain acquisition and qualification.
+
+### Physical verification required?
+No for the availability check; yes for the resulting EFI and hardware policy.
+
+### Follow-up
+- Acquire the OpenCore 1.0.7 `ocvalidate` and matching `Sample.plist`, plus pinned ACPI and identity tooling, from their primary upstream sources.
+- Capture the sanitized T480s/BIOS/OS snapshot and use it to select the actual policy inputs.
