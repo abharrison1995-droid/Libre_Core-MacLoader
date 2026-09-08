@@ -29,6 +29,11 @@ class BuildPlan:
     policy_version: str = ""
     build_ready: bool = False
 
+    def __post_init__(self) -> None:
+        """Derive readiness from the validated policy inputs at the boundary."""
+        object.__setattr__(self, "is_actionable", self.support_state.is_usable)
+        object.__setattr__(self, "build_ready", self.support_state.is_usable and not self.unresolved_requirements)
+
     def to_dict(self) -> Dict[str, Any]:
         derived_actionable = self.support_state.is_usable
         derived_build_ready = derived_actionable and not self.unresolved_requirements

@@ -5,6 +5,7 @@ from macloader.compatibility.engine import CompatibilityEngine
 from macloader.database.loader import Database
 from macloader.detection.fixture import FixtureHardwareProvider
 from macloader.domain.compatibility import CompatibilityReport, CompatibilityState, SupportDecision
+from macloader.domain.build_plan import BuildPlan
 
 
 def test_generate_build_plan_t480s_tahoe(t480s_baseline_fixture: Path, db: Database) -> None:
@@ -64,3 +65,18 @@ def test_plan_propagates_input_and_bluetooth_requirements(t480s_baseline_fixture
     assert "ps2_trackpad_trackpoint" in plan.required_capabilities
     assert "intel_bluetooth" in plan.required_capabilities
     assert plan.is_actionable is True
+
+
+def test_build_plan_readiness_is_derived_at_construction() -> None:
+    plan = BuildPlan(
+        target_model="Lenovo ThinkPad T480s",
+        target_macos="sequoia",
+        hardware_snapshot_id="snapshot",
+        support_state=CompatibilityState.EXPERIMENTAL,
+        unresolved_requirements=[],
+        is_actionable=False,
+        build_ready=False,
+    )
+
+    assert plan.is_actionable is True
+    assert plan.build_ready is True
