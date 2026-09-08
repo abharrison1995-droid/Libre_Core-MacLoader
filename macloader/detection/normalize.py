@@ -59,3 +59,48 @@ def extract_machine_type(product_version: Optional[str], product_name: Optional[
             return match_classic.group(1)
 
     return None
+
+
+def infer_cpu_generation(model_name: Optional[str]) -> Optional[str]:
+    """Infer Intel CPU microarchitecture generation consistently across host platforms.
+
+    Supports Intel mobile Core architectures found in ThinkPad models:
+    - 8th Gen Quad-Core (Kaby Lake Refresh): 8250U, 8350U, 8550U, 8650U, 8th Gen
+    - 7th Gen Dual-Core (Kaby Lake): 7200U, 7300U, 7500U, 7600U, 7th Gen
+    - 6th Gen Dual-Core (Skylake): 6200U, 6300U, 6500U, 6600U, 6th Gen
+    - 10th Gen (Comet Lake): 10210U, 10510U, 10710U
+    - 10th Gen (Ice Lake): 1065G7, Ice Lake
+    """
+    if not isinstance(model_name, str) or not model_name.strip():
+        return None
+    name = model_name.upper()
+
+    # 8th Gen (Kaby Lake Refresh)
+    if any(token in name for token in ("8250U", "8350U", "8550U", "8650U")):
+        return "Kaby Lake Refresh"
+    if "8TH GEN" in name:
+        return "Kaby Lake Refresh"
+    if re.search(r"\bI[357]-8\d{3}U\b", name):
+        return "Kaby Lake Refresh"
+
+    # 7th Gen (Kaby Lake)
+    if any(token in name for token in ("7200U", "7300U", "7500U", "7600U")):
+        return "Kaby Lake"
+    if "7TH GEN" in name:
+        return "Kaby Lake"
+    if re.search(r"\bI[357]-7\d{3}U\b", name):
+        return "Kaby Lake"
+
+    # 6th Gen (Skylake)
+    if any(token in name for token in ("6200U", "6300U", "6500U", "6600U")):
+        return "Skylake"
+    if "6TH GEN" in name:
+        return "Skylake"
+
+    # 10th Gen (Comet Lake / Ice Lake)
+    if any(token in name for token in ("10210U", "10510U", "10710U")):
+        return "Comet Lake"
+    if "1065G7" in name or "ICE LAKE" in name:
+        return "Ice Lake"
+
+    return None

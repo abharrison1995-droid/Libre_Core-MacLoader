@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 from macloader.detection.base import BaseHardwareProvider
 from macloader.detection.normalize import (
     extract_machine_type,
+    infer_cpu_generation,
     normalize_dmi_string,
     normalize_hex_id,
 )
@@ -296,7 +297,7 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     threads = int(cpu_data.get("NumberOfLogicalProcessors") or 0)
                 except (TypeError, ValueError):
                     threads = 0
-                gen = "Kaby Lake Refresh" if any(token in cpu_name for token in ("8250U", "8350U", "8550U", "8650U")) else None
+                gen = infer_cpu_generation(cpu_name)
                 cpu = CpuInfo(
                     model_name=cpu_name,
                     vendor="GenuineIntel" if "intel" in cpu_name.lower() else "Unknown",

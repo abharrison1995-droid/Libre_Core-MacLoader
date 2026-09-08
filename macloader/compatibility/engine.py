@@ -20,6 +20,21 @@ from macloader.exceptions import HardwareContractError, UnsupportedMacOSError
 logger = logging.getLogger(__name__)
 
 
+def _deduplicate_preserve_order(items: Optional[List[str]]) -> List[str]:
+    """Deduplicate a collection of strings while preserving the original encounter order."""
+    if not items:
+        return []
+    seen = set()
+    result: List[str] = []
+    for item in items:
+        key = item if isinstance(item, (str, int, float, bool, tuple)) else str(item)
+        if key not in seen:
+            seen.add(key)
+            result.append(str(item))
+    return result
+
+
+
 class CompatibilityEngine:
     """Evaluates hardware compatibility against a target macOS version and generates BuildPlans."""
 
@@ -59,8 +74,8 @@ class CompatibilityEngine:
                 overall_state=blocked_state,
                 model_decision=model_decision,
                 component_results=[],
-                warnings=warnings,
-                unresolved_requirements=unresolved_requirements,
+                warnings=_deduplicate_preserve_order(warnings),
+                unresolved_requirements=_deduplicate_preserve_order(unresolved_requirements),
                 can_generate_build_plan=False,
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
@@ -382,8 +397,8 @@ class CompatibilityEngine:
             overall_state=overall_state,
             model_decision=model_decision,
             component_results=component_results,
-            warnings=warnings,
-            unresolved_requirements=unresolved_requirements,
+            warnings=_deduplicate_preserve_order(warnings),
+            unresolved_requirements=_deduplicate_preserve_order(unresolved_requirements),
             can_generate_build_plan=can_generate_build_plan,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
@@ -606,7 +621,7 @@ class CompatibilityEngine:
             support_state=report.overall_state,
             required_capabilities=required_capabilities,
             planned_components=planned_components,
-            unresolved_requirements=unresolved_requirements,
+            unresolved_requirements=_deduplicate_preserve_order(unresolved_requirements),
             warnings=report.warnings,
             is_actionable=report.can_generate_build_plan,
             build_ready=report.can_generate_build_plan and not unresolved_requirements,

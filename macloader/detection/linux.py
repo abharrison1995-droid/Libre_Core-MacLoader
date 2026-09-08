@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from macloader.detection.base import BaseHardwareProvider
 from macloader.detection.normalize import (
     extract_machine_type,
+    infer_cpu_generation,
     normalize_dmi_string,
     normalize_hex_id,
 )
@@ -211,13 +212,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 microcode = val
 
         # Infer generation if possible
-        generation = None
-        if "8250U" in model_name or "8350U" in model_name or "8550U" in model_name or "8650U" in model_name:
-            generation = "Kaby Lake Refresh"
-        elif "7200U" in model_name or "7300U" in model_name or "7500U" in model_name or "7600U" in model_name:
-            generation = "Kaby Lake"
-        elif "Intel" in model_name and "8th Gen" in model_name:
-            generation = "Kaby Lake Refresh"
+        generation = infer_cpu_generation(model_name)
 
         return CpuInfo(
             model_name=model_name,

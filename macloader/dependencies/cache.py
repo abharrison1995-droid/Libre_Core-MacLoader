@@ -379,7 +379,7 @@ class CacheManager:
         artifact = spec.get_artifact(variant)
         expected_sha = (artifact.sha256 if artifact else "unknown")[:12]
         for value, label in ((spec.id, "dependency ID"), (spec.version, "version")):
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", value) or ".." in value:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", value) or ".." in value:
                 raise ChecksumMismatchError(f"Unsafe {label} for cache path: {value!r}")
         suffix = "." + (artifact.archive_type if artifact else "zip").replace("/", "_")
         filename = f"{spec.id}_{spec.version}_{variant.value}_{expected_sha}{suffix}"

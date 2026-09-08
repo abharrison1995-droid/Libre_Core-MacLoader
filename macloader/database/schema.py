@@ -193,7 +193,7 @@ class DependencyCatalogSchema:
                 if not isinstance(item[field_name], str) or not item[field_name].strip():
                     raise DatabaseValidationError(f"Dependency field '{field_name}' must be a non-empty string in {filename}")
             for field_name in ("version", "release_tag"):
-                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", item[field_name]):
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", item[field_name]) or ".." in item[field_name]:
                     raise DatabaseValidationError(f"Unsafe {field_name} in dependency definition in {filename}")
             if not isinstance(item.get("dependencies", []), list) or not all(isinstance(value, str) for value in item.get("dependencies", [])):
                 raise DatabaseValidationError(f"'dependencies' for '{item.get('id', '')}' must be a list of strings")
