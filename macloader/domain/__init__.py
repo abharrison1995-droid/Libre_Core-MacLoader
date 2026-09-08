@@ -18,6 +18,8 @@ from macloader.domain.hardware import (
     DisplayInfo,
     ThunderboltInfo,
     HardwareSnapshot,
+    normalize_inventory_status,
+    normalize_raw_evidence,
 )
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.dependencies import (
@@ -44,6 +46,8 @@ __all__ = [
     "DisplayInfo",
     "ThunderboltInfo",
     "HardwareSnapshot",
+    "normalize_inventory_status",
+    "normalize_raw_evidence",
     "BuildPlan",
     "ArtifactVariant",
     "DependencyArtifact",

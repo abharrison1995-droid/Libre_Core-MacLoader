@@ -11,6 +11,10 @@ class HardwareDetectionError(MacLoaderError):
     """Raised when hardware detection fails or encounters unexpected errors."""
 
 
+class HardwareContractError(HardwareDetectionError):
+    """Raised when hardware snapshot evidence or schema contract is violated."""
+
+
 class ProviderExecutionError(HardwareDetectionError):
     """Raised when an underlying detection command or data source fails."""
 

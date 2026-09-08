@@ -6,6 +6,8 @@ import json
 from typing import Any, Dict, List, Optional
 import uuid
 
+from macloader.exceptions import HardwareContractError
+
 
 @dataclass
 class PciDevice:
@@ -283,6 +285,35 @@ class ThunderboltInfo:
         )
 
 
+def normalize_inventory_status(status: Any) -> Dict[str, bool]:
+    """Normalize inventory status mapping ensuring all values are strictly boolean."""
+    if not isinstance(status, dict):
+        return {}
+    normalized: Dict[str, bool] = {}
+    for k, v in status.items():
+        if isinstance(k, str):
+            # Enforce strict bool (avoid int 1 or non-empty string truthiness)
+            normalized[k] = (type(v) is bool and v is True)
+    return normalized
+
+
+def normalize_raw_evidence(evidence: Any) -> Dict[str, Any]:
+    """Normalize raw evidence ensuring it is a dictionary with valid nested structures."""
+    if evidence is None:
+        return {}
+    if not isinstance(evidence, dict):
+        raise HardwareContractError(f"raw_evidence must be a dictionary or null, got {type(evidence).__name__}")
+    normalized = dict(evidence)
+    if "inventory_status" in normalized:
+        inv = normalized["inventory_status"]
+        if inv is not None and not isinstance(inv, dict):
+            raise HardwareContractError(
+                f"inventory_status in raw_evidence must be a dictionary or null, got {type(inv).__name__}"
+            )
+        normalized["inventory_status"] = normalize_inventory_status(inv)
+    return normalized
+
+
 @dataclass
 class HardwareSnapshot:
     """Complete, normalized snapshot of host hardware evidence."""
@@ -311,6 +342,30 @@ class HardwareSnapshot:
     input_devices: List[InputDeviceInfo] = field(default_factory=list)
     displays: List[DisplayInfo] = field(default_factory=list)
     raw_evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate and normalize raw_evidence and nested inventory_status at boundary."""
+        if self.raw_evidence is None:
+            self.raw_evidence = {}
+        elif not isinstance(self.raw_evidence, dict):
+            raise HardwareContractError(
+                f"raw_evidence must be a dictionary or null, got {type(self.raw_evidence).__name__}"
+            )
+        elif "inventory_status" in self.raw_evidence:
+            inv = self.raw_evidence["inventory_status"]
+            if inv is not None and not isinstance(inv, dict):
+                raise HardwareContractError(
+                    f"inventory_status in raw_evidence must be a dictionary or null, got {type(inv).__name__}"
+                )
+            self.raw_evidence["inventory_status"] = normalize_inventory_status(inv)
+
+    def get_inventory_status(self) -> Dict[str, bool]:
+        """Safely extract normalized inventory status dictionary from raw evidence."""
+        raw_ev = getattr(self, "raw_evidence", None)
+        if not isinstance(raw_ev, dict):
+            return {}
+        inv = raw_ev.get("inventory_status")
+        return normalize_inventory_status(inv)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -344,17 +399,52 @@ class HardwareSnapshot:
         return json.dumps(self.to_dict(), indent=indent)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "HardwareSnapshot":
+    def from_dict(cls, data: Any) -> "HardwareSnapshot":
+        if not isinstance(data, dict):
+            raise HardwareContractError(
+                f"Hardware snapshot data must be a dictionary, got {type(data).__name__}"
+            )
+
+        raw_ev = data.get("raw_evidence")
+        normalized_raw = normalize_raw_evidence(raw_ev)
+
         cpu_data = data.get("cpu")
+        if cpu_data is not None and not isinstance(cpu_data, dict):
+            raise HardwareContractError(f"cpu must be a dictionary or null, got {type(cpu_data).__name__}")
+
         igpu_data = data.get("igpu")
+        if igpu_data is not None and not isinstance(igpu_data, dict):
+            raise HardwareContractError(f"igpu must be a dictionary or null, got {type(igpu_data).__name__}")
+
         tb_data = data.get("thunderbolt")
+        if tb_data is not None and not isinstance(tb_data, dict):
+            raise HardwareContractError(f"thunderbolt must be a dictionary or null, got {type(tb_data).__name__}")
+
+        def _safe_list(key: str) -> List[Any]:
+            val = data.get(key)
+            if val is None:
+                return []
+            if not isinstance(val, list):
+                raise HardwareContractError(f"Field '{key}' must be a list, got {type(val).__name__}")
+            return val
+
+        dgpus = [GpuInfo.from_dict(g) for g in _safe_list("dgpus") if isinstance(g, dict)]
+        audio = [AudioInfo.from_dict(a) for a in _safe_list("audio") if isinstance(a, dict)]
+        ethernet = [NetworkInfo.from_dict(e) for e in _safe_list("ethernet") if isinstance(e, dict)]
+        wifi = [NetworkInfo.from_dict(w) for w in _safe_list("wifi") if isinstance(w, dict)]
+        bluetooth = [NetworkInfo.from_dict(b) for b in _safe_list("bluetooth") if isinstance(b, dict)]
+        storage = [StorageInfo.from_dict(s) for s in _safe_list("storage") if isinstance(s, dict)]
+        usb_controllers = [PciDevice.from_dict(u) for u in _safe_list("usb_controllers") if isinstance(u, dict)]
+        usb_devices = [UsbDevice.from_dict(ud) for ud in _safe_list("usb_devices") if isinstance(ud, dict)]
+        input_devices = [InputDeviceInfo.from_dict(i) for i in _safe_list("input_devices") if isinstance(i, dict)]
+        displays = [DisplayInfo.from_dict(d) for d in _safe_list("displays") if isinstance(d, dict)]
 
         return cls(
-            snapshot_id=data.get("snapshot_id", str(uuid.uuid4())),
-            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            manufacturer=data.get("manufacturer", ""),
-            product_name=data.get("product_name", ""),
-            product_version=data.get("product_version", ""),
+            snapshot_id=str(data.get("snapshot_id") or uuid.uuid4()),
+            timestamp=str(data.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+            manufacturer=str(data.get("manufacturer") or ""),
+            product_name=str(data.get("product_name") or ""),
+            product_version=str(data.get("product_version") or ""),
             machine_type=data.get("machine_type"),
             bios_version=data.get("bios_version"),
             bios_date=data.get("bios_date"),
@@ -362,16 +452,16 @@ class HardwareSnapshot:
             uuid=data.get("uuid"),
             cpu=CpuInfo.from_dict(cpu_data) if cpu_data else None,
             igpu=GpuInfo.from_dict(igpu_data) if igpu_data else None,
-            dgpus=[GpuInfo.from_dict(g) for g in data.get("dgpus", [])],
-            audio=[AudioInfo.from_dict(a) for a in data.get("audio", [])],
-            ethernet=[NetworkInfo.from_dict(e) for e in data.get("ethernet", [])],
-            wifi=[NetworkInfo.from_dict(w) for w in data.get("wifi", [])],
-            bluetooth=[NetworkInfo.from_dict(b) for b in data.get("bluetooth", [])],
-            storage=[StorageInfo.from_dict(s) for s in data.get("storage", [])],
-            usb_controllers=[PciDevice.from_dict(u) for u in data.get("usb_controllers", [])],
-            usb_devices=[UsbDevice.from_dict(ud) for ud in data.get("usb_devices", [])],
+            dgpus=dgpus,
+            audio=audio,
+            ethernet=ethernet,
+            wifi=wifi,
+            bluetooth=bluetooth,
+            storage=storage,
+            usb_controllers=usb_controllers,
+            usb_devices=usb_devices,
             thunderbolt=ThunderboltInfo.from_dict(tb_data) if tb_data else None,
-            input_devices=[InputDeviceInfo.from_dict(i) for i in data.get("input_devices", [])],
-            displays=[DisplayInfo.from_dict(d) for d in data.get("displays", [])],
-            raw_evidence=data.get("raw_evidence", {}),
+            input_devices=input_devices,
+            displays=displays,
+            raw_evidence=normalized_raw,
         )

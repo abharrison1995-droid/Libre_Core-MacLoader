@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import logging
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from macloader.compatibility.model_matcher import match_model
 from macloader.database.loader import Database, get_database
@@ -15,7 +15,7 @@ from macloader.domain.compatibility import (
     SupportDecision,
 )
 from macloader.domain.hardware import HardwareSnapshot
-from macloader.exceptions import UnsupportedMacOSError
+from macloader.exceptions import HardwareContractError, UnsupportedMacOSError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,12 @@ class CompatibilityEngine:
 
     def evaluate(self, snapshot: HardwareSnapshot, target_macos: str = "sequoia") -> CompatibilityReport:
         """Perform full compatibility evaluation for the given snapshot and target macOS."""
+        if snapshot is None or not hasattr(snapshot, "manufacturer"):
+            raise HardwareContractError(f"Expected HardwareSnapshot instance, got {type(snapshot).__name__}")
+
+        if not isinstance(target_macos, str):
+            raise UnsupportedMacOSError(f"Invalid macOS target: '{target_macos}'. Target must be a string.")
+
         os_key = target_macos.strip().lower()
         macos_profile = self.db.get_macos(os_key)
         if not macos_profile:
@@ -112,7 +118,9 @@ class CompatibilityEngine:
             comp = self._match_component_by_pci("graphics", dgpu_pci_id) if dgpu_pci_id else None
             if comp and os_key in comp.macos_policies:
                 policy = comp.macos_policies[os_key]
-                if comp.id == "nvidia-geforce-mx150" and not model_schema.options.get("has_mx150_option", False):
+                options = getattr(model_schema, "options", None)
+                has_mx150 = bool(isinstance(options, dict) and options.get("has_mx150_option", False))
+                if comp.id == "nvidia-geforce-mx150" and not has_mx150:
                     component_results.append(self._blocked_result(
                         "graphics_dgpu", comp.id, dgpu.name,
                         "This model policy does not declare an MX150 option; refusing to plan for the detected discrete GPU.",
@@ -305,15 +313,30 @@ class CompatibilityEngine:
         # that the corresponding inventory was complete. Older providers do not
         # emit completeness metadata, so remain conservative for essential
         # device classes when it is absent.
-        completeness = snapshot.raw_evidence.get("inventory_status", {})
-        if not isinstance(completeness, dict):
-            completeness = {}
+        # Never call .get() directly on arbitrary imported raw_evidence types!
+        raw_ev = getattr(snapshot, "raw_evidence", None)
+        completeness: Dict[str, bool] = {}
+        if isinstance(raw_ev, dict):
+            inv = raw_ev.get("inventory_status")
+            if isinstance(inv, dict):
+                for cat, status in inv.items():
+                    if isinstance(cat, str) and (type(status) is bool and status is True):
+                        completeness[cat] = True
+        elif hasattr(snapshot, "get_inventory_status") and callable(snapshot.get_inventory_status):
+            try:
+                inv_res = snapshot.get_inventory_status()
+                completeness = inv_res if isinstance(inv_res, dict) else {}
+            except Exception:
+                completeness = {}
+
         inventory_fields = {
             "audio": "audio", "ethernet": "ethernet", "wifi": "wifi",
             "bluetooth": "bluetooth", "storage": "storage", "input": "input_devices",
         }
         for category, field_name in inventory_fields.items():
-            if not getattr(snapshot, field_name) and completeness.get(category) is not True:
+            items = getattr(snapshot, field_name, [])
+            is_empty = not items if isinstance(items, (list, tuple, set, dict)) else True
+            if is_empty and completeness.get(category) is not True:
                 component_results.append(self._unknown_result(category, f"unknown-{category}-inventory", "Unknown", "Inventory for this device class was not confirmed complete."))
 
         # Compute overall state from the model policy and every observed
@@ -365,13 +388,21 @@ class CompatibilityEngine:
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
+    @staticmethod
+    def _get_rule_strings(rules: Dict[str, Any], key: str) -> List[str]:
+        """Extract a list of lowercase string values for a given rule key safely."""
+        val = rules.get(key)
+        if isinstance(val, (list, tuple, set)):
+            return [str(item).lower() for item in val if item is not None]
+        return []
+
     def _match_component_by_pci(self, category: str, canonical_pci_id: Optional[str]) -> Optional[ComponentSchema]:
         """Find a component definition matching a canonical PCI ID."""
         if not canonical_pci_id:
             return None
         for comp in self.db.get_components_by_category(category):
-            rules = comp.match_rules
-            pci_ids = [pid.lower() for pid in rules.get("pci_ids", [])]
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            pci_ids = self._get_rule_strings(rules, "pci_ids")
             if canonical_pci_id.lower() in pci_ids:
                 return comp
         return None
@@ -380,13 +411,15 @@ class CompatibilityEngine:
         if not canonical_usb_id:
             return None
         for comp in self.db.get_components_by_category("bluetooth"):
-            if canonical_usb_id.lower() in [str(v).lower() for v in comp.match_rules.get("usb_ids", [])]:
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            if canonical_usb_id.lower() in self._get_rule_strings(rules, "usb_ids"):
                 return comp
         return None
 
     def _match_component_by_kind(self, category: str, kind: str) -> Optional[ComponentSchema]:
         for comp in self.db.get_components_by_category(category):
-            if kind.lower() in [str(v).lower() for v in comp.match_rules.get("kinds", [])]:
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            if kind.lower() in self._get_rule_strings(rules, "kinds"):
                 return comp
         return None
 
@@ -395,10 +428,11 @@ class CompatibilityEngine:
         kind = str(getattr(inp, "kind", "")).lower()
         bus = str(getattr(inp, "bus", "")).lower()
         for comp in self.db.get_components_by_category("input"):
-            rules = comp.match_rules
-            if kind not in [str(v).lower() for v in rules.get("kinds", [])]:
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            kinds = self._get_rule_strings(rules, "kinds")
+            if kind not in kinds:
                 continue
-            allowed_buses = [str(v).lower() for v in rules.get("buses", [])]
+            allowed_buses = self._get_rule_strings(rules, "buses")
             if allowed_buses and bus not in allowed_buses:
                 continue
             return comp
@@ -406,10 +440,12 @@ class CompatibilityEngine:
 
     def _match_component_by_codec(self, codec_id: Optional[str], codec_name: Optional[str]) -> Optional[ComponentSchema]:
         for comp in self.db.get_components_by_category("audio"):
-            rules = comp.match_rules
-            if codec_id and codec_id.lower() in [str(v).lower() for v in rules.get("codec_ids", [])]:
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            codec_ids = self._get_rule_strings(rules, "codec_ids")
+            if codec_id and codec_id.lower() in codec_ids:
                 return comp
-            if codec_name and any(str(v).lower() in codec_name.lower() for v in rules.get("codec_names", [])):
+            codec_names = self._get_rule_strings(rules, "codec_names")
+            if codec_name and any(cn in codec_name.lower() for cn in codec_names):
                 return comp
             if codec_name and "alc257" in codec_name.lower() and comp.id == "realtek-alc257":
                 return comp
@@ -422,15 +458,18 @@ class CompatibilityEngine:
         pci_id = pci.canonical_id.lower() if pci else None
         device_class = (pci.device_class or "")[:4].lower() if pci else None
         for comp in self.db.get_components_by_category("storage"):
-            rules = comp.match_rules
-            if pci_id and pci_id in [str(v).lower() for v in rules.get("pci_ids", [])]:
+            rules = comp.match_rules if isinstance(comp.match_rules, dict) else {}
+            pci_ids = self._get_rule_strings(rules, "pci_ids")
+            if pci_id and pci_id in pci_ids:
                 return comp
-            if device_class and device_class in [str(v).lower()[:4] for v in rules.get("device_classes", [])]:
+            device_classes = [c[:4] for c in self._get_rule_strings(rules, "device_classes")]
+            if device_class and device_class in device_classes:
                 return comp
-            patterns = [str(v).lower().replace("*", "") for v in rules.get("model_patterns", [])]
+            patterns = [p.replace("*", "") for p in self._get_rule_strings(rules, "model_patterns")]
             if any(pattern and pattern in model for pattern in patterns):
                 return comp
-            if kind and kind in [str(v).lower() for v in rules.get("kinds", [])]:
+            kinds = self._get_rule_strings(rules, "kinds")
+            if kind and kind in kinds:
                 return comp
         return None
 
