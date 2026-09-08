@@ -287,3 +287,38 @@ No for the availability check; yes for the resulting EFI and hardware policy.
 ### Follow-up
 - Acquire the OpenCore 1.0.7 `ocvalidate` and matching `Sample.plist`, plus pinned ACPI and identity tooling, from their primary upstream sources.
 - Capture the sanitized T480s/BIOS/OS snapshot and use it to select the actual policy inputs.
+
+---
+
+## Research Item 009 — OpenCore 1.0.7 Windows validator record
+
+### Question
+Does the pinned OpenCore 1.0.7 release contain the matching Windows validator and schema source needed to begin G2 qualification?
+
+### Sources
+- Official release asset: https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip
+- Official OpenCore 1.0.7 release record: https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.7
+- Date inspected: 2026-09-09
+
+### Verified record
+- Archive: `OpenCore-1.0.7-RELEASE.zip`, 10,437,696 bytes, SHA-256 `2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e`.
+- Schema source: `Docs/Sample.plist`, 55,244 bytes, SHA-256 `1bd3a503d2d71b531249e9d52fb1b8307e61547f6e593743da4969e5e2574203`.
+- Windows validator: `Utilities/ocvalidate/ocvalidate.exe`, 615,895 bytes, SHA-256 `53e50246a9dc3006b938cea25c040a027b9ca9e0f700f7c8bdb0004f487b688f`.
+- Validator documentation: `Utilities/ocvalidate/README.md`, 10,160 bytes, SHA-256 `9998ac0d8f4c07419dade27a4b1b53a86d973b645f1bee66e3f291261ea18229`.
+- Executing the Windows validator without a config prints that it is compatible only with OpenCore 1.0.7 and returns its usage failure status, confirming the version banner but not a configuration pass.
+
+### Decision
+- Use this exact archive, Sample.plist member and Windows validator hash as the initial G1/G2 toolchain record.
+- Keep tool qualification at `version-verified/config-unqualified` until the validator is run against a generated T480s config and the remaining ACPI, identity and Recovery tools are independently pinned.
+- Do not commit the executable into the source tree; acquire it into a controlled local toolchain directory and bind its path and digest through the toolchain contract.
+
+### Confidence
+`HIGH` for the OpenCore archive/member provenance and version match; `PENDING` for full toolchain qualification.
+
+### Physical verification required?
+No for the version check; yes for the generated policy and final hardware acceptance.
+
+### Follow-up
+- Add a trusted toolchain record/loader that rejects caller-created `qualified` selections.
+- Acquire and record ACPICA `iasl`, identity generation and Recovery tooling with matching host architecture and hashes.
+- Run `ocvalidate.exe` against the first schema-based T480s config after the hardware policy is frozen.
