@@ -25,7 +25,14 @@ jobs:
       - name: Install package and development tools
         run: python -m pip install -e ".[dev]"
       - name: Run tests
-        run: python -m pytest -q --cov=macloader --cov-branch --cov-report=term-missing --cov-report=xml
+        run: python -m pytest -q --cov=macloader --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=79
+      - name: Publish coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: error
       - name: Run type checks
         run: python -m mypy macloader tests
 

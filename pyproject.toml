@@ -46,3 +46,11 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[tool.coverage.run]
+branch = true
+source = ["macloader"]
+
+[tool.coverage.report]
+fail_under = 79
+show_missing = true

@@ -8,7 +8,7 @@ It is an independent sibling project to [Libre_Core-AutoLoader](https://github.c
 
 ## Current Status: v0.0.4
 
-**2026-09-08 Terra follow-up:** the working tree has substantial foundation hardening and preliminary EFI/build-validation, Recovery and removable-media code. Local verification is **79 tests passing, mypy clean across 63 files**. It is not release-ready: EFI locks lack complete plan/catalog binding, structural-only validation incorrectly reports VALID, and hosted clean-checkout evidence remains pending. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the open fixes, qualification gates and **Sequoia-first** route to shipping.
+**2026-09-08 implementation update:** S12 Recovery and removable-media guards are implemented and committed. Local verification is **249 tests passing, mypy clean across 72 files, and 79.89% branch coverage against a 79% CI gate**. It is not release-ready: EFI trust and real-validator qualification, official Recovery acquisition, host USB adapters, clean-checkout CI evidence and physical acceptance remain open. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining gates and **Sequoia-first** route to shipping.
 
 This repository currently implements **milestones v0.0.1 through v0.0.4**:
 - **v0.0.1**: ThinkPad T480s hardware detection (`20L7`, `20L8`)
@@ -17,7 +17,7 @@ This repository currently implements **milestones v0.0.1 through v0.0.4**:
 - **v0.0.4**: OpenCore dependency catalog, DAG graph resolver, SHA-256 integrity verification, and offline cache
 
 > [!NOTE]
-> EFI `build`/`validate` commands are preliminary and do not yet provide matching ocvalidate qualification. Recovery and removable-media helpers are incomplete and not an end-to-end installer. Their remaining work is tracked under G1-G7 in the active plan.
+> EFI `build`/`validate` commands are preliminary and do not yet provide matching ocvalidate qualification. Recovery and removable-media guards have automated coverage, but official Recovery discovery, platform adapters and end-to-end installation remain incomplete. Their remaining work is tracked under G1-G7 in the active plan.
 
 ---
 
