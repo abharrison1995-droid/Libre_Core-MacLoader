@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass
 import json
+import getpass
 import plistlib
+import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,8 +35,9 @@ class EfiBuildResult:
 class EfiBuilder:
     """Construct only from an actionable, complete dependency lock."""
 
-    def __init__(self, db: Optional[Database] = None):
+    def __init__(self, db: Optional[Database] = None, identity_store_dir: Optional[Path] = None):
         self.db = db or get_database()
+        self.identity_store_dir = identity_store_dir
 
     def build(
         self,
@@ -139,11 +143,17 @@ class EfiBuilder:
                     f"{dependency.project_name}\nLicense: recorded in the verified catalog\n", encoding="utf-8"
                 )
 
-            identity_data = fake_identity or self._new_identity()
-            identity_path = staging / ".identity.private.json"
-            identity_path.write_text(json.dumps(identity_data, indent=2), encoding="utf-8")
+            identity_path = self._identity_path(plan, dependencies)
+            stored_identity = self._load_identity(identity_path) if identity_path.is_file() else None
+            if fake_identity is not None and stored_identity is not None and fake_identity != stored_identity:
+                raise BuildPlanError("Explicit EFI identity conflicts with the stored identity for this build scope")
+            identity_preexisting = stored_identity is not None
+            identity_data = stored_identity or (fake_identity if fake_identity is not None else self._new_identity())
+            identity_errors = self._identity_errors(identity_data)
+            if identity_errors:
+                raise BuildPlanError("Invalid EFI identity: " + "; ".join(identity_errors))
             self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
-            validation = self.validate_tree(staging, toolchain=toolchain)
+            validation = self.validate_tree(staging, toolchain=toolchain, identity=identity_data)
             if validation.status != "VALID":
                 raise BuildPlanError("Generated EFI failed structural validation: " + "; ".join(validation.errors))
 
@@ -168,14 +178,21 @@ class EfiBuilder:
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
             (staging / "manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
+            if not identity_preexisting:
+                self._write_private_identity(identity_path, identity_data)
             staging.replace(output_dir)
-            identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, str(output_dir / ".identity.private.json"), redacted=True)
+            identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, str(identity_path), redacted=True)
             return EfiBuildResult(output_dir, manifest, validation, identity_ref)
         except Exception:
+            if "identity_path" in locals() and not identity_preexisting:
+                try:
+                    identity_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    def validate_tree(self, root: Path, toolchain: Optional[ToolchainSelection] = None, timeout_seconds: float = 30.0) -> ValidationReport:
+    def validate_tree(self, root: Path, toolchain: Optional[ToolchainSelection] = None, timeout_seconds: float = 30.0, identity: Optional[Dict[str, str]] = None) -> ValidationReport:
         required = [
             root / "EFI" / "BOOT" / "BOOTx64.efi",
             root / "EFI" / "OC" / "OpenCore.efi",
@@ -185,6 +202,7 @@ class EfiBuilder:
         errors = [f"Missing required output: {path.relative_to(root)}" for path in required if not path.is_file() or path.is_symlink()]
         checks: Dict[str, str] = {"structure": "PASS" if not errors else "FAIL"}
         warnings: List[str] = []
+        identity_for_redaction = identity
         try:
             if (root / "EFI" / "OC" / "config.plist").is_file():
                 with (root / "EFI" / "OC" / "config.plist").open("rb") as handle:
@@ -193,6 +211,14 @@ class EfiBuilder:
                     errors.append("config.plist root must be a dictionary")
                 else:
                     errors.extend(self._config_file_errors(root, config))
+                    generic = config.get("PlatformInfo", {}).get("Generic") if isinstance(config.get("PlatformInfo"), dict) else None
+                    identity_for_redaction = identity
+                    if identity_for_redaction is None and isinstance(generic, dict) and all(isinstance(key, str) and isinstance(value, str) for key, value in generic.items()):
+                        identity_for_redaction = generic
+                    if not isinstance(generic, dict) or self._identity_errors(generic):
+                        errors.append("PlatformInfo.Generic does not contain a valid identity")
+                    elif identity is not None and generic != identity:
+                        errors.append("PlatformInfo.Generic does not match the selected private identity")
                     if toolchain is not None:
                         configured_version = config.get("OC", {}).get("Version") if isinstance(config.get("OC"), dict) else None
                         if configured_version != toolchain.opencore_version:
@@ -231,7 +257,7 @@ class EfiBuilder:
         except OSError as exc:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, [f"ocvalidate could not be executed: {exc}"], warnings)
         checks["ocvalidate_exit"] = str(completed.returncode)
-        diagnostics = "\n".join(item for item in (completed.stdout.strip(), completed.stderr.strip()) if item)
+        diagnostics = self._redact_diagnostics("\n".join(item for item in (completed.stdout.strip(), completed.stderr.strip()) if item), identity_for_redaction)[:4096]
         if completed.returncode != 0:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, [diagnostics or f"ocvalidate exited with status {completed.returncode}"], warnings)
         return ValidationReport(CONTRACT_SCHEMA_VERSION, "VALID", toolchain.ocvalidate_version, checks, [], warnings)
@@ -335,6 +361,68 @@ class EfiBuilder:
             "MLB": secrets.token_hex(12).upper(),
             "SystemUUID": secrets.token_hex(16),
         }
+
+    def _identity_path(self, plan: BuildPlan, dependencies: ResolvedDependencySet) -> Path:
+        base = self.identity_store_dir or (Path.home() / "AppData" / "Local" / "MacLoader" / "identities" if os.name == "nt" else Path.home() / ".local" / "share" / "macloader" / "identities")
+        key = _digest({"plan": plan.canonical_digest(), "dependencies": dependencies.canonical_digest()})
+        return base / f"{key}.json"
+
+    @staticmethod
+    def _load_identity(path: Path) -> Dict[str, str]:
+        if path.is_symlink():
+            raise BuildPlanError("Stored EFI identity path must not be a symlink")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise BuildPlanError(f"Stored EFI identity cannot be read: {exc}") from exc
+        if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+            raise BuildPlanError("Stored EFI identity has an invalid shape")
+        return data
+
+    @staticmethod
+    def _write_private_identity(path: Path, identity: Dict[str, str]) -> None:
+        if path.is_symlink():
+            raise BuildPlanError("Refusing to overwrite a symlink at the private EFI identity path")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError as exc:
+            raise BuildPlanError(f"Unable to protect private EFI identity: {exc}") from exc
+        if os.name == "nt":
+            account = getpass.getuser()
+            result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:(R,W)"], capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                raise BuildPlanError("Unable to apply private Windows ACL to EFI identity")
+
+    @staticmethod
+    def _redact_diagnostics(text: str, identity: Optional[Dict[str, str]]) -> str:
+        redacted = text
+        for value in (identity or {}).values():
+            if value:
+                redacted = redacted.replace(value, "<redacted>")
+        return redacted
+
+    @staticmethod
+    def _identity_errors(identity: Dict[str, str]) -> List[str]:
+        required = ("SystemProductName", "SystemSerialNumber", "MLB", "SystemUUID")
+        errors: List[str] = []
+        for key in required:
+            value = identity.get(key)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{key} is required and must be a non-empty string")
+        if set(identity) - set(required):
+            errors.append("identity contains unsupported fields")
+        for key in ("SystemSerialNumber", "MLB"):
+            value = identity.get(key, "")
+            if value and not re.fullmatch(r"[A-Za-z0-9]{4,32}", value):
+                errors.append(f"{key} has an invalid format")
+        uuid_value = identity.get("SystemUUID", "")
+        if uuid_value and not re.fullmatch(r"[0-9A-Fa-f-]{8,64}", uuid_value):
+            errors.append("SystemUUID has an invalid format")
+        if identity.get("SystemProductName") != "MacBookPro15,2":
+            errors.append("SystemProductName is not permitted by the current identity policy")
+        return errors
 
     @staticmethod
     def _write_config(path: Path, kexts: List[str], drivers: List[str], identity: Dict[str, str], opencore_version: str) -> None:

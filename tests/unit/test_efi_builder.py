@@ -23,7 +23,7 @@ def _minimal_tree(root: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
     (root / "EFI/OC/config.plist").write_bytes(
-        plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}})
+        plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}, "PlatformInfo": {"Generic": {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}}})
     )
 
 
@@ -48,7 +48,7 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
     assert report.status == "INVALID"
     assert any("Configured driver is missing" in error for error in report.errors)
 
-    (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}}))
+    (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}, "PlatformInfo": {"Generic": {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}}}))
     report = EfiBuilder().validate_tree(root, toolchain=toolchain)
     assert report.status == "INVALID"
     assert report.checks["ocvalidate_exit"] == "2"
@@ -83,12 +83,19 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     validator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
     toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64", {"qualification": "qualified"}, str(validator), hashlib.sha256(validator.read_bytes()).hexdigest())
 
-    result = EfiBuilder(db=db).build(plan, dep_set, archives, tmp_path / "output", fake_identity={"SystemProductName": "MacBookPro15,2"}, toolchain=toolchain)
+    result = EfiBuilder(db=db, identity_store_dir=tmp_path / "identities").build(plan, dep_set, archives, tmp_path / "output", fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}, toolchain=toolchain)
     assert result.validation.status == "VALID"
     assert (result.output_dir / "EFI/BOOT/BOOTx64.efi").is_file()
     assert (result.output_dir / "EFI/OC/OpenCore.efi").is_file()
     assert (result.output_dir / "EFI/OC/Tools/OpenShell.efi").is_file()
+    assert not (result.output_dir / ".identity.private.json").exists()
+    assert Path(result.identity.storage_ref).is_file()
 
     mismatched_plan = BuildPlan("Lenovo ThinkPad T480s", "sequoia", "different-snapshot", CompatibilityState.EXPERIMENTAL, is_actionable=True, build_ready=True)
     with pytest.raises(BuildPlanError, match="different BuildPlan"):
         EfiBuilder(db=db).build(plan=mismatched_plan, dependencies=dep_set, artifact_paths=archives, output_dir=tmp_path / "mismatch", toolchain=toolchain)
+
+
+def test_identity_validation_rejects_incomplete_or_extra_fields() -> None:
+    assert EfiBuilder._identity_errors({"SystemProductName": "MacBookPro15,2"})
+    assert EfiBuilder._identity_errors({"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "s", "MLB": "m", "SystemUUID": "u", "secret": "x"})
