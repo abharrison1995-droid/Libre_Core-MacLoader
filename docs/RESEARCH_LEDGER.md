@@ -322,3 +322,47 @@ No for the version check; yes for the generated policy and final hardware accept
 - Add a trusted toolchain record/loader that rejects caller-created `qualified` selections.
 - Acquire and record ACPICA `iasl`, identity generation and Recovery tooling with matching host architecture and hashes.
 - Run `ocvalidate.exe` against the first schema-based T480s config after the hardware policy is frozen.
+
+---
+
+## Research Item 010 — G1/G4 host toolchain and Recovery acquisition candidates
+
+### Question
+Can the public config schema, ACPI compiler, identity generator and Recovery client be obtained from pinned primary sources, and what evidence is still required before qualification?
+
+### Sources
+- [OpenCorePkg 1.0.7 release](https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.7)
+- [OpenCorePkg 1.0.7 release archive](https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip)
+- [OpenCore `macserial` source](https://github.com/acidanthera/OpenCorePkg/blob/1.0.7/Utilities/macserial/macserial.c)
+- [OpenCore `macrecovery.py` source](https://github.com/acidanthera/OpenCorePkg/blob/1.0.7/Utilities/macrecovery/macrecovery.py)
+- [OpenCore Recovery README](https://github.com/acidanthera/OpenCorePkg/blob/1.0.7/Utilities/macrecovery/README.md)
+- [ACPICA 20260408 release](https://github.com/acpica/acpica/releases/tag/20260408)
+- [ACPICA Windows binary download page](https://www.intel.com/content/www/us/en/developer/topic-technology/open/acpica/download.html)
+- Date inspected: 2026-09-09
+
+### Verified public records
+- OpenCore 1.0.7 archive: 10,437,696 bytes, SHA-256 `2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e`.
+- Schema/template: `Docs/Sample.plist`, 55,244 bytes, SHA-256 `1bd3a503d2d71b531249e9d52fb1b8307e61547f6e593743da4969e5e2574203`.
+- Windows validator: `Utilities/ocvalidate/ocvalidate.exe`, 615,895 bytes, SHA-256 `53e50246a9dc3006b938cea25c040a027b9ca9e0f700f7c8bdb0004f487b688f`.
+- Windows identity utility: `Utilities/macserial/macserial.exe`, 376,006 bytes, SHA-256 `e22df76f644d63302e8615216077366ee2f2880ca4aa7132c396bf2cf9da0e76`. Generation and verification are local; real serial, MLB, UUID and ROM values must stay in private storage.
+- Recovery client: `Utilities/macrecovery/macrecovery.py`, 20,318 bytes, SHA-256 `68edc6c44b7f2b65bb23d5e5083cd1227a7f52f4bfaa716f7faa58d25be554b9`; its upstream workflow verifies Apple's signed chunklist and per-chunk image hashes, but `default`/`latest` is not an exact Sequoia build selector.
+- ACPICA Windows package: `iasl-win-20260408.zip`, SHA-256 `121f5e4f30b1df63d09052294e4a605d4dee2dfb9599fa24af4ac6015df02b70`; required member `iasl.exe`, SHA-256 `739c597bcee4563f18d13e73b2051bb661707713e6154cf5712a1b7eef4a5df9`. The official Windows binary is PE32/IA-32 and runs under WoW64 on x86_64 Windows; it is not a native AMD64 executable.
+
+### Decision
+- Use the pinned OpenCore release as the source for the schema/template, matching validator, identity utility and Recovery client. Treat `Sample.plist` as a schema source only; it must never be shipped unchanged as a T480s configuration.
+- Use ACPICA 20260408 as the current pinned iASL candidate, while recording its 32-bit Windows architecture as a host constraint.
+- Add these records to the trusted toolchain loader and acquire executables into an ignored, controlled workspace directory. Do not commit public binaries to the repository.
+- Use `macrecovery.py` as the Windows/Linux Recovery backend. Preserve the Apple response, resolved product/build, image/chunklist URLs and hashes, and verification result for every real acquisition. Label it as a third-party client of Apple infrastructure.
+- Keep the toolchain state `version-verified/config-unqualified` until a generated T480s policy passes the real matching validator and the ACPI, Recovery and identity flows have been exercised on the supported host.
+
+### Confidence
+`HIGH` for the public release/member paths and locally computed hashes; `MEDIUM` for the absence of upstream-published detached checksums on the OpenCore and ACPICA binary assets; `PENDING` for actual T480s configuration, hardware and Recovery qualification.
+
+### Physical verification required?
+No for public artifact provenance or synthetic identity tests; yes for the T480s policy, Recovery boot path, and any real identity use.
+
+### Follow-up
+- Implement a trusted toolchain record/loader instead of accepting caller-supplied `qualification=qualified` metadata.
+- Capture the sanitized live T480s/BIOS/OS snapshot and freeze the Sequoia policy, including ACPI paths and USB map.
+- Generate a policy-based config from the pinned schema, validate it with the real matching `ocvalidate.exe`, and record the redacted report.
+- Run an opt-in Recovery acquisition and retain its signed chunklist evidence. Exact build reproducibility requires recording the server-resolved product/build.
