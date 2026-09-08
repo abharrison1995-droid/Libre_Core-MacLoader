@@ -6,6 +6,8 @@ import plistlib
 from pathlib import Path
 import secrets
 import shutil
+import subprocess
+import sys
 import tempfile
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -131,7 +133,7 @@ class EfiBuilder:
                     name = Path(component).name
                     if name.endswith(".kext"):
                         kexts.append(name)
-                    elif name.endswith(".efi"):
+                    elif component.startswith("EFI/OC/Drivers/") and name.endswith(".efi"):
                         drivers.append(name)
                 (licenses / f"{dependency.dependency_id}.txt").write_text(
                     f"{dependency.project_name}\nLicense: recorded in the verified catalog\n", encoding="utf-8"
@@ -141,10 +143,11 @@ class EfiBuilder:
             identity_path = staging / ".identity.private.json"
             identity_path.write_text(json.dumps(identity_data, indent=2), encoding="utf-8")
             self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
-            validation = self.validate_tree(staging)
+            validation = self.validate_tree(staging, toolchain=toolchain)
             if validation.status != "VALID":
                 raise BuildPlanError("Generated EFI failed structural validation: " + "; ".join(validation.errors))
 
+            output_digest = self._tree_digest(staging)
             manifest = BuildManifest(
                 schema_version=CONTRACT_SCHEMA_VERSION,
                 build_digest=_digest({
@@ -152,6 +155,7 @@ class EfiBuilder:
                     "dependency_digest": dependencies.canonical_digest(),
                     "toolchain_digest": toolchain.digest,
                     "identity_digest": _digest(identity_data),
+                    "output_digest": output_digest,
                     "schema_version": CONTRACT_SCHEMA_VERSION,
                 }),
                 target_model=plan.target_model,
@@ -160,6 +164,7 @@ class EfiBuilder:
                 validation_report="VALID",
                 toolchain_digest=toolchain.digest,
                 identity_digest=_digest(identity_data),
+                output_digest=output_digest,
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
             (staging / "manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
@@ -170,21 +175,113 @@ class EfiBuilder:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    def validate_tree(self, root: Path) -> ValidationReport:
+    def validate_tree(self, root: Path, toolchain: Optional[ToolchainSelection] = None, timeout_seconds: float = 30.0) -> ValidationReport:
         required = [
             root / "EFI" / "BOOT" / "BOOTx64.efi",
             root / "EFI" / "OC" / "OpenCore.efi",
             root / "EFI" / "OC" / "Drivers" / "OpenRuntime.efi",
             root / "EFI" / "OC" / "config.plist",
         ]
-        errors = [f"Missing required output: {path.relative_to(root)}" for path in required if not path.is_file()]
+        errors = [f"Missing required output: {path.relative_to(root)}" for path in required if not path.is_file() or path.is_symlink()]
+        checks: Dict[str, str] = {"structure": "PASS" if not errors else "FAIL"}
+        warnings: List[str] = []
         try:
             if (root / "EFI" / "OC" / "config.plist").is_file():
                 with (root / "EFI" / "OC" / "config.plist").open("rb") as handle:
-                    plistlib.load(handle)
+                    config = plistlib.load(handle)
+                if not isinstance(config, dict):
+                    errors.append("config.plist root must be a dictionary")
+                else:
+                    errors.extend(self._config_file_errors(root, config))
+                    if toolchain is not None:
+                        configured_version = config.get("OC", {}).get("Version") if isinstance(config.get("OC"), dict) else None
+                        if configured_version != toolchain.opencore_version:
+                            errors.append("config.plist OpenCore version does not match the selected toolchain")
         except (OSError, plistlib.InvalidFileException) as exc:
             errors.append(f"Invalid config.plist: {exc}")
-        return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID" if errors else "VALID", None, {"structure": "PASS" if not errors else "FAIL"}, errors)
+        if errors:
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, errors, warnings)
+        output_digest = self._tree_digest(root)
+        checks["output_digest"] = output_digest
+        manifest_path = root / "manifest.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            try:
+                manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_data.get("output_digest") != output_digest:
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Published output changed after validation"], warnings)
+            except (OSError, ValueError) as exc:
+                return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, [f"Invalid build manifest: {exc}"], warnings)
+        if toolchain is None or not toolchain.ocvalidate_path:
+            warnings.append("Matching ocvalidate was not supplied; structural validation is not release validation")
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "STRUCTURAL_ONLY", None, checks, [], warnings)
+        validator = Path(toolchain.ocvalidate_path)
+        if not validator.is_file() or validator.is_symlink():
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, ["Matching ocvalidate executable is missing or unsafe"], warnings)
+        if not toolchain.ocvalidate_sha256 or compute_file_sha256(validator) != toolchain.ocvalidate_sha256.lower():
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, ["ocvalidate integrity does not match the selected toolchain"], warnings)
+        if toolchain.provenance.get("qualification") != "qualified":
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, ["Selected toolchain is not qualified for release validation"], warnings)
+        command = [str(validator), str(root / "EFI" / "OC" / "config.plist")]
+        if validator.suffix.lower() == ".py":
+            command = [sys.executable] + command
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+        except subprocess.TimeoutExpired:
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, ["ocvalidate timed out"], warnings)
+        except OSError as exc:
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, [f"ocvalidate could not be executed: {exc}"], warnings)
+        checks["ocvalidate_exit"] = str(completed.returncode)
+        diagnostics = "\n".join(item for item in (completed.stdout.strip(), completed.stderr.strip()) if item)
+        if completed.returncode != 0:
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, [diagnostics or f"ocvalidate exited with status {completed.returncode}"], warnings)
+        return ValidationReport(CONTRACT_SCHEMA_VERSION, "VALID", toolchain.ocvalidate_version, checks, [], warnings)
+
+    @staticmethod
+    def _tree_digest(root: Path) -> str:
+        records: List[Dict[str, Any]] = []
+        for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "manifest.json"):
+            records.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": compute_file_sha256(path)})
+        return _digest({"files": records})
+
+    @staticmethod
+    def _config_file_errors(root: Path, config: Dict[str, Any]) -> List[str]:
+        errors: List[str] = []
+        uefi = config.get("UEFI")
+        kernel = config.get("Kernel")
+        if not isinstance(uefi, dict):
+            errors.append("UEFI configuration must be a dictionary")
+        if not isinstance(kernel, dict):
+            errors.append("Kernel configuration must be a dictionary")
+        drivers = uefi.get("Drivers", []) if isinstance(uefi, dict) else []
+        kexts = kernel.get("Add", []) if isinstance(kernel, dict) else []
+        for label, entries, base in (("driver", drivers, root / "EFI" / "OC" / "Drivers"), ("kext", kexts, root / "EFI" / "OC" / "Kexts")):
+            seen: set[str] = set()
+            if not isinstance(entries, list):
+                errors.append(f"{label} configuration must be a list")
+                continue
+            for entry in entries:
+                key = "Path" if label == "driver" else "BundlePath"
+                if not isinstance(entry, dict) or not isinstance(entry.get(key), str):
+                    errors.append(f"Malformed {label} configuration entry")
+                    continue
+                name = entry[key]
+                if name in seen:
+                    errors.append(f"Duplicate {label} configuration entry: {name}")
+                seen.add(name)
+                raw_candidate = base / name
+                if raw_candidate.is_symlink():
+                    errors.append(f"Configured {label} is a symlink: {name}")
+                    continue
+                candidate = raw_candidate.resolve()
+                try:
+                    candidate.relative_to(base.resolve())
+                except ValueError:
+                    errors.append(f"Configured {label} escapes its component directory: {name}")
+                    continue
+                valid_kind = candidate.is_file() if label == "driver" else candidate.is_dir()
+                if not valid_kind:
+                    errors.append(f"Configured {label} is missing: {name}")
+        return errors
 
     def _extract_selected(
         self,

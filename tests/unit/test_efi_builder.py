@@ -3,6 +3,7 @@
 from pathlib import Path
 import copy
 import hashlib
+import plistlib
 import zipfile
 import pytest
 
@@ -14,6 +15,43 @@ from macloader.domain.compatibility import CompatibilityState
 from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.dependencies import ArtifactVariant
 from macloader.exceptions import BuildPlanError
+
+
+def _minimal_tree(root: Path) -> None:
+    for relative in ("EFI/BOOT/BOOTx64.efi", "EFI/OC/OpenCore.efi", "EFI/OC/Drivers/OpenRuntime.efi"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    (root / "EFI/OC/config.plist").write_bytes(
+        plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}})
+    )
+
+
+def test_structural_validation_is_not_release_valid_without_ocvalidate(tmp_path: Path) -> None:
+    root = tmp_path / "efi"
+    _minimal_tree(root)
+    report = EfiBuilder().validate_tree(root)
+    assert report.status == "STRUCTURAL_ONLY"
+    assert report.validator_version is None
+
+
+def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "efi"
+    _minimal_tree(root)
+    config = {"UEFI": {"Drivers": [{"Path": "Missing.efi"}]}, "Kernel": {"Add": []}}
+    (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps(config))
+    validator = tmp_path / "ocvalidate.py"
+    validator.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+    toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64", {"qualification": "qualified"}, str(validator), hashlib.sha256(validator.read_bytes()).hexdigest())
+
+    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+    assert report.status == "INVALID"
+    assert any("Configured driver is missing" in error for error in report.errors)
+
+    (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}}))
+    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+    assert report.status == "INVALID"
+    assert report.checks["ocvalidate_exit"] == "2"
 
 
 def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_path: Path) -> None:
@@ -41,7 +79,9 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     plan = BuildPlan("Lenovo ThinkPad T480s", "sequoia", "fixture", CompatibilityState.EXPERIMENTAL, policy_version=catalog.policy_version)
     resolver = DependencyResolver(db)
     dep_set = resolver.resolve(plan, ArtifactVariant.RELEASE)
-    toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64")
+    validator = tmp_path / "ocvalidate.py"
+    validator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64", {"qualification": "qualified"}, str(validator), hashlib.sha256(validator.read_bytes()).hexdigest())
 
     result = EfiBuilder(db=db).build(plan, dep_set, archives, tmp_path / "output", fake_identity={"SystemProductName": "MacBookPro15,2"}, toolchain=toolchain)
     assert result.validation.status == "VALID"

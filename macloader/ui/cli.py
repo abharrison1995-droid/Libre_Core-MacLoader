@@ -1,6 +1,7 @@
 """Command line interface (CLI) for MacLoader using Click and Rich."""
 
 import json
+import platform
 from pathlib import Path
 import sys
 from typing import Optional
@@ -20,6 +21,7 @@ from macloader.compatibility.report import (
 from macloader.config import DEFAULT_MACOS_TARGET, SUPPORTED_MACOS_TARGETS
 from macloader.diagnostics.logging import setup_logging
 from macloader.domain.dependencies import ArtifactVariant
+from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.exceptions import (
     CompatibilityEvaluationError,
     DatabaseError,
@@ -360,9 +362,30 @@ def deps_cache_cmd(clear: bool, json_mode: bool) -> None:
 @cli.command("validate")
 @click.argument("efi_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
-def validate_cmd(efi_dir: Path, json_mode: bool) -> None:
+@click.option("--ocvalidate", "ocvalidate_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Matching OpenCore ocvalidate executable or script.")
+@click.option("--ocvalidate-sha256", type=str, help="SHA-256 for the selected ocvalidate executable/script.")
+def validate_cmd(efi_dir: Path, json_mode: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str]) -> None:
     """Validate an existing EFI tree structurally."""
-    report = EfiBuilder().validate_tree(efi_dir)
+    builder = EfiBuilder()
+    toolchain = None
+    if ocvalidate_path:
+        opencore = builder.db.get_dependency_spec("opencore")
+        if opencore is None:
+            raise click.ClickException("OpenCore policy is unavailable")
+        toolchain = ToolchainSelection(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            opencore_version=opencore.version,
+            ocvalidate_version=opencore.version,
+            acpi_compiler=None,
+            identity_tool=None,
+            recovery_tool=None,
+            host_platform=platform.system().lower(),
+            host_architecture=platform.machine().lower(),
+            provenance={"source": "verified-catalog", "qualification": "qualified" if ocvalidate_sha256 else "pending-s03"},
+            ocvalidate_path=str(ocvalidate_path),
+            ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
+        )
+    report = builder.validate_tree(efi_dir, toolchain=toolchain)
     if json_mode:
         click.echo(json.dumps(report.to_dict(), indent=2))
     else:
@@ -378,7 +401,9 @@ def validate_cmd(efi_dir: Path, json_mode: bool) -> None:
 @click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-o", "--output", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--offline", is_flag=True, help="Use only verified cached dependencies.")
-def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool) -> None:
+@click.option("--ocvalidate", "ocvalidate_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Matching OpenCore ocvalidate executable or script.")
+@click.option("--ocvalidate-sha256", type=str, help="SHA-256 for the selected ocvalidate executable/script.")
+def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str]) -> None:
     """Build a validated EFI tree from the actionable hardware plan."""
     try:
         orchestrator = Orchestrator()
@@ -388,7 +413,7 @@ def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline:
         if not dep_set.is_complete:
             raise click.ClickException("EFI build blocked: unresolved requirements remain in the dependency plan")
         artifact_paths = orchestrator.fetch_dependencies(dep_set, offline=offline, plan=plan)
-        result = orchestrator.build_efi(plan, dep_set, artifact_paths, output)
+        result = orchestrator.build_efi(plan, dep_set, artifact_paths, output, ocvalidate_path=ocvalidate_path, ocvalidate_sha256=ocvalidate_sha256)
         click.echo(json.dumps({"status": result.validation.status, "output": str(result.output_dir), "manifest": result.manifest.to_dict()}, indent=2))
     except MacLoaderError as e:
         err_console.print(f"[bold red]Build Error:[/bold red] {e}")

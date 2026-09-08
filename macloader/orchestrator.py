@@ -199,7 +199,7 @@ class Orchestrator:
         if dep_set.unresolved_requirements != expected.unresolved_requirements:
             raise ArtifactDownloadError("Resolved dependency set unresolved requirements are stale")
 
-    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None, toolchain: Optional[ToolchainSelection] = None) -> EfiBuildResult:
+    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None, toolchain: Optional[ToolchainSelection] = None, ocvalidate_path: Optional[Union[str, Path]] = None, ocvalidate_sha256: Optional[str] = None) -> EfiBuildResult:
         if dep_set.plan_digest != plan.canonical_digest():
             raise ArtifactDownloadError("Dependency lock is bound to a different BuildPlan")
         if toolchain is None:
@@ -215,6 +215,8 @@ class Orchestrator:
                 recovery_tool=None,
                 host_platform=platform.system().lower(),
                 host_architecture=platform.machine().lower(),
-                provenance={"source": "verified-catalog", "qualification": "pending-s03"},
+                provenance={"source": "verified-catalog", "qualification": "qualified" if ocvalidate_sha256 else "pending-s03"},
+                ocvalidate_path=str(ocvalidate_path) if ocvalidate_path else None,
+                ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
             )
         return self.builder.build(plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity, toolchain=toolchain)

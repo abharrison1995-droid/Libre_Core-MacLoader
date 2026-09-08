@@ -63,6 +63,8 @@ class ToolchainSelection:
     host_platform: str
     host_architecture: str
     provenance: Dict[str, str] = field(default_factory=dict)
+    ocvalidate_path: Optional[str] = None
+    ocvalidate_sha256: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,7 +72,8 @@ class ToolchainSelection:
             "ocvalidate_version": self.ocvalidate_version, "acpi_compiler": self.acpi_compiler,
             "identity_tool": self.identity_tool, "recovery_tool": self.recovery_tool,
             "host_platform": self.host_platform, "host_architecture": self.host_architecture,
-            "provenance": dict(self.provenance),
+            "provenance": dict(self.provenance), "ocvalidate_path": self.ocvalidate_path,
+            "ocvalidate_sha256": self.ocvalidate_sha256,
         }
 
     @property
@@ -116,6 +119,7 @@ class BuildManifest:
     output_paths: Dict[str, str] = field(default_factory=dict)
     toolchain_digest: str = ""
     identity_digest: str = ""
+    output_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -123,5 +127,6 @@ class BuildManifest:
             "target_model": self.target_model, "target_macos": self.target_macos,
             "artifact_lock_digest": self.artifact_lock_digest, "validation_report": self.validation_report,
             "toolchain_digest": self.toolchain_digest, "identity_digest": self.identity_digest,
+            "output_digest": self.output_digest,
             "output_paths": dict(self.output_paths),
         }
