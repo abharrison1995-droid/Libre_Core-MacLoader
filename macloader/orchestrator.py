@@ -214,7 +214,7 @@ class Orchestrator:
                 recovery_tool=None,
                 host_platform=platform.system().lower(),
                 host_architecture=platform.machine().lower(),
-                provenance={"source": "verified-catalog", "qualification": "qualified" if ocvalidate_sha256 else "pending-s03"},
+                provenance={"source": "cli-supplied", "qualification": "pending-s03"},
                 ocvalidate_path=str(ocvalidate_path) if ocvalidate_path else None,
                 ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
             )

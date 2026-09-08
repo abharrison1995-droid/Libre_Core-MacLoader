@@ -131,6 +131,7 @@ class EfiBuilder:
         parent = output_dir.parent
         parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix="macloader-efi-", dir=parent))
+        identity_preexisting = True
         try:
             efi_root = staging / "EFI"
             for relative in ("BOOT", "OC/ACPI", "OC/Drivers", "OC/Kexts", "OC/Tools"):
@@ -211,10 +212,18 @@ class EfiBuilder:
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
             (staging / "manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
+            validation = self.validate_tree(
+                staging,
+                toolchain=toolchain,
+                identity=identity_data,
+                expected_manifest=manifest,
+            )
+            if validation.status != "VALID":
+                raise BuildPlanError("Published EFI failed manifest validation: " + "; ".join(validation.errors))
             if not identity_preexisting:
                 self._write_private_identity(identity_path, identity_data)
             staging.replace(output_dir)
-            identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, str(identity_path), redacted=True)
+            identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, identity_path.name, redacted=True)
             return EfiBuildResult(output_dir, manifest, validation, identity_ref)
         except Exception:
             if "identity_path" in locals() and not identity_preexisting:
@@ -225,7 +234,14 @@ class EfiBuilder:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    def validate_tree(self, root: Path, toolchain: Optional[ToolchainSelection] = None, timeout_seconds: float = 30.0, identity: Optional[Dict[str, str]] = None) -> ValidationReport:
+    def validate_tree(
+        self,
+        root: Path,
+        toolchain: Optional[ToolchainSelection] = None,
+        timeout_seconds: float = 30.0,
+        identity: Optional[Dict[str, str]] = None,
+        expected_manifest: Optional[BuildManifest] = None,
+    ) -> ValidationReport:
         required = [
             root / "EFI" / "BOOT" / "BOOTx64.efi",
             root / "EFI" / "OC" / "OpenCore.efi",
@@ -260,14 +276,33 @@ class EfiBuilder:
             errors.append(f"Invalid config.plist: {exc}")
         if errors:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, errors, warnings)
-        output_digest = self._tree_digest(root)
+        try:
+            output_digest = self._tree_digest(root)
+        except BuildPlanError as exc:
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, [str(exc)], warnings)
         checks["output_digest"] = output_digest
         manifest_path = root / "manifest.json"
+        if expected_manifest is not None and (not manifest_path.is_file() or manifest_path.is_symlink()):
+            return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Expected build manifest is missing or unsafe"], warnings)
         if manifest_path.is_file() and not manifest_path.is_symlink():
             try:
                 manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                required_manifest_keys = {
+                    "schema_version", "build_digest", "target_model", "target_macos",
+                    "artifact_lock_digest", "validation_report", "toolchain_digest",
+                    "identity_digest", "output_digest", "output_paths",
+                }
+                if set(manifest_data) != required_manifest_keys:
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest has an invalid schema"], warnings)
+                digest_fields = ("build_digest", "artifact_lock_digest", "toolchain_digest", "identity_digest", "output_digest")
+                if any(not isinstance(manifest_data.get(field), str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_data[field]) for field in digest_fields):
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest contains invalid digest fields"], warnings)
                 if manifest_data.get("output_digest") != output_digest:
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Published output changed after validation"], warnings)
+                if manifest_data.get("validation_report") != "VALID":
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest is not marked VALID"], warnings)
+                if expected_manifest is not None and manifest_data != expected_manifest.to_dict():
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest identity does not match the validated inputs"], warnings)
             except (OSError, ValueError) as exc:
                 return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, [f"Invalid build manifest: {exc}"], warnings)
         if toolchain is None or not toolchain.ocvalidate_path:
@@ -298,7 +333,11 @@ class EfiBuilder:
     @staticmethod
     def _tree_digest(root: Path) -> str:
         records: List[Dict[str, Any]] = []
-        for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "manifest.json"):
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                raise BuildPlanError(f"EFI output contains an unsafe symlink: {path.relative_to(root)}")
+            if not path.is_file() or path.name == "manifest.json":
+                continue
             records.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": compute_file_sha256(path)})
         return canonical_json_digest({"files": records})
 
@@ -324,6 +363,9 @@ class EfiBuilder:
                     errors.append(f"Malformed {label} configuration entry")
                     continue
                 name = entry[key]
+                if Path(name).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", name) or name.startswith(("\\\\", "/")):
+                    errors.append(f"Configured {label} must use a relative component path: {name}")
+                    continue
                 case_key = name.casefold()
                 if case_key in seen:
                     errors.append(f"Duplicate {label} configuration entry: {name}")
@@ -341,6 +383,8 @@ class EfiBuilder:
                 valid_kind = candidate.is_file() if label == "driver" else candidate.is_dir()
                 if not valid_kind:
                     errors.append(f"Configured {label} is missing: {name}")
+                elif any(item.is_symlink() for item in candidate.rglob("*")):
+                    errors.append(f"Configured {label} contains a symlink: {name}")
         return errors
 
     def _extract_selected(

@@ -373,7 +373,7 @@ def validate_cmd(efi_dir: Path, json_mode: bool, ocvalidate_path: Optional[Path]
             recovery_tool=None,
             host_platform=platform.system().lower(),
             host_architecture=platform.machine().lower(),
-            provenance={"source": "verified-catalog", "qualification": "qualified" if ocvalidate_sha256 else "pending-s03"},
+            provenance={"source": "cli-supplied", "qualification": "pending-s03"},
             ocvalidate_path=str(ocvalidate_path),
             ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
         )

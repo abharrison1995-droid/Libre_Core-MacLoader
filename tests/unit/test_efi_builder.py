@@ -1,8 +1,8 @@
 """Fixture-driven EFI construction and validation tests."""
 
 from pathlib import Path
-import copy
 import hashlib
+import json
 import plistlib
 import zipfile
 import pytest
@@ -83,13 +83,23 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     validator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
     toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64", {"qualification": "qualified"}, str(validator), hashlib.sha256(validator.read_bytes()).hexdigest())
 
-    result = EfiBuilder(db=db, identity_store_dir=tmp_path / "identities").build(plan, dep_set, archives, tmp_path / "output", fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}, toolchain=toolchain)
+    builder = EfiBuilder(db=db, identity_store_dir=tmp_path / "identities")
+    fake_identity = {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}
+    result = builder.build(plan, dep_set, archives, tmp_path / "output", fake_identity=fake_identity, toolchain=toolchain)
     assert result.validation.status == "VALID"
     assert (result.output_dir / "EFI/BOOT/BOOTx64.efi").is_file()
     assert (result.output_dir / "EFI/OC/OpenCore.efi").is_file()
     assert (result.output_dir / "EFI/OC/Tools/OpenShell.efi").is_file()
     assert not (result.output_dir / ".identity.private.json").exists()
-    assert Path(result.identity.storage_ref).is_file()
+    assert (tmp_path / "identities" / result.identity.storage_ref).is_file()
+
+    manifest_path = result.output_dir / "manifest.json"
+    mutated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutated_manifest["artifact_lock_digest"] = "f" * 64
+    manifest_path.write_text(json.dumps(mutated_manifest), encoding="utf-8")
+    report = builder.validate_tree(result.output_dir, toolchain=toolchain, identity=fake_identity, expected_manifest=result.manifest)
+    assert report.status == "INVALID"
+    assert any("manifest identity" in error for error in report.errors)
 
     mismatched_plan = BuildPlan("Lenovo ThinkPad T480s", "sequoia", "different-snapshot", CompatibilityState.EXPERIMENTAL, is_actionable=True, build_ready=True)
     with pytest.raises(BuildPlanError, match="different BuildPlan"):

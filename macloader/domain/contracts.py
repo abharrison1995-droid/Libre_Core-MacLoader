@@ -27,13 +27,15 @@ class ArtifactLockEntry:
     source_url: str
     sha256: str
     size_bytes: int
+    archive_type: str = "zip"
     subcomponents: Tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "dependency_id": self.dependency_id, "version": self.version, "variant": self.variant,
             "asset_name": self.asset_name, "source_url": self.source_url, "sha256": self.sha256,
-            "size_bytes": self.size_bytes, "subcomponents": list(self.subcomponents),
+            "size_bytes": self.size_bytes, "archive_type": self.archive_type,
+            "subcomponents": list(self.subcomponents),
         }
 
 

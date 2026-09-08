@@ -187,6 +187,7 @@ class ResolvedDependencySet:
                     dependency_id=item.dependency_id, version=item.version, variant=item.variant.value,
                     asset_name=item.artifact.asset_name, source_url=item.artifact.source_url,
                     sha256=item.artifact.sha256, size_bytes=item.artifact.size_bytes,
+                    archive_type=item.artifact.archive_type,
                     subcomponents=tuple(item.subcomponents),
                 ) for item in self.resolved_dependencies
             ),
