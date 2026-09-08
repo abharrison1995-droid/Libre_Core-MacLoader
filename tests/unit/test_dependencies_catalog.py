@@ -121,3 +121,30 @@ def test_catalog_schema_fails_on_duplicate_dependency_id() -> None:
     with pytest.raises(DatabaseValidationError) as exc:
         DependencyCatalogSchema.validate_and_load(duplicate_data, filename="test.yaml")
     assert "Duplicate dependency ID" in str(exc.value)
+
+
+def test_catalog_schema_binds_asset_name_to_exact_download_url() -> None:
+    invalid_data = {
+        "macloader_dependency_set": "test",
+        "dependencies": [
+            {
+                "id": "mismatch",
+                "project_name": "Test",
+                "upstream_repository": "https://github.com/example/project",
+                "license": "MIT",
+                "version": "1.0.0",
+                "release_tag": "1.0.0",
+                "artifacts": {
+                    "RELEASE": {
+                        "asset_name": "declared.zip",
+                        "source_url": "https://github.com/example/project/releases/download/1.0.0/actual.zip",
+                        "sha256": "a" * 64,
+                        "size_bytes": 1,
+                    }
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(DatabaseValidationError, match="asset_name does not match"):
+        DependencyCatalogSchema.validate_and_load(invalid_data, filename="test.yaml")

@@ -176,7 +176,7 @@ def test_schema_and_cache_accept_valid_version_strings(tmp_path: Path, version_s
                 "release_tag": version_str,
                 "artifacts": {
                     "RELEASE": {
-                        "asset_name": "TestKext-RELEASE.zip",
+                            "asset_name": "Test.zip",
                         "source_url": f"https://github.com/acidanthera/TestKext/releases/download/{version_str}/Test.zip",
                         "sha256": "0" * 64,
                         "size_bytes": 1024,
@@ -304,5 +304,4 @@ def test_deduplicate_preserve_order_defensive() -> None:
     assert _deduplicate_preserve_order([]) == []
     # Test handling of unhashables
     assert _deduplicate_preserve_order([{"a": 1}, {"a": 1}, "b"]) == ["{'a': 1}", "b"]  # type: ignore[list-item]
-
 

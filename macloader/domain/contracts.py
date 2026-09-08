@@ -127,6 +127,7 @@ class BuildManifest:
     toolchain_digest: str = ""
     identity_digest: str = ""
     output_digest: str = ""
+    license_digests: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,5 +136,6 @@ class BuildManifest:
             "artifact_lock_digest": self.artifact_lock_digest, "validation_report": self.validation_report,
             "toolchain_digest": self.toolchain_digest, "identity_digest": self.identity_digest,
             "output_digest": self.output_digest,
+            "license_digests": dict(self.license_digests),
             "output_paths": dict(self.output_paths),
         }

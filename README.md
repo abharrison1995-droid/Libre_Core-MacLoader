@@ -8,7 +8,7 @@ It is an independent sibling project to [Libre_Core-AutoLoader](https://github.c
 
 ## Current Status: v0.0.4
 
-**2026-09-08 implementation update:** S12 Recovery and removable-media guards are implemented and committed. Local verification is **250 tests passing, mypy clean across 72 files, and 79.82% branch coverage against a 79% CI gate**. It is not release-ready: EFI trust and real-validator qualification, official Recovery acquisition, host USB adapters, clean-checkout CI evidence and physical acceptance remain open. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining gates and **Sequoia-first** route to shipping.
+**2026-09-09 implementation update:** S12 Recovery and removable-media guards are implemented and committed. Local verification is **254 tests passing, mypy clean across 72 files, and 79.79% branch coverage against a 79% CI gate**. The G1 dependency catalog audit and G2 license/manifest provenance safeguards are now recorded and committed. It is not release-ready: EFI trust and real-validator qualification, official Recovery acquisition, host USB adapters, clean-checkout CI evidence and physical acceptance remain open. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining gates and **Sequoia-first** route to shipping.
 
 This repository currently implements **milestones v0.0.1 through v0.0.4**:
 - **v0.0.1**: ThinkPad T480s hardware detection (`20L7`, `20L8`)

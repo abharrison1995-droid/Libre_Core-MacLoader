@@ -30,7 +30,7 @@ where = ["."]
 include = ["macloader*"]
 
 [tool.setuptools.package-data]
-macloader = ["database/data/**/*.yaml"]
+macloader = ["database/data/**/*.yaml", "database/data/licenses/*.txt"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -319,6 +319,44 @@ def test_verified_archive_tamper_after_snapshot_is_impossible(tmp_path: Path) ->
         )
 
 
+def test_extract_selected_prefers_x64_over_duplicate_architecture_members(tmp_path: Path) -> None:
+    archive = tmp_path / "opencore.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("IA32/EFI/OC/OpenCore.efi", b"ia32")
+        zf.writestr("X64/EFI/OC/OpenCore.efi", b"x64")
+
+    efi_root = tmp_path / "EFI"
+    EfiBuilder()._extract_selected(
+        archive,
+        ["EFI/OC/OpenCore.efi"],
+        efi_root,
+        "opencore",
+        hashlib.sha256(archive.read_bytes()).hexdigest(),
+        archive.stat().st_size,
+        staging_root=tmp_path,
+    )
+
+    assert (efi_root / "OC/OpenCore.efi").read_bytes() == b"x64"
+
+
+def test_extract_selected_rejects_ambiguous_duplicate_members(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("first/EFI/OC/OpenCore.efi", b"one")
+        zf.writestr("second/EFI/OC/OpenCore.efi", b"two")
+
+    with pytest.raises(BuildPlanError, match="ambiguous archive members"):
+        EfiBuilder()._extract_selected(
+            archive,
+            ["EFI/OC/OpenCore.efi"],
+            tmp_path / "EFI",
+            "opencore",
+            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            archive.stat().st_size,
+            staging_root=tmp_path,
+        )
+
+
 def test_explicit_plugin_subcomponent_resolution_and_validation(tmp_path: Path) -> None:
     """Verify that dependencies listing explicit plugin subcomponents (e.g. VoodooPS2)
     resolve destination paths and config.plist bundle paths accurately.

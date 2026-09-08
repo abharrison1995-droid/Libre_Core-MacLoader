@@ -59,6 +59,8 @@ class DependencySpec:
     artifacts: Dict[str, DependencyArtifact] = field(default_factory=dict)  # variant -> artifact
     subcomponents: List[str] = field(default_factory=list)  # e.g. specific kexts/plugins
     date_verified: str = ""
+    license_file: str = ""
+    license_sha256: str = ""
 
     def get_artifact(self, variant: ArtifactVariant = ArtifactVariant.RELEASE) -> Optional[DependencyArtifact]:
         """Retrieve exactly the requested artifact variant."""
@@ -76,6 +78,8 @@ class DependencySpec:
             "artifacts": {k: v.to_dict() for k, v in self.artifacts.items()},
             "subcomponents": list(self.subcomponents),
             "date_verified": self.date_verified,
+            "license_file": self.license_file,
+            "license_sha256": self.license_sha256,
         }
 
     @classmethod
@@ -94,6 +98,8 @@ class DependencySpec:
             artifacts=artifacts,
             subcomponents=list(data.get("subcomponents", [])),
             date_verified=data.get("date_verified", ""),
+            license_file=data.get("license_file", ""),
+            license_sha256=data.get("license_sha256", "").lower(),
         )
 
 

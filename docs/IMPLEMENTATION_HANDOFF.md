@@ -1,6 +1,6 @@
 # MacLoader Implementation Handoff — v0.0.1 → v0.0.4
 
-> Historical handoff, refreshed 2026-09-08. Follow the [active implementation plan](IMPLEMENTATION_PLAN.md): S12 Recovery and removable-media guards are verified and committed, with 250 local tests passing, mypy clean across 72 files and 79.82% branch coverage against a 79% CI gate. G0 remains reopened; packaging evidence, EFI trust/validation, official Recovery acquisition, platform USB adapters, clean-host workflow and physical acceptance remain open. Sequoia is the first qualification target. Neither historical milestone completion nor prototype code establishes shipping readiness.
+> Historical handoff, refreshed 2026-09-09. Follow the [active implementation plan](IMPLEMENTATION_PLAN.md): S12 Recovery and removable-media guards are verified and committed, with 254 local tests passing, mypy clean across 72 files and 79.79% branch coverage against a 79% CI gate. The G1 dependency catalog audit and G2 license/manifest provenance safeguards are recorded and committed. G0 remains reopened; packaging evidence, EFI trust/validation, official Recovery acquisition, platform USB adapters, clean-host workflow and physical acceptance remain open. Sequoia is the first qualification target. Neither historical milestone completion nor prototype code establishes shipping readiness.
 
 **Project:** Libre_Core-MacLoader  
 **Completed Milestones:**
@@ -122,7 +122,7 @@ macloader deps cache --clear
 
 ```bash
 $ python -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79
-============================== 250 passed ==============================
+============================== 254 passed ==============================
 
 $ python -m mypy macloader tests
 Success: no issues found in 72 source files

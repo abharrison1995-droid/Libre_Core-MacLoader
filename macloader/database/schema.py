@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import re
 from typing import Any, Dict, List
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from macloader.domain.compatibility import CompatibilityState
 from macloader.domain.dependencies import ArtifactVariant, DependencyArtifact, DependencySpec
@@ -236,6 +236,11 @@ class DependencyCatalogSchema:
                 expected_prefix = f"/{repo_path}/releases/download/{item['release_tag']}/"
                 if not parsed_url.path.startswith(expected_prefix):
                     raise DatabaseValidationError(f"Artifact '{var_key}' of '{dep_id}' is not under the cataloged repository/release tag")
+                asset_name = str(art_data["asset_name"])
+                if parsed_url.query or parsed_url.fragment or unquote(parsed_url.path.rsplit("/", 1)[-1]) != asset_name:
+                    raise DatabaseValidationError(
+                        f"Artifact '{var_key}' of '{dep_id}' asset_name does not match its exact source URL"
+                    )
                 try:
                     size_bytes = int(art_data.get("size_bytes", 0))
                 except (TypeError, ValueError) as exc:
@@ -269,6 +274,8 @@ class DependencyCatalogSchema:
                 artifacts=artifacts,
                 subcomponents=[str(s) for s in item.get("subcomponents", [])],
                 date_verified=str(item.get("date_verified", "")),
+                license_file=str(item.get("license_file", "")),
+                license_sha256=str(item.get("license_sha256", "")).lower(),
             )
             dep_specs[dep_id] = spec
 

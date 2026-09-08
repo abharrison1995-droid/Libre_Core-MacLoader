@@ -12,7 +12,7 @@ from macloader.database.loader import Database
 from macloader.dependencies.resolver import DependencyResolver
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.compatibility import CompatibilityState
-from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
+from macloader.domain.contracts import BuildManifest, CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.dependencies import ArtifactVariant
 from macloader.exceptions import BuildPlanError
 
@@ -49,9 +49,48 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
     assert any("Configured driver is missing" in error for error in report.errors)
 
     (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}, "PlatformInfo": {"Generic": {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}}}))
-    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+    builder = EfiBuilder()
+    expected_manifest = BuildManifest(
+        CONTRACT_SCHEMA_VERSION,
+        "a" * 64,
+        "Lenovo ThinkPad T480s",
+        "sequoia",
+        "b" * 64,
+        "VALID",
+        output_paths={"efi": "EFI"},
+        toolchain_digest="c" * 64,
+        identity_digest="d" * 64,
+        output_digest=builder._tree_digest(root),
+    )
+    (root / "manifest.json").write_text(json.dumps(expected_manifest.to_dict()), encoding="utf-8")
+    report = builder.validate_tree(root, toolchain=toolchain, expected_manifest=expected_manifest)
     assert report.status == "INVALID"
     assert report.checks["ocvalidate_exit"] == "2"
+
+
+def test_qualified_validation_requires_a_trusted_expected_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "efi"
+    _minimal_tree(root)
+    validator = tmp_path / "ocvalidate.py"
+    validator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    toolchain = ToolchainSelection(
+        CONTRACT_SCHEMA_VERSION,
+        "1.0.7",
+        "1.0.7",
+        None,
+        None,
+        None,
+        "windows",
+        "x86_64",
+        {"qualification": "qualified"},
+        str(validator),
+        hashlib.sha256(validator.read_bytes()).hexdigest(),
+    )
+
+    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+
+    assert report.status == "INVALID"
+    assert any("expected manifest" in error for error in report.errors)
 
 
 def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_path: Path) -> None:
@@ -90,6 +129,11 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     assert (result.output_dir / "EFI/BOOT/BOOTx64.efi").is_file()
     assert (result.output_dir / "EFI/OC/OpenCore.efi").is_file()
     assert (result.output_dir / "EFI/OC/Tools/OpenShell.efi").is_file()
+    for dependency_id in ("opencore", "lilu", "virtualsmc"):
+        expected_license = (db.data_dir / "licenses" / f"{dependency_id}.txt").read_text(encoding="utf-8")
+        published_license = (result.output_dir / "LICENSES" / f"{dependency_id}.txt").read_text(encoding="utf-8")
+        assert published_license == expected_license
+        assert result.manifest.license_digests[dependency_id] == hashlib.sha256(expected_license.encode("utf-8")).hexdigest()
     assert not (result.output_dir / ".identity.private.json").exists()
     assert (tmp_path / "identities" / result.identity.storage_ref).is_file()
 

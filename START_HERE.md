@@ -2,7 +2,7 @@
 
 ## Current entry point (2026-09-08)
 
-Read [the active implementation plan](docs/IMPLEMENTATION_PLAN.md) first. The hardened foundation and preliminary builder, Recovery and removable-media code are present, with 250 local tests passing, clean mypy and 79.82% branch coverage against a 79% CI gate. **G0 is reopened:** S12 is verified and committed; hosted clean-checkout evidence and the EFI trust/validation boundaries (S01-S04) remain before qualifying T480s/Sequoia. The plan records progress, concrete regression tests and shipping gates. The [review ledger](docs/IMPLEMENTATION_REVIEW.md) preserves earlier findings; old closeout claims are superseded by the plan. Setup and first-tranche instructions below are historical context.
+Read [the active implementation plan](docs/IMPLEMENTATION_PLAN.md) first. The hardened foundation and preliminary builder, Recovery and removable-media code are present, with 254 local tests passing, clean mypy and 79.79% branch coverage against a 79% CI gate. **G0 is reopened:** S12 is verified and committed; hosted clean-checkout evidence and the EFI trust/validation boundaries (S01-S04) remain before qualifying T480s/Sequoia. The plan records progress, concrete regression tests and shipping gates. The [review ledger](docs/IMPLEMENTATION_REVIEW.md) preserves earlier findings; old closeout claims are superseded by the plan. Setup and first-tranche instructions below are historical context.
 
 Libre_Core MacLoader is a **new sibling project** to `Libre_Core-AutoLoader`.
 

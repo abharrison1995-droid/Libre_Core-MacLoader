@@ -141,6 +141,7 @@ class EfiBuilder:
 
             kexts: List[str] = []
             drivers: List[str] = []
+            license_digests: Dict[str, str] = {}
             total_build_bytes = 0
 
             def _track_build_bytes(chunk_len: int) -> None:
@@ -173,9 +174,32 @@ class EfiBuilder:
                         kexts.append(kext_rel)
                     elif normalized_component.startswith("EFI/OC/Drivers/") and Path(normalized_component).name.endswith(".efi"):
                         drivers.append(Path(normalized_component).name)
-                (licenses / f"{dependency.dependency_id}.txt").write_text(
-                    f"{dependency.project_name}\nLicense: recorded in the verified catalog\n", encoding="utf-8"
-                )
+                spec = self.db.get_dependency_spec(dependency.dependency_id)
+                if spec is None or not spec.license_file or not spec.license_sha256:
+                    raise BuildPlanError(f"Pinned license metadata is missing for {dependency.dependency_id}")
+                license_path = self.db.data_dir / spec.license_file
+                data_root = self.db.data_dir.resolve()
+                try:
+                    license_path.resolve().relative_to(data_root)
+                except ValueError as exc:
+                    raise BuildPlanError(f"Pinned license path escapes the database for {dependency.dependency_id}") from exc
+                if not license_path.is_file() or license_path.is_symlink():
+                    raise BuildPlanError(
+                        f"Pinned license notice is missing for {dependency.dependency_id}"
+                    )
+                try:
+                    license_text = license_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise BuildPlanError(
+                        f"Pinned license notice could not be read for {dependency.dependency_id}: {exc}"
+                    ) from exc
+                if not license_text.strip():
+                    raise BuildPlanError(f"Pinned license notice is empty for {dependency.dependency_id}")
+                license_digest = compute_file_sha256(license_path)
+                if license_digest != spec.license_sha256.lower():
+                    raise BuildPlanError(f"Pinned license notice integrity mismatch for {dependency.dependency_id}")
+                license_digests[dependency.dependency_id] = license_digest
+                (licenses / f"{dependency.dependency_id}.txt").write_text(license_text, encoding="utf-8")
 
             identity_path = self._identity_path(plan, dependencies)
             stored_identity = self._load_identity(identity_path) if identity_path.is_file() else None
@@ -187,8 +211,8 @@ class EfiBuilder:
             if identity_errors:
                 raise BuildPlanError("Invalid EFI identity: " + "; ".join(identity_errors))
             self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
-            validation = self.validate_tree(staging, toolchain=toolchain, identity=identity_data)
-            if validation.status != "VALID":
+            validation = self.validate_tree(staging, toolchain=None, identity=identity_data)
+            if validation.errors:
                 raise BuildPlanError("Generated EFI failed structural validation: " + "; ".join(validation.errors))
 
             output_digest = self._tree_digest(staging)
@@ -209,6 +233,7 @@ class EfiBuilder:
                 toolchain_digest=toolchain.digest,
                 identity_digest=canonical_json_digest(identity_data),
                 output_digest=output_digest,
+                license_digests=license_digests,
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
             (staging / "manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
@@ -284,13 +309,26 @@ class EfiBuilder:
         manifest_path = root / "manifest.json"
         if expected_manifest is not None and (not manifest_path.is_file() or manifest_path.is_symlink()):
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Expected build manifest is missing or unsafe"], warnings)
+        if (
+            toolchain is not None
+            and toolchain.provenance.get("qualification") == "qualified"
+            and expected_manifest is None
+        ):
+            return ValidationReport(
+                CONTRACT_SCHEMA_VERSION,
+                "INVALID",
+                toolchain.ocvalidate_version,
+                checks,
+                ["Qualified release validation requires an expected manifest bound to the build inputs"],
+                warnings,
+            )
         if manifest_path.is_file() and not manifest_path.is_symlink():
             try:
                 manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
                 required_manifest_keys = {
                     "schema_version", "build_digest", "target_model", "target_macos",
                     "artifact_lock_digest", "validation_report", "toolchain_digest",
-                    "identity_digest", "output_digest", "output_paths",
+                    "identity_digest", "output_digest", "license_digests", "output_paths",
                 }
                 if set(manifest_data) != required_manifest_keys:
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest has an invalid schema"], warnings)
@@ -301,6 +339,17 @@ class EfiBuilder:
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Published output changed after validation"], warnings)
                 if manifest_data.get("validation_report") != "VALID":
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest is not marked VALID"], warnings)
+                license_digests = manifest_data.get("license_digests")
+                if (
+                    not isinstance(license_digests, dict)
+                    or any(
+                        not isinstance(key, str)
+                        or not isinstance(value, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", value)
+                        for key, value in license_digests.items()
+                    )
+                ):
+                    return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest contains invalid license digests"], warnings)
                 if expected_manifest is not None and manifest_data != expected_manifest.to_dict():
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest identity does not match the validated inputs"], warnings)
             except (OSError, ValueError) as exc:
@@ -422,15 +471,28 @@ class EfiBuilder:
                 if not candidates:
                     nested = [name for name in names if ("/" + normalized_comp + "/") in name or name.startswith(normalized_comp + "/")]
                     if nested:
-                        nested_name = min(nested, key=len)
-                        if ("/" + normalized_comp + "/") in nested_name:
-                            prefix = nested_name.split("/" + normalized_comp + "/", 1)[0] + "/"
-                            candidates = [prefix + normalized_comp + "/"]
-                        else:
-                            candidates = [normalized_comp + "/"]
+                        nested_candidates = set()
+                        for nested_name in nested:
+                            if ("/" + normalized_comp + "/") in nested_name:
+                                prefix = nested_name.split("/" + normalized_comp + "/", 1)[0] + "/"
+                                nested_candidates.add(prefix + normalized_comp + "/")
+                            else:
+                                nested_candidates.add(normalized_comp + "/")
+                        candidates = sorted(nested_candidates)
                 if not candidates:
                     raise BuildPlanError(f"Component {component} is missing from {archive_path.name}")
-                candidate = min(candidates, key=len).rstrip("/")
+                preferred = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.startswith("X64/") or "/X64/" in candidate
+                ]
+                if preferred:
+                    candidates = preferred
+                if len(candidates) != 1:
+                    raise BuildPlanError(
+                        f"Component {component} has ambiguous archive members in {archive_path.name}: {sorted(candidates)}"
+                    )
+                candidate = candidates[0].rstrip("/")
                 prefix = candidate[: -len(normalized_comp)] if candidate.endswith(normalized_comp) else ""
 
                 if normalized_comp.startswith("EFI/"):

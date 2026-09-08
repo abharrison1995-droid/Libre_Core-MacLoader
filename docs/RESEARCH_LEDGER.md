@@ -235,13 +235,17 @@ Do the pinned dependency tags, release assets, sizes and SHA-256 values in polic
 - Nine stale DEBUG records had incorrect size/hash pairs. The catalog now records the official asset metadata for Lilu, WhateverGreen, VirtualSMC, AppleALC, IntelMausi, NVMeFix, VoodooPS2, VoodooI2C and BlueToolFixup.
 - The selected RELEASE archives contain every catalogued payload component. OpenCore stores the expected EFI tree under its official `X64/EFI/...` prefix; the builder maps that prefix to the published EFI destination.
 - Upstream license files confirm BSD-3-Clause for the Acidanthera BSD projects, GPL-3.0 for IntelBluetoothFirmware, and Apple Public Source License 2.0 for VoodooPS2. The catalog now records the latter two corrections. NVMeFix's `LICENSE.txt` grants BSD-3-Clause terms even though GitHub reports `NOASSERTION` for the repository license field.
-- The release archives do not consistently contain license text files. The builder's current generated `LICENSES` records therefore remain provenance summaries rather than full license notices and must be replaced with reviewed notices before G6 packaging.
+- The release archives do not consistently contain license text files. The repository now stores the license text fetched from each pinned upstream tag and the builder copies the exact notice into the generated `LICENSES` directory; package-data coverage and builder output tests protect this provenance.
+- License files now have pinned SHA-256 values in the machine-readable catalog and generated manifests. The builder rejects missing, escaping, empty or modified notices before publication.
+- Archive selection now prefers the official OpenCore `X64` member when both IA32 and X64 trees are present and rejects any remaining duplicate component matches. Artifact URLs must also name exactly the catalogued asset and may not carry query or fragment variants.
 - No release tag was advanced solely because a newer development or unqualified artifact might exist. The pinned release set remains the qualification baseline until the G1 T480s/Sequoia policy and matching toolchain are frozen.
 
 ### Decision
 - Keep the existing release versions and source URLs in policy `2026.08-a`.
 - Correct the stale DEBUG size/hash records and set `date_verified` to `2026-09-09`.
 - Correct the VoodooPS2 and IntelBluetoothFirmware SPDX identifiers in the catalog.
+- Preserve the pinned license texts as package data and publish them with every generated EFI.
+- Bind license notice digests and archive-member selection to the build evidence; do not qualify a build from a caller-supplied arbitrary duplicate or notice file.
 - Treat archive member layout, license notices, host tool provenance and a real T480s/Sequoia build as separate G1 qualification work; this API audit does not close those gates.
 
 ### Confidence
