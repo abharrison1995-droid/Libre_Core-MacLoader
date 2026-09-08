@@ -59,12 +59,14 @@ class RecoveryAcquirer:
         timeout_seconds: float = 60.0,
         cancel: Optional[Callable[[], bool]] = None,
         allowed_hosts: Optional[set[str]] = None,
+        expected_macos: str = "sequoia",
     ):
         self.transport = transport
         self.max_bytes = max_bytes
         self.timeout_seconds = timeout_seconds
         self.cancel = cancel
         self.allowed_hosts = allowed_hosts
+        self.expected_macos = expected_macos
 
     def _is_host_approved(self, host: Optional[str]) -> bool:
         if not host:
@@ -80,6 +82,19 @@ class RecoveryAcquirer:
             raise ArtifactDownloadError("Recovery source must use HTTPS")
         if not self._is_host_approved(parsed.hostname):
             raise ArtifactDownloadError("Recovery source host is not an approved Apple domain")
+        if not asset.product or not asset.product.strip():
+            raise ArtifactDownloadError("Recovery asset product is missing or empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset.product):
+            raise ArtifactDownloadError(f"Recovery asset product contains invalid characters: {asset.product}")
+        if not asset.build or not asset.build.strip():
+            raise ArtifactDownloadError("Recovery asset build is missing or empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset.build):
+            raise ArtifactDownloadError(f"Recovery asset build contains invalid characters: {asset.build}")
+        if not validate_recovery_product_version(asset.product, asset.build, self.expected_macos):
+            raise ArtifactDownloadError(
+                f"Recovery product/build is not supported for macOS {self.expected_macos}: "
+                f"{asset.product}/{asset.build}"
+            )
         if asset.size_bytes <= 0 or asset.size_bytes > self.max_bytes:
             raise ArtifactDownloadError("Recovery asset size is missing or exceeds the configured limit")
         if not re.fullmatch(r"[0-9a-fA-F]{64}", asset.sha256):
@@ -190,3 +205,62 @@ class RecoveryAcquirer:
         for p in (current, *current.parents):
             if p.is_symlink():
                 raise ArtifactDownloadError("Recovery destination has a symlinked parent")
+
+
+SUPPORTED_RECOVERY_MATRIX: dict[str, dict[str, Any]] = {
+    "sequoia": {
+        "name": "macOS Sequoia",
+        "major_version": 15,
+        "build_prefix": "24",
+        "supported_models": ["Lenovo ThinkPad T480s", "Lenovo ThinkPad T480"],
+    },
+    "sonoma": {
+        "name": "macOS Sonoma",
+        "major_version": 14,
+        "build_prefix": "23",
+        "supported_models": ["Lenovo ThinkPad T480s"],
+    },
+    "tahoe": {
+        "name": "macOS Tahoe",
+        "major_version": 26,
+        "build_prefix": "26",
+        "supported_models": [],
+    },
+}
+
+
+def validate_recovery_product_version(product: str, build: str, expected_macos: Optional[str] = None) -> bool:
+    """Validate that product and build match a supported macOS release."""
+    if not product or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", product):
+        return False
+    if not build or not re.fullmatch(r"[0-9]{2}[A-Za-z][0-9]{2,6}[a-z]?", build):
+        return False
+    if expected_macos is not None:
+        targets: tuple[str, ...] = (expected_macos.lower(),)
+    else:
+        targets = tuple(SUPPORTED_RECOVERY_MATRIX)
+    return any(
+        target in SUPPORTED_RECOVERY_MATRIX
+        and build.startswith(SUPPORTED_RECOVERY_MATRIX[target]["build_prefix"])
+        for target in targets
+    )
+
+
+def verify_recovery_integrity(asset: RecoveryAsset, target_path: Path) -> bool:
+    """Bounded integrity readback check of a downloaded recovery asset."""
+    target_path = Path(target_path)
+    if (
+        asset.size_bytes <= 0
+        or asset.size_bytes > 16 * 1024 * 1024 * 1024
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", asset.sha256)
+    ):
+        return False
+    if not target_path.is_file() or target_path.is_symlink():
+        return False
+    if target_path.stat().st_size != asset.size_bytes:
+        return False
+    hasher = hashlib.sha256()
+    with target_path.open("rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest().lower() == asset.sha256.lower()

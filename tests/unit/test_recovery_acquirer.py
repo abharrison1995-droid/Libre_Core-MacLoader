@@ -16,7 +16,7 @@ from macloader.recovery.acquirer import _RecoveryRedirectHandler, is_approved_re
 
 
 def _asset(payload: bytes, url: str = "https://osrecovery.apple.com/recovery") -> RecoveryAsset:
-    return RecoveryAsset("InstallAssistant", "test", url, hashlib.sha256(payload).hexdigest(), len(payload))
+    return RecoveryAsset("InstallAssistant", "24A348", url, hashlib.sha256(payload).hexdigest(), len(payload))
 
 
 class _MockResponse:
@@ -71,7 +71,7 @@ def test_recovery_rejects_size_hash_and_cancellation_failures(tmp_path: Path) ->
     with pytest.raises(ArtifactDownloadError, match="cancelled"):
         RecoveryAcquirer(transport=lambda *_: None, cancel=lambda: True).download(_asset(payload), tmp_path / "cancelled.dmg")
 
-    wrong = RecoveryAsset("InstallAssistant", "test", "https://osrecovery.apple.com/recovery", "0" * 64, len(payload))
+    wrong = RecoveryAsset("InstallAssistant", "24A348", "https://osrecovery.apple.com/recovery", "0" * 64, len(payload))
 
     def correct_transport(_: str, destination: Path) -> None:
         destination.write_bytes(payload)
@@ -86,14 +86,14 @@ def test_recovery_rejects_non_apple_hosts_unless_configured(tmp_path: Path) -> N
 
     # Default rejects arbitrary non-Apple host
     with pytest.raises(ArtifactDownloadError, match="not an approved Apple domain"):
-        RecoveryAcquirer().download(RecoveryAsset("IA", "test", "https://attacker.com/recovery", "0" * 64, len(payload)), dest)
+        RecoveryAcquirer().download(RecoveryAsset("IA", "24A348", "https://attacker.com/recovery", "0" * 64, len(payload)), dest)
 
     # Allowed when explicitly in allowed_hosts
     def transport(_: str, destination: Path) -> None:
         destination.write_bytes(payload)
 
     acquirer = RecoveryAcquirer(transport=transport, allowed_hosts={"attacker.com"})
-    res = acquirer.download(RecoveryAsset("IA", "test", "https://attacker.com/recovery", hashlib.sha256(payload).hexdigest(), len(payload)), dest)
+    res = acquirer.download(RecoveryAsset("IA", "24A348", "https://attacker.com/recovery", hashlib.sha256(payload).hexdigest(), len(payload)), dest)
     assert res == dest
 
 
@@ -123,25 +123,25 @@ def test_recovery_retains_prior_valid_destination_across_all_failure_modes(tmp_p
     # 1. Checksum mismatch
     check_failure(
         RecoveryAcquirer(transport=_write_bad),
-        RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "0" * 64, 3),
+        RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "0" * 64, 3),
     )
 
     # 2. Oversized
     check_failure(
         RecoveryAcquirer(transport=_write_big),
-        RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "0" * 64, 2),
+        RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "0" * 64, 2),
     )
 
     # 3. Truncated
     check_failure(
         RecoveryAcquirer(transport=_write_small),
-        RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
+        RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
     )
 
     # 4. Cancelled
     check_failure(
         RecoveryAcquirer(transport=lambda *_: None, cancel=lambda: True),
-        RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
+        RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
     )
 
     # 5. Network error
@@ -150,7 +150,7 @@ def test_recovery_retains_prior_valid_destination_across_all_failure_modes(tmp_p
     with unittest.mock.patch("urllib.request.build_opener", return_value=mock_opener):
         check_failure(
             RecoveryAcquirer(),
-            RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
+            RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "0" * 64, 10),
         )
 
 
@@ -160,31 +160,31 @@ def test_recovery_rejects_invalid_url_and_hash_metadata(tmp_path: Path) -> None:
 
     # Non-HTTPS
     with pytest.raises(ArtifactDownloadError, match="must use HTTPS"):
-        acquirer.download(RecoveryAsset("IA", "1", "http://osrecovery.apple.com/pkg", "a" * 64, 100), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "http://osrecovery.apple.com/pkg", "a" * 64, 100), dest)
 
     # URL with embedded credentials
     with pytest.raises(ArtifactDownloadError, match="must use HTTPS"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://user:pass@osrecovery.apple.com/pkg", "a" * 64, 100), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://user:pass@osrecovery.apple.com/pkg", "a" * 64, 100), dest)
 
     # URL with non-standard port
     with pytest.raises(ArtifactDownloadError, match="must use HTTPS"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com:8080/pkg", "a" * 64, 100), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com:8080/pkg", "a" * 64, 100), dest)
 
     # Zero or negative size
     with pytest.raises(ArtifactDownloadError, match="missing or exceeds"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "a" * 64, 0), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "a" * 64, 0), dest)
     with pytest.raises(ArtifactDownloadError, match="missing or exceeds"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "a" * 64, -5), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "a" * 64, -5), dest)
 
     # Size exceeds max_bytes
     with pytest.raises(ArtifactDownloadError, match="missing or exceeds"):
-        RecoveryAcquirer(max_bytes=1000).download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "a" * 64, 2000), dest)
+        RecoveryAcquirer(max_bytes=1000).download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "a" * 64, 2000), dest)
 
     # Invalid SHA-256 format
     with pytest.raises(ArtifactDownloadError, match="SHA-256 is invalid"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "not-a-hash", 100), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "not-a-hash", 100), dest)
     with pytest.raises(ArtifactDownloadError, match="SHA-256 is invalid"):
-        acquirer.download(RecoveryAsset("IA", "1", "https://osrecovery.apple.com/pkg", "a" * 63, 100), dest)
+        acquirer.download(RecoveryAsset("IA", "24A348", "https://osrecovery.apple.com/pkg", "a" * 63, 100), dest)
 
 
 def test_recovery_rejects_symlinks_and_insufficient_disk_space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,7 +403,7 @@ def test_recovery_large_synthetic_asset_uses_bounded_memory(tmp_path: Path) -> N
         hasher.update(chunk_pattern)
     expected_sha = hasher.hexdigest()
 
-    asset = RecoveryAsset("LargeRecovery", "1", "https://osrecovery.apple.com/recovery", expected_sha, chunks_count * len(chunk_pattern))
+    asset = RecoveryAsset("LargeRecovery", "24A348", "https://osrecovery.apple.com/recovery", expected_sha, chunks_count * len(chunk_pattern))
     dest = tmp_path / "synthetic_large.dmg"
 
     mock_opener = unittest.mock.MagicMock()
@@ -430,4 +430,3 @@ def test_recovery_normalizes_network_errors(tmp_path: Path) -> None:
 
     assert not dest.exists()
     assert not list(tmp_path.glob("*.part"))
-
