@@ -7,7 +7,9 @@ htmlcov/
 .venv/
 venv/
 dist/
-build/
+# Root-level build output. Do not ignore source packages such as
+# macloader/build/.
+/build/
 *.egg-info/
 workspace/*
 !workspace/.gitkeep

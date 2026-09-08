@@ -90,3 +90,15 @@ def test_offline_fetch_mode_raises_on_cache_miss(tmp_path: Path, t480s_baseline_
     with pytest.raises(ArtifactDownloadError) as exc:
         orchestrator.fetch_dependencies(dep_set, offline=True)
     assert "Offline mode: the following required artifacts are missing" in str(exc.value)
+
+
+def test_downloader_enforces_download_budget(tmp_path: Path) -> None:
+    artifact = DependencyArtifact(
+        asset_name="large.zip", source_url="https://example.com/large.zip", sha256="0" * 64, size_bytes=10,
+    )
+
+    def oversized_transport(url: str, dest_path: Path) -> None:
+        dest_path.write_bytes(b"0123456789")
+
+    with pytest.raises(ArtifactDownloadError, match="maximum size"):
+        Downloader(transport=oversized_transport, max_download_bytes=4).download_artifact(artifact, tmp_path / "large.zip")

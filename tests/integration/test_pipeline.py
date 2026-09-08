@@ -35,5 +35,5 @@ def test_full_pipeline_unsupported_model(x1_carbon_fixture: Path) -> None:
     snapshot = orchestrator.probe_hardware(fixture_path=x1_carbon_fixture)
     report = orchestrator.check_support(snapshot, target_macos="sequoia")
 
-    assert report.overall_state == CompatibilityState.BLOCKED
+    assert report.overall_state == CompatibilityState.UNKNOWN
     assert report.can_generate_build_plan is False

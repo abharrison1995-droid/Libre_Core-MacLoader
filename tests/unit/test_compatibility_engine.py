@@ -92,7 +92,7 @@ def test_unsupported_model_blocks_evaluation(x1_carbon_fixture: Path, db: Databa
     engine = CompatibilityEngine(db=db)
     report = engine.evaluate(snapshot, target_macos="sequoia")
 
-    assert report.overall_state == CompatibilityState.BLOCKED
+    assert report.overall_state == CompatibilityState.UNKNOWN
     assert report.can_generate_build_plan is False
     assert report.model_id is None
 

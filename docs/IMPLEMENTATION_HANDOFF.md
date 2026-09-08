@@ -1,5 +1,7 @@
 # MacLoader Implementation Handoff — v0.0.1 → v0.0.4
 
+> Historical handoff (2026-08-29). Follow the [active implementation plan](IMPLEMENTATION_PLAN.md), updated after the six-agent Terra review: 79 local tests pass and mypy is clean across 63 files, but G0 is reopened and packaging, EFI trust/validation, concurrency and safety defects remain. Sequoia is the first qualification target. Neither historical milestone completion nor prototype code establishes shipping readiness.
+
 **Project:** Libre_Core-MacLoader  
 **Completed Milestones:**
 - **v0.0.1**: ThinkPad T480s hardware detection (`20L7`, `20L8`)
@@ -144,7 +146,7 @@ Key test coverage:
 ## 6. Unresolved Policies & Intentional Deferrals
 
 - **Tahoe Analogue Audio**: Explicitly kept as an `unresolved_requirement` in the `ResolvedDependencySet`. Apple removed `AppleHDA` in macOS Tahoe, so AppleALC alone is insufficient. Workarounds (root-patching / VoodooHDA) are deferred to v0.0.5.
-- **Tahoe Intel Wi-Fi**: Modeled conservatively with warnings regarding legacy network framework shifts in macOS 16.
+- **Tahoe Intel Wi-Fi**: Modeled conservatively with warnings regarding legacy network framework shifts in macOS 26.
 - **EFI Tree Construction**: In accordance with the spec, v0.0.4 resolves software artifacts and verifies caches. It does NOT generate `config.plist`, compile ACPI `.aml` tables, or construct EFI directory trees.
 
 ---

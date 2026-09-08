@@ -1,6 +1,7 @@
 """Unit tests for LinuxHardwareProvider using isolated filesystem mocks."""
 
 from pathlib import Path
+import os
 from macloader.detection.linux import LinuxHardwareProvider
 
 
@@ -40,7 +41,10 @@ microcode	: 0xf4
     (proc_root / "cpuinfo").write_text(cpuinfo_content)
 
     # Setup mock PCI devices
-    pci_dir = sys_root / "bus" / "pci" / "devices" / "0000:00:02.0"
+    # Colons are valid Linux sysfs slot names but invalid Windows filenames.
+    # The provider accepts this portable fixture spelling for the Windows CI run.
+    pci_slot_dir = "0000:00:02.0" if os.name != "nt" else "0000_00_02_0"
+    pci_dir = sys_root / "bus" / "pci" / "devices" / pci_slot_dir
     pci_dir.mkdir(parents=True)
     (pci_dir / "vendor").write_text("0x8086\n")
     (pci_dir / "device").write_text("0x5917\n")
@@ -72,7 +76,7 @@ B: ABS=260800000000003
     assert snapshot.machine_type == "20L7"
     assert snapshot.cpu is not None
     assert snapshot.cpu.model_name == "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz"
-    assert snapshot.cpu.cores == 2
+    assert snapshot.cpu.cores == 0
     assert snapshot.igpu is not None
     assert snapshot.igpu.pci.canonical_id == "8086:5917"
     assert len(snapshot.input_devices) == 1

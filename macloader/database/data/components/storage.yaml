@@ -39,6 +39,12 @@ components:
       device_classes:
         - "0108"
         - "0106"
+      # Generic fallback for storage identified only by protocol kind (e.g. a
+      # sysfs block-device probe with no PCI class evidence available) — any
+      # standards-compliant NVMe/AHCI controller uses macOS's native driver.
+      kinds:
+        - "nvme"
+        - "sata"
     macos_policies:
       sonoma:
         state: EXPERIMENTAL

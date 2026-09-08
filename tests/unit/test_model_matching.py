@@ -5,6 +5,7 @@ from macloader.compatibility.model_matcher import match_model
 from macloader.database.loader import Database
 from macloader.detection.fixture import FixtureHardwareProvider
 from macloader.domain.compatibility import CompatibilityState
+from macloader.domain.hardware import HardwareSnapshot
 
 
 def test_match_t480s_baseline(t480s_baseline_fixture: Path, db: Database) -> None:
@@ -50,8 +51,8 @@ def test_reject_unsupported_lenovo_model(x1_carbon_fixture: Path, db: Database) 
     model, decision = match_model(snapshot, db)
 
     assert model is None
-    assert decision.state == CompatibilityState.BLOCKED
-    assert "Unsupported Lenovo ThinkPad model" in decision.reason
+    assert decision.state == CompatibilityState.UNKNOWN
+    assert "Machine type" in decision.reason
 
 
 def test_reject_non_lenovo_hardware(non_lenovo_fixture: Path, db: Database) -> None:
@@ -61,3 +62,21 @@ def test_reject_non_lenovo_hardware(non_lenovo_fixture: Path, db: Database) -> N
     assert model is None
     assert decision.state == CompatibilityState.BLOCKED
     assert "Unsupported manufacturer 'Dell Inc.'" in decision.reason
+
+
+def test_name_only_t480s_does_not_match_t480(db: Database) -> None:
+    snapshot = HardwareSnapshot(
+        manufacturer="LENOVO", product_name="ThinkPad T480s", product_version="ThinkPad T480s"
+    )
+    model, decision = match_model(snapshot, db)
+    assert model is not None and model.id == "thinkpad-t480s"
+    assert decision.state == CompatibilityState.EXPERIMENTAL
+
+
+def test_contradictory_dmi_evidence_is_unknown(db: Database) -> None:
+    snapshot = HardwareSnapshot(
+        manufacturer="LENOVO", product_name="ThinkPad T480s", product_version="ThinkPad T480s", machine_type="20L5"
+    )
+    model, decision = match_model(snapshot, db)
+    assert model is None
+    assert decision.state == CompatibilityState.UNKNOWN

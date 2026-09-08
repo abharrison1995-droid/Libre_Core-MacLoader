@@ -165,6 +165,7 @@
       "serial": "[REDACTED-SERIAL]",
       "uuid": "[REDACTED-UUID]"
     },
-    "os": "linux"
+    "os": "linux",
+    "inventory_status": {"audio": true, "ethernet": true, "wifi": true, "bluetooth": true, "storage": true, "input": true}
   }
 }

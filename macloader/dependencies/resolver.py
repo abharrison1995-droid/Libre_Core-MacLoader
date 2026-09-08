@@ -1,6 +1,9 @@
 """Dependency resolver translating BuildPlans and capability requirements into resolved dependency sets."""
 
 from datetime import datetime, timezone
+import hashlib
+import json
+import copy
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -8,6 +11,7 @@ from macloader.database.loader import Database, get_database
 from macloader.database.schema import DependencyCatalogSchema
 from macloader.dependencies.graph import DependencyGraph
 from macloader.domain.build_plan import BuildPlan
+from macloader.domain.compatibility import CompatibilityState
 from macloader.domain.dependencies import (
     ArtifactVariant,
     DependencySpec,
@@ -15,6 +19,7 @@ from macloader.domain.dependencies import (
     ResolvedDependencySet,
 )
 from macloader.exceptions import DependencyNotFoundError
+from macloader.exceptions import UnsupportedMacOSError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,17 @@ class DependencyResolver:
                 graph.add_node(spec.id, spec.dependencies)
         return graph
 
+    def catalog_digest(self) -> str:
+        if not self.catalog:
+            raise DependencyNotFoundError("Dependency catalog unavailable.")
+        return hashlib.sha256(
+            json.dumps(
+                {"policy_version": self.catalog.policy_version, "dependencies": [spec.to_dict() for spec in sorted(self.catalog.dependencies.values(), key=lambda item: item.id)]},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
     def resolve(
         self,
         plan: BuildPlan,
@@ -44,11 +60,30 @@ class DependencyResolver:
         """Resolve all external dependencies required for the supplied BuildPlan and target macOS."""
         if not self.catalog:
             raise DependencyNotFoundError("Dependency catalog unavailable.")
+        if not plan.is_actionable or plan.support_state in (CompatibilityState.BLOCKED, CompatibilityState.UNKNOWN):
+            raise DependencyNotFoundError(
+                "Dependency resolution is blocked because the hardware plan is not actionable "
+                f"(state={plan.support_state.value})."
+            )
 
         target_macos = plan.target_macos.lower()
+        os_profile = self.db.get_macos(target_macos)
+        if not os_profile:
+            raise UnsupportedMacOSError(f"Unknown or unsupported macOS target: '{plan.target_macos}'")
+        if os_profile.status in (CompatibilityState.BLOCKED, CompatibilityState.UNKNOWN):
+            raise DependencyNotFoundError(
+                f"Dependency resolution is blocked by the macOS policy for '{target_macos}' "
+                f"(state={os_profile.status.value})."
+            )
         requested_specs: Dict[str, Tuple[str, str]] = {}  # dep_id -> (reason, required_by)
         unresolved: List[str] = list(plan.unresolved_requirements)
         warnings: List[str] = list(plan.warnings)
+        known_capabilities = {
+            "accelerated_intel_uhd_620", "alc257_audio", "intel_gigabit_ethernet",
+            "nvme_compatibility_fix", "intel_wireless_lan", "intel_bluetooth",
+            "intel_bluetooth_controller", "i2c_touchscreen", "ps2_trackpad_trackpoint",
+            "thinkpad_input", "disable_discrete_gpu",
+        }
 
         # 1. Base Bootloader & SMC Runtime
         requested_specs["opencore"] = ("OpenCore UEFI bootloader runtime environment", "core.runtime")
@@ -56,6 +91,9 @@ class DependencyResolver:
 
         # 2. Map BuildPlan capabilities to dependencies
         for cap in plan.required_capabilities:
+            if cap not in known_capabilities:
+                unresolved.append(f"Unknown capability '{cap}' has no verified dependency mapping")
+                continue
             if cap == "accelerated_intel_uhd_620":
                 requested_specs["whatevergreen"] = (
                     "Intel UHD 620 graphics driver and display pipeline patching",
@@ -107,7 +145,7 @@ class DependencyResolver:
                         "capability:intel_wireless_lan",
                     )
                     warnings.append(
-                        "Intel Wi-Fi on macOS Tahoe remains experimental due to framework modernizations in macOS 16."
+                        "Intel Wi-Fi on macOS Tahoe remains experimental due to framework modernizations in macOS 26."
                     )
 
             elif cap in ("intel_bluetooth", "intel_bluetooth_controller"):
@@ -165,7 +203,7 @@ class DependencyResolver:
                     project_name=spec.project_name,
                     version=spec.version,
                     variant=artifact.variant,
-                    artifact=artifact,
+                    artifact=copy.deepcopy(artifact),
                     reason=reason,
                     required_by=req_by,
                     is_transitive=is_transitive,
@@ -175,10 +213,12 @@ class DependencyResolver:
 
         is_complete = len(unresolved) == 0
 
+        catalog_digest = self.catalog_digest()
         return ResolvedDependencySet(
             target_model=plan.target_model,
             target_macos=plan.target_macos,
             policy_version=self.catalog.policy_version,
+            catalog_digest=catalog_digest,
             variant=variant,
             resolved_dependencies=resolved_list,
             unresolved_requirements=unresolved,

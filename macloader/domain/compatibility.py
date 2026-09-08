@@ -93,6 +93,7 @@ class CompatibilityReport:
     model_decision: SupportDecision
     component_results: List[ComponentCompatibilityResult] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    unresolved_requirements: List[str] = field(default_factory=list)
     can_generate_build_plan: bool = False
     timestamp: str = ""
 
@@ -106,6 +107,7 @@ class CompatibilityReport:
             "model_decision": self.model_decision.to_dict(),
             "component_results": [r.to_dict() for r in self.component_results],
             "warnings": list(self.warnings),
+            "unresolved_requirements": list(self.unresolved_requirements),
             "can_generate_build_plan": self.can_generate_build_plan,
             "timestamp": self.timestamp,
         }
@@ -127,6 +129,7 @@ class CompatibilityReport:
                 for r in data.get("component_results", [])
             ],
             warnings=list(data.get("warnings", [])),
+            unresolved_requirements=list(data.get("unresolved_requirements", [])),
             can_generate_build_plan=bool(data.get("can_generate_build_plan", False)),
             timestamp=data.get("timestamp", ""),
         )

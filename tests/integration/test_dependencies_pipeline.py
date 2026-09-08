@@ -40,6 +40,13 @@ def test_full_dependency_pipeline_with_mock_downloads(tmp_path: Path, t480s_base
                 # Create a small valid file matching art.sha256
                 dummy_content = f"mock content for {dep.dependency_id}".encode("utf-8")
                 art.sha256 = hashlib.sha256(dummy_content).hexdigest()
+                art.size_bytes = len(dummy_content)
+                dep.artifact.sha256 = art.sha256
+                dep.artifact.size_bytes = art.size_bytes
+
+    # The test catalog was intentionally rewritten for deterministic mock
+    # payloads; refresh the lock identity exactly as a real resolver would.
+    dep_set.catalog_digest = orchestrator.resolver.catalog_digest()
 
     def mock_matching_transport(url: str, dest_path: Path) -> None:
         for dep in dep_set.resolved_dependencies:

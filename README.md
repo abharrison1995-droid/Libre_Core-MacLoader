@@ -8,6 +8,8 @@ It is an independent sibling project to [Libre_Core-AutoLoader](https://github.c
 
 ## Current Status: v0.0.4
 
+**2026-09-08 Terra follow-up:** the working tree has substantial foundation hardening and preliminary EFI/build-validation, Recovery and removable-media code. Local verification is **79 tests passing, mypy clean across 63 files**. It is not release-ready: EFI locks lack complete plan/catalog binding, structural-only validation incorrectly reports VALID, and hosted clean-checkout evidence remains pending. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the open fixes, qualification gates and **Sequoia-first** route to shipping.
+
 This repository currently implements **milestones v0.0.1 through v0.0.4**:
 - **v0.0.1**: ThinkPad T480s hardware detection (`20L7`, `20L8`)
 - **v0.0.2**: ThinkPad T480 hardware detection (`20L5`, `20L6`) & Nvidia MX150 dGPU variant detection
@@ -15,7 +17,7 @@ This repository currently implements **milestones v0.0.1 through v0.0.4**:
 - **v0.0.4**: OpenCore dependency catalog, DAG graph resolver, SHA-256 integrity verification, and offline cache
 
 > [!NOTE]
-> Later milestones (EFI building, macOS recovery downloading, USB installer creation) are scheduled for subsequent milestones (v0.0.5+).
+> EFI `build`/`validate` commands are preliminary and do not yet provide matching ocvalidate qualification. Recovery and removable-media helpers are incomplete and not an end-to-end installer. Their remaining work is tracked under G1-G7 in the active plan.
 
 ---
 
@@ -26,12 +28,12 @@ This repository currently implements **milestones v0.0.1 through v0.0.4**:
 git clone https://github.com/abharrison1995-droid/Libre_Core-MacLoader.git
 cd Libre_Core-MacLoader
 
-# Install in editable mode
-pip install -e .
+# Install in editable mode with test/type tooling
+python -m pip install -e ".[dev]"
 
-# Run test suite
-pytest
-mypy macloader tests
+# Run test suite and type checks
+python -m pytest -q
+python -m mypy macloader tests
 ```
 
 ---
@@ -107,7 +109,7 @@ macloader deps cache --json
 macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --variant DEBUG
 ```
 
-Note: `plan` defaults to `--macos tahoe` (forward-looking), while `support`/`deps` commands default to `--macos sequoia`.
+Note: `support`, `plan`, and `deps` commands default to the Sequoia qualification target. Tahoe remains a separate experimental policy.
 
 ---
 
@@ -136,6 +138,8 @@ Integrity Verification & Cache (SHA-256 checksums, offline workspace/cache/)
 ---
 
 ## Project Roadmap
+
+The checklist below records feature tranches, not production acceptance. Follow the [active execution plan and exit gates](docs/IMPLEMENTATION_PLAN.md); the next tranche is v0.0.4 foundation repairs. Matching ocvalidate is brought into the first EFI generator, and v0.1.0 also requires the user workflow, packaging and physical acceptance.
 
 - [x] **v0.0.1** — ThinkPad T480s hardware detection
 - [x] **v0.0.2** — ThinkPad T480 hardware detection & MX150 handling

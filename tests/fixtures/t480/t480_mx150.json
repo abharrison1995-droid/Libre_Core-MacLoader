@@ -84,5 +84,6 @@
       "model": "Crucial MX500 SATA SSD 1TB",
       "kind": "sata"
     }
-  ]
+  ],
+  "raw_evidence": {"inventory_status": {"audio": true, "ethernet": true, "wifi": true, "bluetooth": true, "storage": true, "input": true}}
 }

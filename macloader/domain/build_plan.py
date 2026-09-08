@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 import json
+import hashlib
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -22,7 +23,11 @@ class BuildPlan:
     warnings: List[str] = field(default_factory=list)
     plan_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     is_preliminary: bool = True
+    is_actionable: bool = False
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    schema_version: str = "0.1"
+    policy_version: str = ""
+    build_ready: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -36,11 +41,22 @@ class BuildPlan:
             "unresolved_requirements": list(self.unresolved_requirements),
             "warnings": list(self.warnings),
             "is_preliminary": self.is_preliminary,
+            "is_actionable": self.is_actionable,
             "timestamp": self.timestamp,
+            "schema_version": self.schema_version,
+            "policy_version": self.policy_version,
+            "build_ready": self.build_ready,
         }
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
+
+    def canonical_digest(self) -> str:
+        """Return a stable identity for equivalent plans, excluding audit fields."""
+        data = self.to_dict()
+        data.pop("plan_id", None)
+        data.pop("timestamp", None)
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BuildPlan":
@@ -55,5 +71,9 @@ class BuildPlan:
             unresolved_requirements=list(data.get("unresolved_requirements", [])),
             warnings=list(data.get("warnings", [])),
             is_preliminary=bool(data.get("is_preliminary", True)),
+            is_actionable=bool(data.get("is_actionable", False)),
             timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            schema_version=data.get("schema_version", "0.1"),
+            policy_version=data.get("policy_version", ""),
+            build_ready=bool(data.get("build_ready", False)),
         )

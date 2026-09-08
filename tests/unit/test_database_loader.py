@@ -3,10 +3,10 @@
 from pathlib import Path
 import pytest
 
-from macloader.database.loader import Database
+from macloader.database.loader import Database, get_database
 from macloader.database.schema import ComponentSchema, ModelSchema, MacOsSchema
 from macloader.domain.compatibility import CompatibilityState
-from macloader.exceptions import DatabaseValidationError
+from macloader.exceptions import DatabaseNotFoundError, DatabaseValidationError
 
 
 def test_database_loads_all_standard_definitions(db: Database) -> None:
@@ -62,3 +62,10 @@ def test_schema_validation_fails_on_invalid_compatibility_state() -> None:
     }
     with pytest.raises(DatabaseValidationError, match="Invalid compatibility state"):
         ComponentSchema.validate_and_load(invalid_data, filename="broken.yaml")
+
+
+def test_custom_database_registry_does_not_replace_default(tmp_path: Path) -> None:
+    default = get_database()
+    custom = get_database(tmp_path)
+    assert custom is not default
+    assert get_database() is default

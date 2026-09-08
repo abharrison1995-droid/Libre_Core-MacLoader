@@ -72,10 +72,9 @@ def test_windows_provider_handles_empty_processor_list_and_null_core_counts() ->
 
     provider = WindowsHardwareProvider(command_runner=mock_runner)
     snapshot = provider.probe()
-    # Must not raise IndexError on an empty JSON array; falls back to defaults instead.
-    assert snapshot.cpu is not None
-    assert snapshot.cpu.cores == 4
-    assert snapshot.cpu.threads == 8
+    # Missing processor inventory must remain missing rather than fabricate
+    # an Intel CPU and topology.
+    assert snapshot.cpu is None
 
     def mock_runner_null_cores(script: str) -> str:
         if "Win32_ComputerSystem" in script:
@@ -87,5 +86,5 @@ def test_windows_provider_handles_empty_processor_list_and_null_core_counts() ->
     provider = WindowsHardwareProvider(command_runner=mock_runner_null_cores)
     snapshot = provider.probe()
     assert snapshot.cpu is not None
-    assert snapshot.cpu.cores == 4
-    assert snapshot.cpu.threads == 8
+    assert snapshot.cpu.cores == 0
+    assert snapshot.cpu.threads == 0

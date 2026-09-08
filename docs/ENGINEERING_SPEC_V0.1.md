@@ -1,6 +1,8 @@
 # Libre_Core MacLoader
 ## Engineering Specification — v0.1 Draft A
 
+Execution update (2026-09-08): use [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for current status, sequencing and acceptance gates. It adds a foundation repair tranche, moves matching ocvalidate into the first EFI build, and records the user-confirmed Sequoia-first qualification target. This specification remains the product contract.
+
 **Project:** Libre_Core-MacLoader  
 **Package:** `macloader`  
 **CLI:** `macloader`  

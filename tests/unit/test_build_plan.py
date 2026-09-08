@@ -55,3 +55,12 @@ def test_generate_build_plan_omits_graphics_when_no_igpu_detected(db: Database) 
 
     assert "accelerated_intel_uhd_620" not in plan.required_capabilities
     assert not any(c.get("category") == "graphics" for c in plan.planned_components)
+
+
+def test_plan_propagates_input_and_bluetooth_requirements(t480s_baseline_fixture: Path, db: Database) -> None:
+    snapshot = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    plan = CompatibilityEngine(db=db).generate_build_plan(report)
+    assert "ps2_trackpad_trackpoint" in plan.required_capabilities
+    assert "intel_bluetooth" in plan.required_capabilities
+    assert plan.is_actionable is True

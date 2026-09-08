@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from macloader.domain.compatibility import CompatibilityState
 from macloader.domain.dependencies import ArtifactVariant, DependencyArtifact, DependencySpec
@@ -176,6 +177,10 @@ class DependencyCatalogSchema:
             raise DatabaseValidationError(f"'dependencies' in {filename} must be a list of dependency specifications")
 
         dep_specs: Dict[str, DependencySpec] = {}
+        declared_ids = [str(item.get("id", "")).lower() for item in raw_deps if isinstance(item, dict)]
+        duplicates = sorted({dep_id for dep_id in declared_ids if declared_ids.count(dep_id) > 1})
+        if duplicates:
+            raise DatabaseValidationError(f"Duplicate dependency ID '{duplicates[0]}' in {filename}")
         for item in raw_deps:
             if not isinstance(item, dict):
                 raise DatabaseValidationError(f"Item in 'dependencies' list of {filename} must be a mapping")
@@ -184,16 +189,31 @@ class DependencyCatalogSchema:
                 if req not in item:
                     raise DatabaseValidationError(f"Missing required field '{req}' in dependency definition in {filename}")
 
-            dep_id = str(item["id"]).lower()
-            if dep_id in dep_specs:
-                raise DatabaseValidationError(f"Duplicate dependency ID '{dep_id}' in {filename}")
+            for field_name in ("project_name", "upstream_repository", "license", "version", "release_tag"):
+                if not isinstance(item[field_name], str) or not item[field_name].strip():
+                    raise DatabaseValidationError(f"Dependency field '{field_name}' must be a non-empty string in {filename}")
+            for field_name in ("version", "release_tag"):
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", item[field_name]):
+                    raise DatabaseValidationError(f"Unsafe {field_name} in dependency definition in {filename}")
+            if not isinstance(item.get("dependencies", []), list) or not all(isinstance(value, str) for value in item.get("dependencies", [])):
+                raise DatabaseValidationError(f"'dependencies' for '{item.get('id', '')}' must be a list of strings")
+            if not isinstance(item.get("subcomponents", []), list) or not all(isinstance(value, str) for value in item.get("subcomponents", [])):
+                raise DatabaseValidationError(f"'subcomponents' for '{item.get('id', '')}' must be a list of strings")
 
+            dep_id = str(item["id"]).lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", dep_id):
+                raise DatabaseValidationError(f"Invalid dependency ID '{dep_id}' in {filename}")
             raw_artifacts = item["artifacts"]
             if not isinstance(raw_artifacts, dict) or not raw_artifacts:
                 raise DatabaseValidationError(f"'artifacts' for dependency '{dep_id}' in {filename} must be a non-empty mapping")
+            normalized_variant_keys = [str(key).upper() for key in raw_artifacts]
+            if len(normalized_variant_keys) != len(set(normalized_variant_keys)):
+                raise DatabaseValidationError(f"Duplicate artifact variants for dependency '{dep_id}' in {filename}")
 
             artifacts: Dict[str, DependencyArtifact] = {}
             for var_key, art_data in raw_artifacts.items():
+                if str(var_key).upper() not in {"RELEASE", "DEBUG"}:
+                    raise DatabaseValidationError(f"Unsupported artifact variant '{var_key}' in '{dep_id}'")
                 if not isinstance(art_data, dict):
                     raise DatabaseValidationError(f"Artifact for variant '{var_key}' in '{dep_id}' must be a mapping")
                 for areq in ("asset_name", "source_url", "sha256"):
@@ -206,18 +226,36 @@ class DependencyCatalogSchema:
                         f"Invalid SHA-256 hash '{sha_val}' for artifact '{var_key}' of '{dep_id}' in {filename}. Must be 64-char lowercase hex."
                     )
 
+                parsed_url = urlparse(str(art_data["source_url"]))
+                repo_url = urlparse(str(item["upstream_repository"]))
+                if parsed_url.scheme != "https" or parsed_url.hostname != "github.com" or parsed_url.port not in (None, 443) or parsed_url.username or parsed_url.password:
+                    raise DatabaseValidationError(f"Artifact '{var_key}' of '{dep_id}' must use an HTTPS GitHub URL on port 443")
+                if repo_url.scheme != "https" or repo_url.hostname != "github.com" or repo_url.port not in (None, 443) or repo_url.username or repo_url.password:
+                    raise DatabaseValidationError(f"Dependency '{dep_id}' upstream_repository must be an HTTPS GitHub URL")
+                repo_path = repo_url.path.strip("/")
+                expected_prefix = f"/{repo_path}/releases/download/{item['release_tag']}/"
+                if not parsed_url.path.startswith(expected_prefix):
+                    raise DatabaseValidationError(f"Artifact '{var_key}' of '{dep_id}' is not under the cataloged repository/release tag")
                 try:
-                    variant_enum = ArtifactVariant(var_key.upper())
-                except ValueError:
-                    variant_enum = ArtifactVariant.RELEASE
+                    size_bytes = int(art_data.get("size_bytes", 0))
+                except (TypeError, ValueError) as exc:
+                    raise DatabaseValidationError(f"Invalid size_bytes for artifact '{var_key}' of '{dep_id}'") from exc
+                if size_bytes <= 0:
+                    raise DatabaseValidationError(f"Artifact '{var_key}' of '{dep_id}' must declare a positive size_bytes")
+                archive_type = str(art_data.get("archive_type", "zip")).lower()
+                if archive_type not in {"zip"}:
+                    raise DatabaseValidationError(f"Unsupported archive_type '{archive_type}' for '{dep_id}'")
+                if not isinstance(art_data["asset_name"], str) or not re.fullmatch(r"[^\\/:*?\"<>|]+", art_data["asset_name"]):
+                    raise DatabaseValidationError(f"Unsafe asset_name for artifact '{var_key}' of '{dep_id}'")
+                variant_enum = ArtifactVariant(var_key.upper())
 
                 artifacts[var_key.upper()] = DependencyArtifact(
                     asset_name=str(art_data["asset_name"]),
                     source_url=str(art_data["source_url"]),
                     sha256=sha_val,
-                    size_bytes=int(art_data.get("size_bytes", 0)),
+                    size_bytes=size_bytes,
                     variant=variant_enum,
-                    archive_type=str(art_data.get("archive_type", "zip")),
+                    archive_type=archive_type,
                 )
 
             spec = DependencySpec(
@@ -233,5 +271,12 @@ class DependencyCatalogSchema:
                 date_verified=str(item.get("date_verified", "")),
             )
             dep_specs[dep_id] = spec
+
+        for spec in dep_specs.values():
+            missing = [parent for parent in spec.dependencies if parent not in dep_specs]
+            if missing:
+                raise DatabaseValidationError(
+                    f"Dependency '{spec.id}' references missing parent(s): {', '.join(missing)}"
+                )
 
         return cls(policy_version=policy_ver, dependencies=dep_specs)

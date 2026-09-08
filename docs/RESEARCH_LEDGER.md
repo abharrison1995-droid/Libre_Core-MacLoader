@@ -79,7 +79,7 @@ How does audio support for Realtek ALC257 differ between macOS Sonoma/Sequoia an
 
 ### Findings
 - Realtek ALC257 (`10ec:0257` / ALC3287) is supported by AppleALC under macOS Sonoma and Sequoia using layout IDs such as 11, 86, 97, or 99.
-- In macOS Tahoe (macOS 16), Apple removed `AppleHDA.kext` entirely from the base OS in favor of newer audio infrastructure.
+- In macOS Tahoe (macOS 26), Apple removed `AppleHDA.kext` entirely from the base OS in favor of newer audio infrastructure.
 - As a result, standard AppleALC analogue audio injection alone is non-functional in Tahoe out of the box. Workarounds require VoodooHDA or AppleHDA reinjection/root patching.
 
 ### Decision

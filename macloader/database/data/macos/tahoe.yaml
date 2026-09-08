@@ -1,6 +1,6 @@
 id: tahoe
-version_name: "macOS 16 Tahoe"
-major_version: 16
+version_name: "macOS 26 Tahoe"
+major_version: 26
 min_opencore_version: "1.0.7"
 status: EXPERIMENTAL
 notes:

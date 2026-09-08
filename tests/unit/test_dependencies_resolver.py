@@ -8,6 +8,9 @@ from macloader.dependencies.resolver import DependencyResolver
 from macloader.detection.fixture import FixtureHardwareProvider
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.domain.dependencies import ArtifactVariant
+from macloader.domain.build_plan import BuildPlan
+from macloader.domain.compatibility import CompatibilityState
+from macloader.exceptions import DependencyNotFoundError
 
 
 def test_resolve_t480s_baseline_sequoia(test_db: Database, t480s_baseline_fixture: Path) -> None:
@@ -95,3 +98,12 @@ def test_resolve_sonoma_selects_airportitlwm(test_db: Database, t480s_baseline_f
 
     dep_ids = [d.dependency_id for d in dep_set.resolved_dependencies]
     assert "airportitlwm" in dep_ids
+
+
+def test_resolve_rejects_blocked_plan(test_db: Database) -> None:
+    plan = BuildPlan(
+        target_model="Unknown", target_macos="sequoia", hardware_snapshot_id="unknown",
+        support_state=CompatibilityState.BLOCKED,
+    )
+    with pytest.raises(DependencyNotFoundError, match="not actionable"):
+        DependencyResolver(db=test_db).resolve(plan)

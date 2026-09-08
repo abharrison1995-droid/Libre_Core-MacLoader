@@ -124,6 +124,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         model = None
         stepping = None
         cores_count = 0
+        physical_cores = 0
         microcode = None
 
         for line in cpuinfo.splitlines():
@@ -142,6 +143,11 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 stepping = val
             elif key == "processor":
                 cores_count += 1
+            elif key == "cpu cores" and not physical_cores:
+                try:
+                    physical_cores = int(val)
+                except ValueError:
+                    pass
             elif key == "microcode" and not microcode:
                 microcode = val
 
@@ -160,7 +166,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
             family=family,
             model=model,
             stepping=stepping,
-            cores=max(cores_count, 1),
+            cores=physical_cores,
             threads=max(cores_count, 1),
             generation=generation,
             microcode=microcode,
@@ -173,7 +179,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
         if pci_dir.is_dir():
             for slot_path in pci_dir.iterdir():
-                slot = slot_path.name
+                slot = slot_path.name.replace("_", ":") if slot_path.name.count("_") == 2 else slot_path.name
                 vendor_raw = self._read_file(slot_path / "vendor")
                 device_raw = self._read_file(slot_path / "device")
                 subvendor_raw = self._read_file(slot_path / "subsystem_vendor")
@@ -245,7 +251,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
             is_amd_gpu_id = dev.vendor_id == "1002" and is_display_class
 
             if (dev.vendor_id == "8086" and is_display_class) or is_intel_gpu_id:
-                name = "Intel UHD Graphics 620" if dev.device_id in ("5917", "3ea0") else "Intel HD Graphics 620"
+                name = "Intel UHD Graphics 620" if dev.device_id in ("5917", "3ea0") else f"Intel display controller ({dev.canonical_id})"
                 igpu = GpuInfo(name=name, pci=dev, is_igpu=True, is_dgpu=False)
             elif is_nvidia_gpu_id or is_amd_gpu_id:
                 name = "Nvidia GeForce MX150" if dev.device_id in ("1d10", "1d12") else f"Discrete GPU ({dev.vendor_id}:{dev.device_id})"
@@ -289,7 +295,8 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                                 )
                             )
 
-        # If codecs were not read, find HD Audio PCI controllers
+        # If codecs were not read, report the controller but do not invent a
+        # codec.  A typical T480 codec is not evidence from sysfs.
         if not audio_list:
             for dev in pci_devices:
                 # Class 0403 is High Definition Audio
@@ -297,16 +304,16 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                     audio_list.append(
                         AudioInfo(
                             name="Intel HD Audio Controller",
-                            codec_name="Realtek ALC257",  # Typical on T480/T480s
-                            codec_vendor_id="10ec",
-                            codec_device_id="0257",
+                            codec_name=None,
+                            codec_vendor_id=None,
+                            codec_device_id=None,
                             pci=dev,
                         )
                     )
 
         return audio_list
 
-    def probe_network(self, pci_devices: List[PciDevice]) -> Tuple[List[NetworkInfo], List[NetworkInfo], List[NetworkInfo]]:
+    def probe_network(self, pci_devices: List[PciDevice], usb_devices: Optional[List[UsbDevice]] = None) -> Tuple[List[NetworkInfo], List[NetworkInfo], List[NetworkInfo]]:
         """Identify Ethernet, Wi-Fi, and Bluetooth adapters."""
         ethernet: List[NetworkInfo] = []
         wifi: List[NetworkInfo] = []
@@ -331,8 +338,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 wifi.append(NetworkInfo(name="Broadcom Wireless Adapter", kind="wifi", pci=dev))
 
         # Check USB for Bluetooth controllers
-        usb_devices = self.probe_usb_devices()
-        for udev in usb_devices:
+        for udev in usb_devices or []:
             if udev.vendor_id == "8087" and udev.product_id in ("0a2b", "0aaa", "0026", "0029", "0032"):
                 bluetooth.append(
                     NetworkInfo(
@@ -366,7 +372,8 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 model = self._read_file(disk / "device" / "model")
                 if model:
                     # Avoid duplicates
-                    if not any(s.model == model for s in storage_list):
+                    normalized_model = model.lower().replace(" ", "")
+                    if not any(s.model.lower().replace(" ", "") == normalized_model or ("pm981" in normalized_model and "pm981" in s.model.lower()) for s in storage_list):
                         storage_list.append(StorageInfo(model=model, kind="nvme"))
             for disk in block_dir.glob("sd*"):
                 if not disk.name[-1].isdigit():  # Only whole disks, not partitions
@@ -450,9 +457,9 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         pci_devices = self.probe_pci_devices()
         igpu, dgpus = self.probe_gpus(pci_devices)
         audio = self.probe_audio(pci_devices)
-        ethernet, wifi, bluetooth = self.probe_network(pci_devices)
-        storage = self.probe_storage(pci_devices)
         usb_devices = self.probe_usb_devices()
+        ethernet, wifi, bluetooth = self.probe_network(pci_devices, usb_devices)
+        storage = self.probe_storage(pci_devices)
         input_devices = self.probe_input_devices()
         thunderbolt = self.probe_thunderbolt(pci_devices)
 
@@ -463,11 +470,31 @@ class LinuxHardwareProvider(BaseHardwareProvider):
             dev for dev in pci_devices if dev.device_class and dev.device_class.startswith("0c03")
         ]
 
+        # Completeness must track whether the underlying source was reachable,
+        # not whether a matching device was found in it — an empty category is
+        # legitimate (e.g. no Ethernet plugged in) and must not read as UNKNOWN.
+        pci_source_ok = (self.sys_root / "bus" / "pci" / "devices").is_dir()
+        usb_source_ok = (self.sys_root / "bus" / "usb" / "devices").is_dir()
+        block_source_ok = (self.sys_root / "class" / "block").is_dir()
+        input_source_ok = (self.proc_root / "bus" / "input" / "devices").is_file()
+
         raw_evidence: Dict[str, Any] = {
             "dmi": dmi,
             "pci_count": len(pci_devices),
             "usb_count": len(usb_devices),
             "os": "linux",
+            "inventory_status": {
+                "dmi": bool(dmi), "cpu": cpu is not None, "pci": pci_source_ok,
+                "network": pci_source_ok or usb_source_ok, "usb": usb_source_ok,
+                # Keys consumed by CompatibilityEngine's completeness check —
+                # must match its category names exactly (see engine.py).
+                "audio": pci_source_ok,
+                "ethernet": pci_source_ok,
+                "wifi": pci_source_ok,
+                "bluetooth": usb_source_ok,
+                "storage": pci_source_ok or block_source_ok,
+                "input": input_source_ok,
+            },
         }
 
         return HardwareSnapshot(

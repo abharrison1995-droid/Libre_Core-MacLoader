@@ -52,6 +52,8 @@ class Database:
             for f in sorted(models_dir.glob("*.yaml")):
                 data = self._load_yaml(f)
                 model = ModelSchema.validate_and_load(data, filename=f.name)
+                if model.id in self.models:
+                    raise DatabaseValidationError(f"Duplicate model ID '{model.id}' in {f.name}")
                 self.models[model.id] = model
 
         # 2. Load components
@@ -62,9 +64,13 @@ class Database:
                 if "components" in data and isinstance(data["components"], list):
                     for item in data["components"]:
                         comp = ComponentSchema.validate_and_load(item, filename=f.name)
+                        if comp.id in self.components:
+                            raise DatabaseValidationError(f"Duplicate component ID '{comp.id}' in {f.name}")
                         self.components[comp.id] = comp
                 else:
                     comp = ComponentSchema.validate_and_load(data, filename=f.name)
+                    if comp.id in self.components:
+                        raise DatabaseValidationError(f"Duplicate component ID '{comp.id}' in {f.name}")
                     self.components[comp.id] = comp
 
         # 3. Load macOS targets
@@ -73,6 +79,8 @@ class Database:
             for f in sorted(macos_dir.glob("*.yaml")):
                 data = self._load_yaml(f)
                 os_prof = MacOsSchema.validate_and_load(data, filename=f.name)
+                if os_prof.id in self.macos_profiles:
+                    raise DatabaseValidationError(f"Duplicate macOS profile ID '{os_prof.id}' in {f.name}")
                 self.macos_profiles[os_prof.id] = os_prof
 
         # 4. Load Dependency Catalog
@@ -120,13 +128,14 @@ class Database:
         return list(self.dependency_catalog.dependencies.values())
 
 
-# Global database cache
-_db_instance: Optional[Database] = None
+# Database cache keyed by canonical data directory. Custom registries must not
+# replace the process-wide default registry.
+_db_instances: Dict[Path, Database] = {}
 
 
 def get_database(data_dir: Optional[Union[str, Path]] = None, reload: bool = False) -> Database:
     """Obtain the singleton Database instance or create a new one."""
-    global _db_instance
-    if _db_instance is None or reload or data_dir is not None:
-        _db_instance = Database(data_dir=data_dir)
-    return _db_instance
+    key = (Path(data_dir) if data_dir else DEFAULT_DATA_DIR).resolve()
+    if reload or key not in _db_instances:
+        _db_instances[key] = Database(data_dir=key)
+    return _db_instances[key]

@@ -4,7 +4,9 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 import json
+import hashlib
 from typing import Any, Dict, List, Optional
+from macloader.domain.contracts import ArtifactLock, ArtifactLockEntry, CONTRACT_SCHEMA_VERSION
 
 
 class ArtifactVariant(str, Enum):
@@ -60,8 +62,8 @@ class DependencySpec:
     date_verified: str = ""
 
     def get_artifact(self, variant: ArtifactVariant = ArtifactVariant.RELEASE) -> Optional[DependencyArtifact]:
-        """Retrieve artifact for the requested variant, falling back to RELEASE if DEBUG is unavailable."""
-        return self.artifacts.get(variant.value) or self.artifacts.get(ArtifactVariant.RELEASE.value)
+        """Retrieve exactly the requested artifact variant."""
+        return self.artifacts.get(variant.value)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -144,6 +146,7 @@ class ResolvedDependencySet:
     target_macos: str
     policy_version: str
     variant: ArtifactVariant
+    catalog_digest: str = ""
     resolved_dependencies: List[ResolvedDependency] = field(default_factory=list)
     unresolved_requirements: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -155,6 +158,7 @@ class ResolvedDependencySet:
             "target_model": self.target_model,
             "target_macos": self.target_macos,
             "policy_version": self.policy_version,
+            "catalog_digest": self.catalog_digest,
             "variant": self.variant.value,
             "resolved_dependencies": [d.to_dict() for d in self.resolved_dependencies],
             "unresolved_requirements": list(self.unresolved_requirements),
@@ -166,12 +170,38 @@ class ResolvedDependencySet:
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
+    def canonical_digest(self) -> str:
+        data = self.to_dict()
+        data.pop("timestamp", None)
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def to_artifact_lock(self) -> ArtifactLock:
+        return ArtifactLock(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            policy_version=self.policy_version,
+            catalog_digest=self.catalog_digest,
+            entries=[
+                ArtifactLockEntry(
+                    dependency_id=item.dependency_id, version=item.version, variant=item.variant.value,
+                    asset_name=item.artifact.asset_name, source_url=item.artifact.source_url,
+                    sha256=item.artifact.sha256, size_bytes=item.artifact.size_bytes,
+                ) for item in self.resolved_dependencies
+            ],
+        )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ResolvedDependencySet":
+        catalog_digest = data.get("catalog_digest")
+        policy_version = data.get("policy_version")
+        if not isinstance(catalog_digest, str) or not catalog_digest.strip():
+            raise ValueError("Resolved dependency set requires a non-empty catalog_digest")
+        if not isinstance(policy_version, str) or not policy_version.strip():
+            raise ValueError("Resolved dependency set requires a non-empty policy_version")
         return cls(
             target_model=data["target_model"],
             target_macos=data["target_macos"],
-            policy_version=data["policy_version"],
+            policy_version=policy_version,
+            catalog_digest=catalog_digest,
             variant=ArtifactVariant(data["variant"]),
             resolved_dependencies=[
                 ResolvedDependency.from_dict(d) for d in data.get("resolved_dependencies", [])

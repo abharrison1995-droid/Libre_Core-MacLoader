@@ -10,6 +10,7 @@ from macloader.database.schema import DependencyCatalogSchema
 from macloader.dependencies.cache import CacheManager
 from macloader.dependencies.downloader import Downloader
 from macloader.dependencies.resolver import DependencyResolver
+from macloader.build.efi import EfiBuildResult, EfiBuilder
 from macloader.detection import (
     BaseHardwareProvider,
     FixtureHardwareProvider,
@@ -35,8 +36,22 @@ class Orchestrator:
     def __init__(self, db: Optional[Database] = None, cache_dir: Optional[Union[str, Path]] = None):
         self.db = db or get_database()
         self.engine = CompatibilityEngine(db=self.db)
-        self.resolver = DependencyResolver(db=self.db)
-        self.cache = CacheManager(cache_dir=cache_dir)
+        self._resolver: Optional[DependencyResolver] = None
+        self._cache: Optional[CacheManager] = None
+        self._cache_dir = cache_dir
+        self.builder = EfiBuilder()
+
+    @property
+    def resolver(self) -> DependencyResolver:
+        if self._resolver is None:
+            self._resolver = DependencyResolver(db=self.db)
+        return self._resolver
+
+    @property
+    def cache(self) -> CacheManager:
+        if self._cache is None:
+            self._cache = CacheManager(cache_dir=self._cache_dir)
+        return self._cache
 
     def probe_hardware(
         self,
@@ -97,10 +112,23 @@ class Orchestrator:
         results: Dict[str, Path] = {}
         missing_offline: List[str] = []
 
+        if not dep_set.resolved_dependencies:
+            raise ArtifactDownloadError("Cannot fetch an empty resolved dependency set.")
+        if not dep_set.catalog_digest or dep_set.catalog_digest != self.resolver.catalog_digest():
+            raise ArtifactDownloadError("Resolved dependency set was created from a stale catalog digest.")
+        catalog = self.db.get_dependency_catalog()
+        if not catalog or dep_set.policy_version != catalog.policy_version:
+            raise ArtifactDownloadError("Resolved dependency set was created from a stale dependency policy.")
+
         for dep in dep_set.resolved_dependencies:
             spec = self.db.get_dependency_spec(dep.dependency_id)
             if not spec:
-                continue
+                raise ArtifactDownloadError(f"Resolved dependency '{dep.dependency_id}' is absent from the current catalog.")
+            current_artifact = spec.get_artifact(dep.variant)
+            if current_artifact is None or current_artifact.to_dict() != dep.artifact.to_dict():
+                raise ArtifactDownloadError(
+                    f"Resolved dependency '{dep.dependency_id}' is stale or does not match the current catalog lock."
+                )
 
             # Check cache first
             cached_path = self.cache.get_cached_path_if_valid(spec, dep.variant)
@@ -129,8 +157,20 @@ class Orchestrator:
     def verify_cached_dependencies(self, dep_set: ResolvedDependencySet) -> Dict[str, bool]:
         """Verify the integrity of all cached artifacts belonging to the resolved set."""
         status_map: Dict[str, bool] = {}
+        if not dep_set.catalog_digest or dep_set.catalog_digest != self.resolver.catalog_digest():
+            return {dep.dependency_id: False for dep in dep_set.resolved_dependencies}
         for dep in dep_set.resolved_dependencies:
             spec = self.db.get_dependency_spec(dep.dependency_id)
-            if spec:
-                status_map[dep.dependency_id] = self.cache.has_valid_artifact(spec, dep.variant)
+            if not spec:
+                status_map[dep.dependency_id] = False
+            else:
+                current_artifact = spec.get_artifact(dep.variant)
+                status_map[dep.dependency_id] = bool(
+                    current_artifact
+                    and current_artifact.to_dict() == dep.artifact.to_dict()
+                    and self.cache.has_valid_artifact(spec, dep.variant)
+                )
         return status_map
+
+    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None) -> EfiBuildResult:
+        return self.builder.build(plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity)

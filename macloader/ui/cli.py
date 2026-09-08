@@ -30,6 +30,7 @@ from macloader.exceptions import (
     UnsupportedModelError,
 )
 from macloader.orchestrator import Orchestrator
+from macloader.build.efi import EfiBuilder
 
 console = Console()
 err_console = Console(stderr=True)
@@ -50,8 +51,8 @@ def cli(verbose: bool) -> None:
 @click.option("--sanitize/--no-sanitize", default=False, help="Sanitize serials, UUIDs, and MAC addresses.")
 def probe_cmd(json_mode: bool, output: Optional[Path], fixture: Optional[Path], sanitize: bool) -> None:
     """Probe system hardware and display normalized hardware snapshot."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture, sanitize=sanitize)
 
         if output:
@@ -84,8 +85,8 @@ def probe_cmd(json_mode: bool, output: Optional[Path], fixture: Optional[Path], 
 @click.option("-o", "--output", type=click.Path(dir_okay=False, writable=True, path_type=Path), help="Save JSON report to file.")
 def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output: Optional[Path]) -> None:
     """Evaluate detected hardware compatibility against a target macOS version."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         report = orchestrator.check_support(snapshot, target_macos=target_macos)
 
@@ -110,7 +111,7 @@ def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], out
     "-m",
     "--macos",
     "target_macos",
-    default="tahoe",
+    default=DEFAULT_MACOS_TARGET,
     type=click.Choice(SUPPORTED_MACOS_TARGETS, case_sensitive=False),
     help="Target macOS version (sonoma, sequoia, tahoe).",
 )
@@ -119,8 +120,8 @@ def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], out
 @click.option("-o", "--output", type=click.Path(dir_okay=False, writable=True, path_type=Path), help="Save JSON plan to file.")
 def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output: Optional[Path]) -> None:
     """Generate a preliminary BuildPlan detailing future EFI requirements."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
 
@@ -154,20 +155,23 @@ def deps_group() -> None:
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 def deps_list_cmd(json_mode: bool) -> None:
     """List all upstream dependencies in the verified MacLoader catalog."""
-    orchestrator = Orchestrator()
-    catalog = orchestrator.db.get_dependency_catalog()
-    if not catalog:
-        err_console.print("[bold red]Dependency catalog not available.[/bold red]")
-        sys.exit(1)
+    try:
+        orchestrator = Orchestrator()
+        catalog = orchestrator.db.get_dependency_catalog()
+        if not catalog:
+            raise DependencyError("Dependency catalog not available.")
 
-    if json_mode:
-        data = {
-            "policy_version": catalog.policy_version,
-            "dependencies": [s.to_dict() for s in catalog.dependencies.values()],
-        }
-        click.echo(json.dumps(data, indent=2))
-    else:
-        render_dependency_catalog(list(catalog.dependencies.values()), catalog.policy_version, console)
+        if json_mode:
+            data = {
+                "policy_version": catalog.policy_version,
+                "dependencies": [s.to_dict() for s in catalog.dependencies.values()],
+            }
+            click.echo(json.dumps(data, indent=2))
+        else:
+            render_dependency_catalog(list(catalog.dependencies.values()), catalog.policy_version, console)
+    except MacLoaderError as e:
+        err_console.print(f"[bold red]Catalog Error:[/bold red] {e}")
+        raise click.ClickException(str(e)) from e
 
 
 @deps_group.command("resolve")
@@ -196,8 +200,8 @@ def deps_resolve_cmd(
     output: Optional[Path],
 ) -> None:
     """Resolve required dependencies for target model and macOS (side-effect-free, no network I/O)."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan=plan, variant=ArtifactVariant(variant.upper()))
@@ -244,8 +248,8 @@ def deps_fetch_cmd(
     json_mode: bool,
 ) -> None:
     """Acquire and cache verified dependency artifacts with SHA-256 integrity checks."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan=plan, variant=ArtifactVariant(variant.upper()))
@@ -254,13 +258,17 @@ def deps_fetch_cmd(
 
         if json_mode:
             res_dict = {
-                "status": "success",
+                "status": "success" if dep_set.is_complete else "dependencies_cached_incomplete_plan",
                 "cached_count": len(results),
+                "dependencies_complete": dep_set.is_complete,
+                "build_ready": dep_set.is_complete,
                 "artifacts": {k: str(v) for k, v in results.items()},
             }
             click.echo(json.dumps(res_dict, indent=2))
         else:
             console.print(f"[bold green]Successfully verified and cached {len(results)} dependencies.[/bold green]")
+            if not dep_set.is_complete:
+                err_console.print("[yellow]Dependencies are cached, but the plan is not build-ready; unresolved requirements remain.[/yellow]")
             for dep_id, path in results.items():
                 console.print(f"  • [cyan]{dep_id}[/cyan] -> {path}")
 
@@ -293,18 +301,20 @@ def deps_verify_cmd(
     json_mode: bool,
 ) -> None:
     """Verify SHA-256 integrity of all cached dependencies for the resolved set."""
-    orchestrator = Orchestrator()
     try:
+        orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan=plan, variant=ArtifactVariant(variant.upper()))
 
         status = orchestrator.verify_cached_dependencies(dep_set=dep_set)
+        all_ok = bool(status) and all(status.values())
 
         if json_mode:
             click.echo(json.dumps(status, indent=2))
+            if not all_ok:
+                raise click.ClickException("Some dependencies are missing or corrupt in cache.")
         else:
-            all_ok = True
             for dep_id, valid in status.items():
                 if valid:
                     console.print(f"  • [green]VALID[/green] {dep_id}")
@@ -327,17 +337,59 @@ def deps_verify_cmd(
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 def deps_cache_cmd(clear: bool, json_mode: bool) -> None:
     """Inspect or manage the local dependency cache."""
-    orchestrator = Orchestrator()
-    if clear:
-        orchestrator.cache.clear_cache()
-        if not json_mode:
-            console.print("[yellow]Dependency cache cleared successfully.[/yellow]")
-        else:
-            click.echo(json.dumps({"status": "cleared"}, indent=2))
-        return
+    try:
+        orchestrator = Orchestrator()
+        if clear:
+            orchestrator.cache.clear_cache()
+            if not json_mode:
+                console.print("[yellow]Dependency cache cleared successfully.[/yellow]")
+            else:
+                click.echo(json.dumps({"status": "cleared"}, indent=2))
+            return
 
-    stats = orchestrator.cache.get_cache_stats()
+        stats = orchestrator.cache.get_cache_stats()
+        if json_mode:
+            click.echo(json.dumps(stats, indent=2))
+        else:
+            render_cache_stats(stats, console)
+    except MacLoaderError as e:
+        err_console.print(f"[bold red]Cache Error:[/bold red] {e}")
+        raise click.ClickException(str(e)) from e
+
+
+@cli.command("validate")
+@click.argument("efi_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def validate_cmd(efi_dir: Path, json_mode: bool) -> None:
+    """Validate an existing EFI tree structurally."""
+    report = EfiBuilder().validate_tree(efi_dir)
     if json_mode:
-        click.echo(json.dumps(stats, indent=2))
+        click.echo(json.dumps(report.to_dict(), indent=2))
     else:
-        render_cache_stats(stats, console)
+        console.print(f"EFI validation: {report.status}")
+        for error in report.errors:
+            err_console.print(f"[red]{error}[/red]")
+    if report.status != "VALID":
+        raise click.ClickException("EFI validation failed")
+
+
+@cli.command("build")
+@click.option("-m", "--macos", "target_macos", default=DEFAULT_MACOS_TARGET, type=click.Choice(SUPPORTED_MACOS_TARGETS, case_sensitive=False))
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("-o", "--output", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--offline", is_flag=True, help="Use only verified cached dependencies.")
+def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool) -> None:
+    """Build a validated EFI tree from the actionable hardware plan."""
+    try:
+        orchestrator = Orchestrator()
+        snapshot = orchestrator.probe_hardware(fixture_path=fixture)
+        plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
+        dep_set = orchestrator.resolve_dependencies(plan)
+        if not dep_set.is_complete:
+            raise click.ClickException("EFI build blocked: unresolved requirements remain in the dependency plan")
+        artifact_paths = orchestrator.fetch_dependencies(dep_set, offline=offline)
+        result = orchestrator.build_efi(plan, dep_set, artifact_paths, output)
+        click.echo(json.dumps({"status": result.validation.status, "output": str(result.output_dir), "manifest": result.manifest.to_dict()}, indent=2))
+    except MacLoaderError as e:
+        err_console.print(f"[bold red]Build Error:[/bold red] {e}")
+        raise click.ClickException(str(e)) from e

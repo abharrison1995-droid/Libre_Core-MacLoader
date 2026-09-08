@@ -60,5 +60,6 @@
         "device_id": "a808"
       }
     }
-  ]
+  ],
+  "raw_evidence": {"inventory_status": {"audio": true, "ethernet": true, "wifi": true, "bluetooth": true, "storage": true, "input": true}}
 }
