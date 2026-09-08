@@ -33,18 +33,75 @@ logger = logging.getLogger(__name__)
 class LinuxHardwareProvider(BaseHardwareProvider):
     """Probes Linux sysfs and system tables to generate a HardwareSnapshot."""
 
-    def __init__(self, sys_root: str = "/sys", proc_root: str = "/proc"):
+    def __init__(
+        self,
+        sys_root: str = "/sys",
+        proc_root: str = "/proc",
+        raise_on_error: bool = False,
+    ):
         self.sys_root = Path(sys_root)
         self.proc_root = Path(proc_root)
+        self.raise_on_error = raise_on_error
+        self.source_errors: Dict[str, List[str]] = {}
 
-    def _read_file(self, path: Path) -> Optional[str]:
+    def _record_error(self, category: str, error: str) -> None:
+        """Record an enumeration or read error for a specific hardware category."""
+        if category not in self.source_errors:
+            self.source_errors[category] = []
+        self.source_errors[category].append(error)
+
+    def _read_file(self, path: Path, category: Optional[str] = None) -> Optional[str]:
         """Safely read a sysfs or procfs file returning stripped content."""
         try:
-            if path.is_file():
-                return path.read_text(encoding="utf-8", errors="replace").strip()
-        except (PermissionError, OSError, IOError) as e:
-            logger.debug(f"Unable to read file {path}: {e}")
-        return None
+            return path.read_text(encoding="utf-8", errors="replace").strip()
+        except (FileNotFoundError, IsADirectoryError):
+            return None
+        except PermissionError as e:
+            msg = f"Permission denied reading {path}: {e}"
+            logger.debug(msg)
+            if category:
+                self._record_error(category, msg)
+            return None
+        except (OSError, IOError) as e:
+            msg = f"Unable to read file {path}: {e}"
+            logger.debug(msg)
+            if category:
+                self._record_error(category, msg)
+            return None
+
+    def _iter_dir_safe(self, directory: Path, category: str) -> List[Path]:
+        """Safely list child paths of a directory, capturing permission and OS errors."""
+        try:
+            if not directory.exists() or not directory.is_dir():
+                return []
+            return list(directory.iterdir())
+        except PermissionError as e:
+            msg = f"Permission denied accessing directory {directory}: {e}"
+            logger.warning(msg)
+            self._record_error(category, msg)
+            return []
+        except (FileNotFoundError, OSError) as e:
+            msg = f"Error accessing directory {directory}: {e}"
+            logger.debug(msg)
+            self._record_error(category, msg)
+            return []
+
+    def _safe_glob(self, directory: Path, pattern: str, category: str) -> List[Path]:
+        """Safely glob patterns in a directory, capturing permission and OS errors."""
+        try:
+            if not directory.exists() or not directory.is_dir():
+                return []
+            return list(directory.glob(pattern))
+        except PermissionError as e:
+            msg = f"Permission denied globbing {pattern} in {directory}: {e}"
+            logger.warning(msg)
+            self._record_error(category, msg)
+            return []
+        except (FileNotFoundError, OSError) as e:
+            msg = f"Error globbing {pattern} in {directory}: {e}"
+            logger.debug(msg)
+            self._record_error(category, msg)
+            return []
 
     def _run_command(self, cmd: List[str], timeout: int = 5) -> Optional[str]:
         """Safely execute a command without shell interpolation."""
@@ -70,11 +127,13 @@ class LinuxHardwareProvider(BaseHardwareProvider):
     def probe_dmi(self) -> Dict[str, Optional[str]]:
         """Read system DMI properties from /sys/class/dmi/id/."""
         dmi_dir = self.sys_root / "class" / "dmi" / "id"
-        vendor = self._read_file(dmi_dir / "sys_vendor")
-        prod_name = self._read_file(dmi_dir / "product_name")
-        prod_ver = self._read_file(dmi_dir / "product_version")
-        bios_ver = self._read_file(dmi_dir / "bios_version")
-        bios_date = self._read_file(dmi_dir / "bios_date")
+        vendor = self._read_file(dmi_dir / "sys_vendor", category="dmi")
+        prod_name = self._read_file(dmi_dir / "product_name", category="dmi")
+        prod_ver = self._read_file(dmi_dir / "product_version", category="dmi")
+        bios_ver = self._read_file(dmi_dir / "bios_version", category="dmi")
+        bios_date = self._read_file(dmi_dir / "bios_date", category="dmi")
+        # On standard Linux, product_serial/uuid are mode 0400 (root only); non-root read failure
+        # should not invalidate an otherwise healthy DMI inventory.
         serial = self._read_file(dmi_dir / "product_serial")
         uuid_str = self._read_file(dmi_dir / "product_uuid")
 
@@ -114,7 +173,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
     def probe_cpu(self) -> Optional[CpuInfo]:
         """Probe CPU details from /proc/cpuinfo."""
-        cpuinfo = self._read_file(self.proc_root / "cpuinfo")
+        cpuinfo = self._read_file(self.proc_root / "cpuinfo", category="cpu")
         if not cpuinfo:
             return None
 
@@ -177,22 +236,28 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         devices: List[PciDevice] = []
         pci_dir = self.sys_root / "bus" / "pci" / "devices"
 
-        if pci_dir.is_dir():
-            for slot_path in pci_dir.iterdir():
+        slot_paths = self._iter_dir_safe(pci_dir, category="pci")
+        for slot_path in slot_paths:
+            try:
                 slot = slot_path.name.replace("_", ":") if slot_path.name.count("_") == 2 else slot_path.name
-                vendor_raw = self._read_file(slot_path / "vendor")
-                device_raw = self._read_file(slot_path / "device")
-                subvendor_raw = self._read_file(slot_path / "subsystem_vendor")
-                subdevice_raw = self._read_file(slot_path / "subsystem_device")
-                class_raw = self._read_file(slot_path / "class")
+                vendor_raw = self._read_file(slot_path / "vendor", category="pci")
+                device_raw = self._read_file(slot_path / "device", category="pci")
+                subvendor_raw = self._read_file(slot_path / "subsystem_vendor", category="pci")
+                subdevice_raw = self._read_file(slot_path / "subsystem_device", category="pci")
+                class_raw = self._read_file(slot_path / "class", category="pci")
 
                 vendor_id = normalize_hex_id(vendor_raw)
                 device_id = normalize_hex_id(device_raw)
 
                 if vendor_id and device_id:
                     dev_class = normalize_hex_id(class_raw, length=6) or (normalize_hex_id(class_raw, length=4) if class_raw else None)
-                    driver_link = slot_path / "driver"
-                    driver_name = driver_link.resolve().name if driver_link.exists() else None
+                    driver_name = None
+                    try:
+                        driver_link = slot_path / "driver"
+                        if driver_link.is_symlink() or driver_link.exists():
+                            driver_name = driver_link.resolve().name
+                    except (PermissionError, FileNotFoundError, OSError) as e:
+                        logger.debug(f"Unable to resolve driver symlink for {slot_path}: {e}")
 
                     devices.append(
                         PciDevice(
@@ -205,6 +270,11 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                             driver=driver_name,
                         )
                     )
+                else:
+                    self._record_error("pci", f"Failed reading PCI slot {slot_path.name}: unreadable or disappearing vendor/device ID")
+            except (PermissionError, FileNotFoundError, OSError) as e:
+                logger.debug(f"Error reading PCI device at {slot_path}: {e}")
+                self._record_error("pci", f"Failed reading PCI slot {slot_path}: {e}")
 
         # If sysfs PCI was empty, fallback to lspci -mm -nn
         if not devices:
@@ -223,7 +293,8 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                             device_id = ids[1].lower()
                             devices.append(PciDevice(vendor_id=vendor_id, device_id=device_id, pci_slot=slot))
                         elif len(ids) >= 3:
-                            # if first id is class (e.g. 0300)
+                            # first id is class (e.g. 0300)
+                            dev_class = ids[0].lower()
                             vendor_id = ids[1].lower()
                             device_id = ids[2].lower()
                             devices.append(
@@ -233,6 +304,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                                     subsystem_vendor_id=ids[3].lower() if len(ids) >= 4 else None,
                                     subsystem_device_id=ids[4].lower() if len(ids) >= 5 else None,
                                     pci_slot=slot,
+                                    device_class=dev_class,
                                 )
                             )
 
@@ -265,38 +337,39 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
         # Check /proc/asound/card*/codec*
         asound_dir = self.proc_root / "asound"
-        if asound_dir.is_dir():
-            for card in asound_dir.glob("card*"):
-                for codec_file in card.glob("codec*"):
-                    content = self._read_file(codec_file)
-                    if content:
-                        codec_name = None
-                        codec_id_match = None
-                        for line in content.splitlines():
-                            if line.startswith("Codec:"):
-                                codec_name = line.split(":", 1)[1].strip()
-                            elif line.startswith("Address:"):
-                                pass
-                            elif "Vendor Id:" in line:
-                                codec_id_match = re.search(r"0x([0-9a-fA-F]{8})", line)
-                        if codec_name:
-                            vendor_id = None
-                            device_id = None
-                            if codec_id_match:
-                                hex_full = codec_id_match.group(1).lower()
-                                vendor_id = hex_full[:4]
-                                device_id = hex_full[4:]
-                            audio_list.append(
-                                AudioInfo(
-                                    name=codec_name,
-                                    codec_name=codec_name,
-                                    codec_vendor_id=vendor_id,
-                                    codec_device_id=device_id,
-                                )
+        cards = self._safe_glob(asound_dir, "card*", category="audio")
+        for card in cards:
+            codecs = self._safe_glob(card, "codec*", category="audio")
+            for codec_file in codecs:
+                content = self._read_file(codec_file, category="audio")
+                if content:
+                    codec_name = None
+                    codec_id_match = None
+                    for line in content.splitlines():
+                        if line.startswith("Codec:"):
+                            codec_name = line.split(":", 1)[1].strip()
+                        elif line.startswith("Address:"):
+                            pass
+                        elif "Vendor Id:" in line:
+                            codec_id_match = re.search(r"0x([0-9a-fA-F]{8})", line)
+                    if codec_name:
+                        vendor_id = None
+                        device_id = None
+                        if codec_id_match:
+                            hex_full = codec_id_match.group(1).lower()
+                            vendor_id = hex_full[:4]
+                            device_id = hex_full[4:]
+                        audio_list.append(
+                            AudioInfo(
+                                name=codec_name,
+                                codec_name=codec_name,
+                                codec_vendor_id=vendor_id,
+                                codec_device_id=device_id,
                             )
+                        )
 
         # If codecs were not read, report the controller but do not invent a
-        # codec.  A typical T480 codec is not evidence from sysfs.
+        # codec. A typical T480 codec is not evidence from sysfs.
         if not audio_list:
             for dev in pci_devices:
                 # Class 0403 is High Definition Audio
@@ -367,19 +440,29 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
         # Also inspect /sys/class/block for actual device models if available
         block_dir = self.sys_root / "class" / "block"
-        if block_dir.is_dir():
-            for disk in block_dir.glob("nvme*n1"):
-                model = self._read_file(disk / "device" / "model")
+        nvme_disks = self._safe_glob(block_dir, "nvme*n1", category="storage")
+        for disk in nvme_disks:
+            try:
+                model = self._read_file(disk / "device" / "model", category="storage")
                 if model:
                     # Avoid duplicates
                     normalized_model = model.lower().replace(" ", "")
                     if not any(s.model.lower().replace(" ", "") == normalized_model or ("pm981" in normalized_model and "pm981" in s.model.lower()) for s in storage_list):
                         storage_list.append(StorageInfo(model=model, kind="nvme"))
-            for disk in block_dir.glob("sd*"):
+            except (PermissionError, FileNotFoundError, OSError) as e:
+                logger.debug(f"Error inspecting NVMe disk {disk}: {e}")
+                self._record_error("storage", f"Failed inspecting NVMe disk {disk}: {e}")
+
+        sd_disks = self._safe_glob(block_dir, "sd*", category="storage")
+        for disk in sd_disks:
+            try:
                 if not disk.name[-1].isdigit():  # Only whole disks, not partitions
-                    model = self._read_file(disk / "device" / "model")
+                    model = self._read_file(disk / "device" / "model", category="storage")
                     if model and not any(s.model == model for s in storage_list):
                         storage_list.append(StorageInfo(model=model, kind="sata"))
+            except (PermissionError, FileNotFoundError, OSError) as e:
+                logger.debug(f"Error inspecting block device {disk}: {e}")
+                self._record_error("storage", f"Failed inspecting disk {disk}: {e}")
 
         return storage_list
 
@@ -388,16 +471,17 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         devices: List[UsbDevice] = []
         usb_dir = self.sys_root / "bus" / "usb" / "devices"
 
-        if usb_dir.is_dir():
-            for dev_path in usb_dir.iterdir():
-                id_vendor = self._read_file(dev_path / "idVendor")
-                id_product = self._read_file(dev_path / "idProduct")
+        dev_paths = self._iter_dir_safe(usb_dir, category="usb")
+        for dev_path in dev_paths:
+            try:
+                id_vendor = self._read_file(dev_path / "idVendor", category="usb")
+                id_product = self._read_file(dev_path / "idProduct", category="usb")
                 vendor_norm = normalize_hex_id(id_vendor)
                 prod_norm = normalize_hex_id(id_product)
 
                 if vendor_norm and prod_norm:
-                    mfg = self._read_file(dev_path / "manufacturer")
-                    prod = self._read_file(dev_path / "product")
+                    mfg = self._read_file(dev_path / "manufacturer", category="usb")
+                    prod = self._read_file(dev_path / "product", category="usb")
                     devices.append(
                         UsbDevice(
                             vendor_id=vendor_norm,
@@ -407,13 +491,18 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                             product_name=prod,
                         )
                     )
+                else:
+                    self._record_error("usb", f"Failed reading USB device {dev_path.name}: unreadable or disappearing vendor/product ID")
+            except (PermissionError, FileNotFoundError, OSError) as e:
+                logger.debug(f"Error reading USB device at {dev_path}: {e}")
+                self._record_error("usb", f"Failed reading USB device {dev_path}: {e}")
 
         return devices
 
     def probe_input_devices(self) -> List[InputDeviceInfo]:
         """Probe touchscreen, trackpad, and TrackPoint input devices."""
         input_list: List[InputDeviceInfo] = []
-        bus_input_devices = self._read_file(self.proc_root / "bus" / "input" / "devices")
+        bus_input_devices = self._read_file(self.proc_root / "bus" / "input" / "devices", category="input")
 
         if bus_input_devices:
             for block in bus_input_devices.split("\n\n"):
@@ -437,7 +526,8 @@ class LinuxHardwareProvider(BaseHardwareProvider):
     def probe_thunderbolt(self, pci_devices: List[PciDevice]) -> ThunderboltInfo:
         """Check for Thunderbolt controller presence."""
         tb_dir = self.sys_root / "bus" / "thunderbolt" / "devices"
-        if tb_dir.is_dir() and any(tb_dir.iterdir()):
+        tb_entries = self._iter_dir_safe(tb_dir, category="thunderbolt")
+        if tb_entries:
             return ThunderboltInfo(present=True, controller_name="Intel Thunderbolt 3 Controller (Alpine Ridge)")
 
         for dev in pci_devices:
@@ -452,6 +542,40 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
     def probe(self) -> HardwareSnapshot:
         """Execute complete hardware probe on Linux."""
+        self.source_errors.clear()
+
+        # Check if sys_root / proc_root are accessible at all
+        sys_root_accessible = True
+        try:
+            self.sys_root.stat()
+            if not self.sys_root.is_dir():
+                sys_root_accessible = False
+                self._record_error("sys_root", f"sys_root is not a directory: {self.sys_root}")
+        except PermissionError as e:
+            self._record_error("sys_root", f"Permission denied accessing sys_root {self.sys_root}: {e}")
+            sys_root_accessible = False
+        except (FileNotFoundError, OSError) as e:
+            self._record_error("sys_root", f"Error accessing sys_root {self.sys_root}: {e}")
+            sys_root_accessible = False
+
+        proc_root_accessible = True
+        try:
+            self.proc_root.stat()
+            if not self.proc_root.is_dir():
+                proc_root_accessible = False
+                self._record_error("proc_root", f"proc_root is not a directory: {self.proc_root}")
+        except PermissionError as e:
+            self._record_error("proc_root", f"Permission denied accessing proc_root {self.proc_root}: {e}")
+            proc_root_accessible = False
+        except (FileNotFoundError, OSError) as e:
+            self._record_error("proc_root", f"Error accessing proc_root {self.proc_root}: {e}")
+            proc_root_accessible = False
+
+        if (not sys_root_accessible or not proc_root_accessible) and self.raise_on_error:
+            raise HardwareDetectionError(
+                f"Linux hardware detection root directories are inaccessible: sys_root={self.sys_root} (ok={sys_root_accessible}), proc_root={self.proc_root} (ok={proc_root_accessible})"
+            )
+
         dmi = self.probe_dmi()
         cpu = self.probe_cpu()
         pci_devices = self.probe_pci_devices()
@@ -463,6 +587,13 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         input_devices = self.probe_input_devices()
         thunderbolt = self.probe_thunderbolt(pci_devices)
 
+        # Check if raise_on_error was requested
+        if self.raise_on_error and self.source_errors:
+            total_errs = sum(len(v) for v in self.source_errors.values())
+            raise HardwareDetectionError(
+                f"Linux hardware detection encountered {total_errs} error(s) during enumeration: {self.source_errors}"
+            )
+
         # Extract machine type from product version/name
         machine_type = extract_machine_type(dmi.get("product_version"), dmi.get("product_name"))
 
@@ -470,30 +601,69 @@ class LinuxHardwareProvider(BaseHardwareProvider):
             dev for dev in pci_devices if dev.device_class and dev.device_class.startswith("0c03")
         ]
 
-        # Completeness must track whether the underlying source was reachable,
-        # not whether a matching device was found in it — an empty category is
-        # legitimate (e.g. no Ethernet plugged in) and must not read as UNKNOWN.
-        pci_source_ok = (self.sys_root / "bus" / "pci" / "devices").is_dir()
-        usb_source_ok = (self.sys_root / "bus" / "usb" / "devices").is_dir()
-        block_source_ok = (self.sys_root / "class" / "block").is_dir()
-        input_source_ok = (self.proc_root / "bus" / "input" / "devices").is_file()
+        # Calculate category completeness.
+        # NEVER convert enumeration failures into confirmed absence!
+        dmi_has_err = bool(self.source_errors.get("dmi"))
+        dmi_ok = bool(dmi.get("product_name")) and not dmi_has_err
+
+        cpu_has_err = bool(self.source_errors.get("cpu"))
+        cpu_ok = (cpu is not None) and not cpu_has_err
+
+        pci_has_err = bool(self.source_errors.get("pci"))
+        # PCI enumeration must have succeeded without error AND produced devices.
+        # On a real PC, PCI device count cannot be 0.
+        pci_ok = (len(pci_devices) > 0) and not pci_has_err
+
+        usb_has_err = bool(self.source_errors.get("usb"))
+        usb_dir = self.sys_root / "bus" / "usb" / "devices"
+        usb_ok = not usb_has_err and usb_dir.is_dir()
+
+        # Audio completeness:
+        # Audio requires PCI audio controller to be reachable without error.
+        audio_has_err = bool(self.source_errors.get("audio"))
+        audio_ok = pci_ok and not audio_has_err
+
+        # Ethernet completeness:
+        # Ethernet is PCI-based on ThinkPads; requires valid PCI enumeration.
+        ethernet_ok = pci_ok
+
+        # Wi-Fi completeness:
+        # Wi-Fi is PCI-based; requires valid PCI enumeration.
+        wifi_ok = pci_ok
+
+        # Bluetooth completeness:
+        # If bluetooth found: True.
+        # If bluetooth empty: ONLY True if USB was complete.
+        bluetooth_ok = (len(bluetooth) > 0) or usb_ok
+
+        # Storage completeness:
+        # Storage controllers are PCI-based; requires valid PCI and block enumeration.
+        storage_has_err = bool(self.source_errors.get("storage"))
+        storage_ok = pci_ok and not storage_has_err
+
+        # Input completeness:
+        # A laptop always has input devices; requires at least 1 input device without error.
+        input_has_err = bool(self.source_errors.get("input"))
+        input_file_exists = (self.proc_root / "bus" / "input" / "devices").is_file()
+        input_ok = (len(input_devices) > 0) and not input_has_err and input_file_exists
 
         raw_evidence: Dict[str, Any] = {
             "dmi": dmi,
             "pci_count": len(pci_devices),
             "usb_count": len(usb_devices),
             "os": "linux",
+            "source_errors": dict(self.source_errors),
             "inventory_status": {
-                "dmi": bool(dmi), "cpu": cpu is not None, "pci": pci_source_ok,
-                "network": pci_source_ok or usb_source_ok, "usb": usb_source_ok,
-                # Keys consumed by CompatibilityEngine's completeness check —
-                # must match its category names exactly (see engine.py).
-                "audio": pci_source_ok,
-                "ethernet": pci_source_ok,
-                "wifi": pci_source_ok,
-                "bluetooth": usb_source_ok,
-                "storage": pci_source_ok or block_source_ok,
-                "input": input_source_ok,
+                "dmi": dmi_ok,
+                "cpu": cpu_ok,
+                "pci": pci_ok,
+                "usb": usb_ok,
+                "audio": audio_ok,
+                "ethernet": ethernet_ok,
+                "wifi": wifi_ok,
+                "bluetooth": bluetooth_ok,
+                "storage": storage_ok,
+                "input": input_ok,
             },
         }
 
