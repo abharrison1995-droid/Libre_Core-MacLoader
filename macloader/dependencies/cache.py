@@ -5,18 +5,61 @@ import json
 import logging
 import os
 import re
+import socket
+import sys
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 from macloader.config import DEFAULT_CACHE_DIR
 from macloader.domain.dependencies import ArtifactVariant, DependencySpec
 from macloader.exceptions import ChecksumMismatchError
 
 logger = logging.getLogger(__name__)
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check whether a process with the given PID is currently alive on this host."""
+    if pid <= 0 or pid > 2147483647:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        import ctypes.wintypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        WAIT_TIMEOUT = 0x00000102
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        kernel32.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if not handle:
+            err = ctypes.get_last_error()
+            return bool(err == 5)  # ERROR_ACCESS_DENIED means process exists in another security context
+        try:
+            res = kernel32.WaitForSingleObject(handle, 0)
+            return bool(res == WAIT_TIMEOUT)
+        finally:
+            kernel32.CloseHandle(handle)
+    else:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except (OverflowError, ValueError):
+            return False
+        else:
+            return True
 
 
 def compute_file_sha256(file_path: Path) -> str:
@@ -31,9 +74,21 @@ def compute_file_sha256(file_path: Path) -> str:
 class CacheManager:
     """Manages local storage and hash validation of downloaded dependency archives."""
 
-    def __init__(self, cache_dir: Optional[Union[str, Path]] = None, max_cache_bytes: int = 2 * 1024 * 1024 * 1024):
+    def __init__(
+        self,
+        cache_dir: Optional[Union[str, Path]] = None,
+        max_cache_bytes: int = 2 * 1024 * 1024 * 1024,
+        lock_timeout: float = 30.0,
+        liveness_check: Optional[Callable[[int], bool]] = None,
+        poll_interval: float = 0.05,
+        remote_lease_seconds: float = 300.0,
+    ):
         self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
         self.max_cache_bytes = max_cache_bytes
+        self.lock_timeout = lock_timeout
+        self.liveness_check = liveness_check or is_process_alive
+        self.poll_interval = poll_interval
+        self.remote_lease_seconds = remote_lease_seconds
         self.downloads_dir = self.cache_dir / "downloads"
         self.index_file = self.cache_dir / "index.json"
         self.lock_file = self.cache_dir / ".cache.lock"
@@ -45,33 +100,124 @@ class CacheManager:
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
 
     def _cleanup_orphans(self) -> None:
+        now = time.time()
         for path in self.downloads_dir.iterdir():
-            if path.is_file() and (path.name.startswith(".") or path.suffix == ".part"):
-                path.unlink(missing_ok=True)
+            try:
+                # Do not delete active downloads (only clean up .part / temp files older than 60s)
+                if path.is_file() and (path.name.startswith(".") or path.suffix == ".part"):
+                    if now - path.stat().st_mtime > 60:
+                        path.unlink(missing_ok=True)
+            except (OSError, PermissionError):
+                pass
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
-        deadline = time.monotonic() + 30
+    def _locked(self, timeout: Optional[float] = None) -> Iterator[None]:
+        timeout_seconds = timeout if timeout is not None else self.lock_timeout
+        deadline = time.monotonic() + timeout_seconds
+        owner_token = uuid.uuid4().hex
+        lock_meta = {
+            "pid": os.getpid(),
+            "token": owner_token,
+            "hostname": socket.gethostname(),
+            "acquired_at": time.time(),
+        }
+        meta_bytes = json.dumps(lock_meta).encode("utf-8")
+
         acquired = False
+        first_attempt = True
         while not acquired:
+            if not first_attempt and time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for dependency cache lock on {self.lock_file}")
+            first_attempt = False
+
             try:
-                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    os.write(fd, meta_bytes)
+                finally:
+                    os.close(fd)
                 acquired = True
             except FileExistsError:
-                try:
-                    if time.time() - self.lock_file.stat().st_mtime > 300:
-                        self.lock_file.unlink(missing_ok=True)
-                        continue
-                except FileNotFoundError:
+                existing_meta = self._read_lock_meta()
+                if existing_meta is None:
+                    # Check if the lock file is empty/corrupt and older than 1.0 second
+                    try:
+                        st = self.lock_file.stat()
+                        if time.time() - st.st_mtime > 1.0:
+                            if self._atomic_reclaim(expected_token=None):
+                                continue
+                    except OSError:
+                        pass
+                    time.sleep(self.poll_interval)
                     continue
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out waiting for dependency cache lock")
-                time.sleep(0.05)
+
+                owner_pid = existing_meta.get("pid")
+                owner_host = existing_meta.get("hostname")
+                stale_token = existing_meta.get("token")
+                acquired_at = existing_meta.get("acquired_at", 0.0)
+
+                is_same_host = (owner_host == socket.gethostname())
+                is_alive = False
+                if is_same_host and isinstance(owner_pid, int):
+                    is_alive = self.liveness_check(owner_pid)
+                elif not is_same_host and isinstance(acquired_at, (int, float)):
+                    is_alive = (time.time() - acquired_at <= self.remote_lease_seconds)
+
+                if not is_alive and stale_token is not None:
+                    if self._atomic_reclaim(expected_token=stale_token):
+                        continue
+
+                time.sleep(self.poll_interval)
+
         try:
             yield
         finally:
-            self.lock_file.unlink(missing_ok=True)
+            try:
+                current = self._read_lock_meta()
+                if current and current.get("token") == owner_token:
+                    self.lock_file.unlink(missing_ok=True)
+                else:
+                    logger.warning("Cache lock release skipped: lock was stolen or replaced by another owner")
+            except OSError as e:
+                logger.debug(f"Failed to release cache lock: {e}")
+
+    def _atomic_reclaim(self, expected_token: Optional[str]) -> bool:
+        """Atomically reclaim a stale or corrupted lock file without racing other processes."""
+        reclaim_path = self.cache_dir / f".reclaim.{uuid.uuid4().hex}.tmp"
+        try:
+            os.replace(self.lock_file, reclaim_path)
+        except (FileNotFoundError, OSError):
+            return False
+
+        try:
+            raw = reclaim_path.read_bytes()
+            meta = json.loads(raw.decode("utf-8")) if raw else None
+        except Exception:
+            meta = None
+
+        actual_token = meta.get("token") if isinstance(meta, dict) else None
+        if expected_token is None or actual_token == expected_token:
+            reclaim_path.unlink(missing_ok=True)
+            logger.info("Atomically reclaimed stale dependency cache lock")
+            return True
+        else:
+            try:
+                os.replace(reclaim_path, self.lock_file)
+            except OSError:
+                reclaim_path.unlink(missing_ok=True)
+            return False
+
+    def _read_lock_meta(self) -> Optional[Dict[str, Any]]:
+        try:
+            raw = self.lock_file.read_bytes()
+            if not raw:
+                return None
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        return None
 
     def _load_index(self) -> Dict[str, Any]:
         if self.index_file.is_file():
