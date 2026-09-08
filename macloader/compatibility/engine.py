@@ -2,11 +2,11 @@
 
 from datetime import datetime, timezone
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from macloader.compatibility.model_matcher import match_model
 from macloader.database.loader import Database, get_database
-from macloader.database.schema import ComponentSchema, ComponentVersionPolicy, ModelSchema
+from macloader.database.schema import ComponentSchema, ComponentVersionPolicy
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.compatibility import (
     CompatibilityReport,

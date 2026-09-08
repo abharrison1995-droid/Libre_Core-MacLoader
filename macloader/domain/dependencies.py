@@ -1,12 +1,11 @@
 """Domain models for OpenCore dependencies, catalog specs, and resolution sets."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import json
-import hashlib
 from typing import Any, Dict, List, Optional
-from macloader.domain.contracts import ArtifactLock, ArtifactLockEntry, CONTRACT_SCHEMA_VERSION
+from macloader.domain.contracts import ArtifactLock, ArtifactLockEntry, CONTRACT_SCHEMA_VERSION, canonical_json_digest
 
 
 class ArtifactVariant(str, Enum):
@@ -175,7 +174,7 @@ class ResolvedDependencySet:
     def canonical_digest(self) -> str:
         data = self.to_dict()
         data.pop("timestamp", None)
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return canonical_json_digest(data)
 
     def to_artifact_lock(self) -> ArtifactLock:
         return ArtifactLock(

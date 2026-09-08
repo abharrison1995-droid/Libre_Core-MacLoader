@@ -1,7 +1,6 @@
 """Archive inspection and safe extraction utilities with path traversal protection."""
 
 import logging
-import os
 import shutil
 import stat
 import tempfile

@@ -1,13 +1,13 @@
 """Preliminary BuildPlan domain model."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
-import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import uuid
 
 from macloader.domain.compatibility import CompatibilityState
+from macloader.domain.contracts import canonical_json_digest
 
 
 @dataclass
@@ -61,7 +61,7 @@ class BuildPlan:
         # These are derived from support_state and unresolved_requirements.
         data.pop("is_actionable", None)
         data.pop("build_ready", None)
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return canonical_json_digest(data)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BuildPlan":

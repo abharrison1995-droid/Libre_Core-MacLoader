@@ -16,7 +16,6 @@ from macloader.detection.normalize import (
 from macloader.domain.hardware import (
     AudioInfo,
     CpuInfo,
-    DisplayInfo,
     GpuInfo,
     HardwareSnapshot,
     InputDeviceInfo,

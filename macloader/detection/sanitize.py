@@ -1,8 +1,7 @@
 """Privacy sanitization utilities for hardware snapshots and test fixtures."""
 
-import copy
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from macloader.domain.hardware import HardwareSnapshot
 

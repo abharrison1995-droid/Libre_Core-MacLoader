@@ -7,7 +7,6 @@ from typing import Callable, Dict, List, Optional, Union
 
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.database.loader import Database, get_database
-from macloader.database.schema import DependencyCatalogSchema
 from macloader.dependencies.cache import CacheManager
 from macloader.dependencies.downloader import Downloader
 from macloader.dependencies.resolver import DependencyResolver
@@ -25,8 +24,7 @@ from macloader.domain.dependencies import (
     DependencySpec,
     ResolvedDependencySet,
 )
-from macloader.domain.contracts import ToolchainSelection
-from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION
+from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.exceptions import ArtifactDownloadError
 

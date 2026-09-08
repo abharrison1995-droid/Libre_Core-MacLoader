@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 from macloader.domain.compatibility import CompatibilityState

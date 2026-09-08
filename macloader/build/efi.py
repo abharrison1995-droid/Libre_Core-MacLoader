@@ -19,7 +19,14 @@ from macloader.dependencies.cache import compute_file_sha256
 from macloader.dependencies.resolver import DependencyResolver
 from macloader.database.loader import Database, get_database
 from macloader.domain.build_plan import BuildPlan
-from macloader.domain.contracts import BuildManifest, CONTRACT_SCHEMA_VERSION, IdentityReference, ToolchainSelection, ValidationReport, _digest
+from macloader.domain.contracts import (
+    BuildManifest,
+    CONTRACT_SCHEMA_VERSION,
+    IdentityReference,
+    ToolchainSelection,
+    ValidationReport,
+    canonical_json_digest,
+)
 from macloader.domain.dependencies import ResolvedDependency, ResolvedDependencySet
 from macloader.exceptions import BuildPlanError
 
@@ -160,11 +167,11 @@ class EfiBuilder:
             output_digest = self._tree_digest(staging)
             manifest = BuildManifest(
                 schema_version=CONTRACT_SCHEMA_VERSION,
-                build_digest=_digest({
+                build_digest=canonical_json_digest({
                     "plan_digest": plan.canonical_digest(),
                     "dependency_digest": dependencies.canonical_digest(),
                     "toolchain_digest": toolchain.digest,
-                    "identity_digest": _digest(identity_data),
+                    "identity_digest": canonical_json_digest(identity_data),
                     "output_digest": output_digest,
                     "schema_version": CONTRACT_SCHEMA_VERSION,
                 }),
@@ -173,7 +180,7 @@ class EfiBuilder:
                 artifact_lock_digest=dependencies.to_artifact_lock().digest,
                 validation_report="VALID",
                 toolchain_digest=toolchain.digest,
-                identity_digest=_digest(identity_data),
+                identity_digest=canonical_json_digest(identity_data),
                 output_digest=output_digest,
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
@@ -267,7 +274,7 @@ class EfiBuilder:
         records: List[Dict[str, Any]] = []
         for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "manifest.json"):
             records.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": compute_file_sha256(path)})
-        return _digest({"files": records})
+        return canonical_json_digest({"files": records})
 
     @staticmethod
     def _config_file_errors(root: Path, config: Dict[str, Any]) -> List[str]:
@@ -364,7 +371,7 @@ class EfiBuilder:
 
     def _identity_path(self, plan: BuildPlan, dependencies: ResolvedDependencySet) -> Path:
         base = self.identity_store_dir or (Path.home() / "AppData" / "Local" / "MacLoader" / "identities" if os.name == "nt" else Path.home() / ".local" / "share" / "macloader" / "identities")
-        key = _digest({"plan": plan.canonical_digest(), "dependencies": dependencies.canonical_digest()})
+        key = canonical_json_digest({"plan": plan.canonical_digest(), "dependencies": dependencies.canonical_digest()})
         return base / f"{key}.json"
 
     @staticmethod

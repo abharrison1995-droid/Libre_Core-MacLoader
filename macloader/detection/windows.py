@@ -12,7 +12,6 @@ from macloader.detection.normalize import (
     extract_machine_type,
     infer_cpu_generation,
     normalize_dmi_string,
-    normalize_hex_id,
 )
 from macloader.domain.hardware import (
     AudioInfo,
@@ -23,10 +22,8 @@ from macloader.domain.hardware import (
     NetworkInfo,
     PciDevice,
     StorageInfo,
-    ThunderboltInfo,
     UsbDevice,
 )
-from macloader.exceptions import HardwareDetectionError
 
 logger = logging.getLogger(__name__)
 

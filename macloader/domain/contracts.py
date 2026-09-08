@@ -9,8 +9,13 @@ from typing import Any, Dict, List, Optional, Tuple
 CONTRACT_SCHEMA_VERSION = "0.1"
 
 
-def _digest(value: Dict[str, Any]) -> str:
+def canonical_json_digest(value: Any) -> str:
+    """Compute deterministic SHA-256 hex digest of a JSON-serializable value using compact sorted keys."""
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+_digest = canonical_json_digest
+
 
 
 @dataclass(frozen=True)

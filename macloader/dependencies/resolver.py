@@ -1,25 +1,21 @@
 """Dependency resolver translating BuildPlans and capability requirements into resolved dependency sets."""
 
 from datetime import datetime, timezone
-import hashlib
-import json
 import copy
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from macloader.database.loader import Database, get_database
-from macloader.database.schema import DependencyCatalogSchema
 from macloader.dependencies.graph import DependencyGraph
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.compatibility import CompatibilityState
+from macloader.domain.contracts import canonical_json_digest
 from macloader.domain.dependencies import (
     ArtifactVariant,
-    DependencySpec,
     ResolvedDependency,
     ResolvedDependencySet,
 )
-from macloader.exceptions import DependencyNotFoundError
-from macloader.exceptions import UnsupportedMacOSError
+from macloader.exceptions import DependencyNotFoundError, UnsupportedMacOSError
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +40,10 @@ class DependencyResolver:
     def catalog_digest(self) -> str:
         if not self.catalog:
             raise DependencyNotFoundError("Dependency catalog unavailable.")
-        return hashlib.sha256(
-            json.dumps(
-                {"policy_version": self.catalog.policy_version, "dependencies": [spec.to_dict() for spec in sorted(self.catalog.dependencies.values(), key=lambda item: item.id)]},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        return canonical_json_digest({
+            "policy_version": self.catalog.policy_version,
+            "dependencies": [spec.to_dict() for spec in sorted(self.catalog.dependencies.values(), key=lambda item: item.id)],
+        })
 
     def resolve(
         self,
