@@ -44,7 +44,12 @@ class Downloader:
         self.timeout = timeout
         self.max_download_bytes = max_download_bytes
 
-    def download_artifact(self, artifact: DependencyArtifact, destination_path: Path) -> Path:
+    def download_artifact(
+        self,
+        artifact: DependencyArtifact,
+        destination_path: Path,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Path:
         """Download an artifact to destination_path while verifying its SHA-256 hash."""
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         fd, part_name = tempfile.mkstemp(prefix=f".{destination_path.name}.", suffix=".part", dir=destination_path.parent)
@@ -52,10 +57,15 @@ class Downloader:
         part_path = Path(part_name)
         deadline = time.monotonic() + self.timeout
 
+        if cancel and cancel():
+            raise ArtifactDownloadError(f"Download of {artifact.asset_name} was cancelled")
+
         try:
             if self.transport:
                 # Custom mock transport (used in tests)
                 self.transport(artifact.source_url, part_path)
+                if cancel and cancel():
+                    raise ArtifactDownloadError(f"Download of {artifact.asset_name} was cancelled")
                 if part_path.stat().st_size > self.max_download_bytes:
                     raise ArtifactDownloadError("Download exceeds the configured maximum size")
                 actual_sha = compute_file_sha256(part_path)
@@ -82,6 +92,8 @@ class Downloader:
                     total = 0
                     with part_path.open("wb") as out_f:
                         while True:
+                            if cancel and cancel():
+                                raise ArtifactDownloadError(f"Download of {artifact.asset_name} was cancelled")
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
                                 raise ArtifactDownloadError("Download exceeded its deadline")

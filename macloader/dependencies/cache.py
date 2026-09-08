@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 from macloader.config import DEFAULT_CACHE_DIR
 from macloader.domain.dependencies import ArtifactVariant, DependencySpec
-from macloader.exceptions import ChecksumMismatchError
+from macloader.exceptions import ArtifactDownloadError, ChecksumMismatchError
 
 logger = logging.getLogger(__name__)
 
@@ -99,19 +99,99 @@ class CacheManager:
     def _ensure_dirs(self) -> None:
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
 
-    def _cleanup_orphans(self) -> None:
-        now = time.time()
+    def is_temp_file_active(self, path: Path, max_age_seconds: float = 60.0) -> bool:
+        """Check if a temporary or part file is active (held by a live acquisition or modified recently)."""
+        name = path.name
+        if not (name.startswith(".") or name.endswith((".part", ".tmp"))):
+            return False
+
+        try:
+            mtime = path.stat().st_mtime
+            if time.time() - mtime < max_age_seconds:
+                return True
+        except OSError:
+            return True
+
+        try:
+            for lock_path in self.cache_dir.glob(".lock.*"):
+                meta = self._read_lock_meta(lock_path)
+                if not meta:
+                    continue
+                owner_pid = meta.get("pid")
+                owner_host = meta.get("hostname")
+                acquired_at = meta.get("acquired_at", 0.0)
+                is_same_host = (owner_host == socket.gethostname())
+                is_alive = False
+                if is_same_host and isinstance(owner_pid, int):
+                    is_alive = self.liveness_check(owner_pid)
+                elif not is_same_host and isinstance(acquired_at, (int, float)):
+                    is_alive = (time.time() - acquired_at <= self.remote_lease_seconds)
+
+                if is_alive:
+                    # 1. Match against explicit artifact_id in lock metadata
+                    artifact_id = meta.get("artifact_id")
+                    if artifact_id and artifact_id.lower() in name.lower():
+                        return True
+                    # 2. Robust prefix-stripping fallback (.lock.<safe_id>.<ver>.<var>)
+                    if lock_path.name.startswith(".lock."):
+                        raw_name = lock_path.name[6:]
+                        parts = raw_name.split(".")
+                        safe_id = parts[0] if parts else ""
+                        if safe_id and safe_id.lower() in name.lower():
+                            return True
+        except OSError:
+            pass
+
+        return False
+
+    def _cleanup_orphans(self, max_age_seconds: float = 60.0) -> None:
+        if not self.downloads_dir.is_dir():
+            return
         for path in self.downloads_dir.iterdir():
             try:
-                # Do not delete active downloads (only clean up .part / temp files older than 60s)
-                if path.is_file() and (path.name.startswith(".") or path.suffix == ".part"):
-                    if now - path.stat().st_mtime > 60:
+                if path.is_file() and (path.name.startswith(".") or path.name.endswith((".part", ".tmp"))):
+                    if not self.is_temp_file_active(path, max_age_seconds=max_age_seconds):
                         path.unlink(missing_ok=True)
             except (OSError, PermissionError):
                 pass
 
     @contextmanager
     def _locked(self, timeout: Optional[float] = None) -> Iterator[None]:
+        with self._locked_file(self.lock_file, timeout=timeout):
+            yield
+
+    @contextmanager
+    def artifact_locked(
+        self,
+        spec: DependencySpec,
+        variant: ArtifactVariant,
+        timeout: Optional[float] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[None]:
+        """Per-artifact lock enabling independent parallel downloads of different artifacts."""
+        lock_path = self.get_artifact_lock_file(spec, variant)
+        extra_meta = {
+            "artifact_id": spec.id,
+            "version": spec.version,
+            "variant": variant.value,
+        }
+        with self._locked_file(lock_path, timeout=timeout, cancel=cancel, extra_meta=extra_meta):
+            yield
+
+    def get_artifact_lock_file(self, spec: DependencySpec, variant: ArtifactVariant) -> Path:
+        """Deterministic per-artifact lock file path."""
+        safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", spec.id)
+        safe_version = re.sub(r"[^A-Za-z0-9._-]", "_", spec.version)
+        return self.cache_dir / f".lock.{safe_id}.{safe_version}.{variant.value}"
+
+    @contextmanager
+    def _locked_file(
+        self,
+        lock_file: Path,
+        timeout: Optional[float] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[None]:
         timeout_seconds = timeout if timeout is not None else self.lock_timeout
         deadline = time.monotonic() + timeout_seconds
         owner_token = uuid.uuid4().hex
@@ -121,30 +201,34 @@ class CacheManager:
             "hostname": socket.gethostname(),
             "acquired_at": time.time(),
         }
+        if extra_meta:
+            lock_meta.update(extra_meta)
         meta_bytes = json.dumps(lock_meta).encode("utf-8")
 
         acquired = False
         first_attempt = True
         while not acquired:
+            if cancel and cancel():
+                raise ArtifactDownloadError(f"Acquisition cancelled while waiting for lock on {lock_file.name}")
             if not first_attempt and time.monotonic() >= deadline:
-                raise TimeoutError(f"Timed out waiting for dependency cache lock on {self.lock_file}")
+                raise TimeoutError(f"Timed out waiting for dependency cache lock on {lock_file}")
             first_attempt = False
 
             try:
-                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 try:
                     os.write(fd, meta_bytes)
                 finally:
                     os.close(fd)
                 acquired = True
             except FileExistsError:
-                existing_meta = self._read_lock_meta()
+                existing_meta = self._read_lock_meta(lock_file)
                 if existing_meta is None:
                     # Check if the lock file is empty/corrupt and older than 1.0 second
                     try:
-                        st = self.lock_file.stat()
+                        st = lock_file.stat()
                         if time.time() - st.st_mtime > 1.0:
-                            if self._atomic_reclaim(expected_token=None):
+                            if self._atomic_reclaim(lock_file, expected_token=None):
                                 continue
                     except OSError:
                         pass
@@ -164,7 +248,7 @@ class CacheManager:
                     is_alive = (time.time() - acquired_at <= self.remote_lease_seconds)
 
                 if not is_alive and stale_token is not None:
-                    if self._atomic_reclaim(expected_token=stale_token):
+                    if self._atomic_reclaim(lock_file, expected_token=stale_token):
                         continue
 
                 time.sleep(self.poll_interval)
@@ -173,19 +257,27 @@ class CacheManager:
             yield
         finally:
             try:
-                current = self._read_lock_meta()
+                current = self._read_lock_meta(lock_file)
                 if current and current.get("token") == owner_token:
-                    self.lock_file.unlink(missing_ok=True)
+                    for attempt in range(5):
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                            break
+                        except OSError:
+                            if attempt == 4:
+                                logger.debug(f"Failed to release lock on {lock_file} after retries")
+                            time.sleep(0.02)
                 else:
-                    logger.warning("Cache lock release skipped: lock was stolen or replaced by another owner")
+                    logger.warning(f"Lock release skipped for {lock_file.name}: replaced by another owner")
             except OSError as e:
-                logger.debug(f"Failed to release cache lock: {e}")
+                logger.debug(f"Failed to release lock on {lock_file}: {e}")
 
-    def _atomic_reclaim(self, expected_token: Optional[str]) -> bool:
+    def _atomic_reclaim(self, lock_file: Optional[Path] = None, expected_token: Optional[str] = None) -> bool:
         """Atomically reclaim a stale or corrupted lock file without racing other processes."""
+        target = lock_file if lock_file is not None else self.lock_file
         reclaim_path = self.cache_dir / f".reclaim.{uuid.uuid4().hex}.tmp"
         try:
-            os.replace(self.lock_file, reclaim_path)
+            os.replace(target, reclaim_path)
         except (FileNotFoundError, OSError):
             return False
 
@@ -198,18 +290,19 @@ class CacheManager:
         actual_token = meta.get("token") if isinstance(meta, dict) else None
         if expected_token is None or actual_token == expected_token:
             reclaim_path.unlink(missing_ok=True)
-            logger.info("Atomically reclaimed stale dependency cache lock")
+            logger.info(f"Atomically reclaimed stale lock {target.name}")
             return True
         else:
             try:
-                os.replace(reclaim_path, self.lock_file)
+                os.replace(reclaim_path, target)
             except OSError:
                 reclaim_path.unlink(missing_ok=True)
             return False
 
-    def _read_lock_meta(self) -> Optional[Dict[str, Any]]:
+    def _read_lock_meta(self, lock_file: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+        target = lock_file if lock_file is not None else self.lock_file
         try:
-            raw = self.lock_file.read_bytes()
+            raw = target.read_bytes()
             if not raw:
                 return None
             data = json.loads(raw.decode("utf-8"))
@@ -218,6 +311,43 @@ class CacheManager:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
         return None
+
+    def acquire_artifact(
+        self,
+        spec: DependencySpec,
+        variant: ArtifactVariant,
+        downloader: Any,
+        timeout: Optional[float] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Path:
+        """Coordinate check/download/verify/publish lifecycle per artifact with cache re-check."""
+        # 1. Fast pre-check before acquiring artifact lock
+        cached = self.get_cached_path_if_valid(spec, variant)
+        if cached:
+            return cached
+
+        # 2. Acquire per-artifact lock (other artifacts proceed concurrently)
+        with self.artifact_locked(spec, variant, timeout=timeout, cancel=cancel):
+            # 3. CRITICAL: Re-check cache after acquiring ownership (concurrent miss handling)
+            cached_after_lock = self.get_cached_path_if_valid(spec, variant)
+            if cached_after_lock:
+                logger.info(f"Artifact {spec.id} ({variant.value}) resolved from concurrent cache acquisition")
+                return cached_after_lock
+
+            if cancel and cancel():
+                raise ArtifactDownloadError(f"Acquisition cancelled for {spec.id} ({variant.value})")
+
+            artifact = spec.get_artifact(variant)
+            if not artifact:
+                raise ChecksumMismatchError(f"No artifact definition for {spec.id} variant {variant.value}")
+
+            target_path = self.get_artifact_cache_path(spec, variant)
+            try:
+                downloader.download_artifact(artifact, target_path, cancel=cancel)
+            except TypeError:
+                downloader.download_artifact(artifact, target_path)
+            self.put_artifact(spec, variant, target_path)
+            return target_path
 
     def _load_index(self) -> Dict[str, Any]:
         if self.index_file.is_file():
@@ -326,14 +456,30 @@ class CacheManager:
         return target_path
 
     def _prune_cache_locked(self) -> None:
-        files = [path for path in self.downloads_dir.iterdir() if path.is_file() and not path.name.startswith(".")]
+        files = [
+            path for path in self.downloads_dir.iterdir()
+            if path.is_file() and not path.name.startswith(".") and not path.name.endswith((".part", ".tmp"))
+        ]
         total = sum(path.stat().st_size for path in files)
+        pruned_any = False
         for path in sorted(files, key=lambda item: item.stat().st_mtime):
             if total <= self.max_cache_bytes:
                 break
             size = path.stat().st_size
             path.unlink(missing_ok=True)
             total -= size
+            pruned_any = True
+
+        if pruned_any:
+            index = self._load_index()
+            if index:
+                remaining_paths = {p.resolve() for p in self.downloads_dir.iterdir() if p.is_file()}
+                pruned_index = {
+                    k: v for k, v in index.items()
+                    if isinstance(v, dict) and Path(v.get("path", "")).resolve() in remaining_paths
+                }
+                if len(pruned_index) != len(index):
+                    self._save_index(pruned_index)
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Return summary statistics of cached files."""
@@ -357,11 +503,13 @@ class CacheManager:
             "entries": entries,
         }
 
-    def clear_cache(self) -> None:
-        """Remove all cached dependency files and reset index."""
+    def clear_cache(self, keep_active_downloads: bool = True) -> None:
+        """Remove all cached dependency files and reset index while protecting active transfers."""
         with self._locked():
             if self.downloads_dir.is_dir():
                 for f in self.downloads_dir.iterdir():
                     if f.is_file() and not f.is_symlink():
+                        if keep_active_downloads and self.is_temp_file_active(f):
+                            continue
                         f.unlink(missing_ok=True)
             self.index_file.unlink(missing_ok=True)

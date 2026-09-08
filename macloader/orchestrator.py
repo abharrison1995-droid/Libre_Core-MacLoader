@@ -111,6 +111,7 @@ class Orchestrator:
         transport: Optional[Callable[[str, Path], None]] = None,
         *,
         plan: Optional[BuildPlan] = None,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Path]:
         """Acquire and cache all resolved dependencies, verifying their SHA-256 integrity."""
         downloader = Downloader(transport=transport)
@@ -129,6 +130,9 @@ class Orchestrator:
             raise ArtifactDownloadError("Resolved dependency set was created from a stale dependency policy.")
 
         for dep in dep_set.resolved_dependencies:
+            if cancel and cancel():
+                raise ArtifactDownloadError("Dependency acquisition was cancelled.")
+
             spec = self.db.get_dependency_spec(dep.dependency_id)
             if not spec:
                 raise ArtifactDownloadError(f"Resolved dependency '{dep.dependency_id}' is absent from the current catalog.")
@@ -148,11 +152,8 @@ class Orchestrator:
                 missing_offline.append(f"{dep.project_name} ({dep.version} {dep.variant.value})")
                 continue
 
-            # Download to cache directory
-            target_path = self.cache.get_artifact_cache_path(spec, dep.variant)
-            downloader.download_artifact(dep.artifact, target_path)
-            # Re-verify and update index
-            self.cache.put_artifact(spec, dep.variant, target_path)
+            # Acquire artifact with per-artifact locking and cache re-check
+            target_path = self.cache.acquire_artifact(spec, dep.variant, downloader, cancel=cancel)
             results[dep.dependency_id] = target_path
 
         if missing_offline:
