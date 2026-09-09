@@ -1,5 +1,7 @@
 # MacLoader Implementation Handoff — v0.0.1 → v0.0.4
 
+> **Next-phase handoff:** start with [CONFIGURATION_WORKFLOW_PLAN.md](CONFIGURATION_WORKFLOW_PLAN.md) for the schema-driven T480s workflow and approved decisions A1–A8. The historical milestone handoff below is background, not the execution instructions for that phase.
+
 > Historical handoff, refreshed 2026-09-09. Follow the [active implementation plan](IMPLEMENTATION_PLAN.md): S12 Recovery and removable-media guards are verified and committed, with 254 local tests passing, mypy clean across 72 files and 79.79% branch coverage against a 79% CI gate. The G1 dependency catalog audit and G2 license/manifest provenance safeguards are recorded and committed. G0 remains reopened; packaging evidence, EFI trust/validation, official Recovery acquisition, platform USB adapters, clean-host workflow and physical acceptance remain open. Sequoia is the first qualification target. Neither historical milestone completion nor prototype code establishes shipping readiness.
 
 **Project:** Libre_Core-MacLoader  

@@ -26,6 +26,8 @@ from macloader.domain.dependencies import (
 )
 from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.hardware import HardwareSnapshot
+from macloader.domain.configuration import UserConfiguration
+from macloader.configuration.service import ConfigurationEvaluation, ConfigurationService
 from macloader.exceptions import ArtifactDownloadError
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,14 @@ class Orchestrator:
         self._cache: Optional[CacheManager] = None
         self._cache_dir = cache_dir
         self.builder = EfiBuilder(db=self.db)
+        self._configuration_service: Optional[ConfigurationService] = None
+
+    @property
+    def configuration_service(self) -> ConfigurationService:
+        """Shared policy/evaluation service for CLI and future TUI presentations."""
+        if self._configuration_service is None:
+            self._configuration_service = ConfigurationService(db=self.db)
+        return self._configuration_service
 
     @property
     def resolver(self) -> DependencyResolver:
@@ -89,6 +99,12 @@ class Orchestrator:
         """Generate a preliminary BuildPlan for the detected snapshot and target macOS."""
         report = self.check_support(snapshot=snapshot, target_macos=target_macos)
         return self.engine.generate_build_plan(report=report)
+
+    def new_configuration(self, snapshot: HardwareSnapshot) -> UserConfiguration:
+        return self.configuration_service.new_draft(snapshot)
+
+    def evaluate_configuration(self, configuration: UserConfiguration, snapshot: HardwareSnapshot) -> ConfigurationEvaluation:
+        return self.configuration_service.evaluate(configuration, snapshot)
 
     def list_catalog_dependencies(self) -> List[DependencySpec]:
         """Return all available specifications from the dependency catalog."""

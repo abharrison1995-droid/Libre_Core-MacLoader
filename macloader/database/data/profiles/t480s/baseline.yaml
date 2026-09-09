@@ -1,0 +1,11 @@
+schema_version: "1"
+profile_id: t480s-sequoia-baseline
+model_id: thinkpad-t480s
+product_id: sequoia
+capability_bindings:
+  profile.smbios: identity.smbios
+  profile.graphics: accelerated_intel_uhd_620
+  profile.audio: alc257_audio
+  profile.network: intel_wireless_lan
+  profile.input: thinkpad_input
+  profile.usb_map: usb_map

@@ -22,6 +22,7 @@ from macloader.config import DEFAULT_MACOS_TARGET, SUPPORTED_MACOS_TARGETS
 from macloader.diagnostics.logging import setup_logging
 from macloader.domain.dependencies import ArtifactVariant
 from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
+from macloader.domain.configuration import UserConfiguration
 from macloader.exceptions import DependencyError, MacLoaderError
 from macloader.orchestrator import Orchestrator
 from macloader.build.efi import EfiBuilder
@@ -132,6 +133,45 @@ def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output
 
     except MacLoaderError as e:
         err_console.print(f"[bold red]BuildPlan Error:[/bold red] {e}")
+        sys.exit(1)
+
+
+@cli.command("configure")
+@click.option("--version", "macos_version", type=str, help="Exact macOS version from the trusted release catalog.")
+@click.option("--build", "macos_build", type=str, help="Exact macOS build from the trusted release catalog.")
+@click.option("--json", "json_mode", is_flag=True, help="Output the evaluated configuration and issues as JSON.")
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Load hardware snapshot from a fixture file.")
+def configure_cmd(macos_version: Optional[str], macos_build: Optional[str], json_mode: bool, fixture: Optional[Path]) -> None:
+    """Evaluate a schema-driven T480s configuration draft against a fixture."""
+    try:
+        orchestrator = Orchestrator()
+        snapshot = orchestrator.probe_hardware(fixture_path=fixture)
+        draft = orchestrator.new_configuration(snapshot)
+        if macos_version is not None or macos_build is not None:
+            if not macos_version or not macos_build:
+                raise click.ClickException("--version and --build must be supplied together")
+            release = orchestrator.configuration_service.policy.get_release("sequoia", macos_version, macos_build)
+            if release is None:
+                raise click.ClickException("The exact version/build is not present in the trusted release catalog")
+            draft = UserConfiguration.from_dict({
+                **draft.to_dict(), "target": release.target().to_dict(),
+            })
+        evaluation = orchestrator.evaluate_configuration(draft, snapshot)
+        payload = {
+            "configuration": evaluation.configuration.to_dict(),
+            "issues": [issue.to_dict() for issue in evaluation.issues],
+            "plan": evaluation.plan.to_dict(),
+            "accepted": evaluation.accepted is not None,
+        }
+        if json_mode:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print(f"Configuration issues: {len(evaluation.issues)}")
+            console.print(f"BuildPlan: {evaluation.plan.target_model} / {evaluation.plan.target_macos}")
+            for issue in evaluation.issues:
+                console.print(f"- {issue.code}: {issue.explanation}")
+    except (MacLoaderError, ValueError, click.ClickException) as exc:
+        err_console.print(f"[bold red]Configuration Error:[/bold red] {exc}")
         sys.exit(1)
 
 

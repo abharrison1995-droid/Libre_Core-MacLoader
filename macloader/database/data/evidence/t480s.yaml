@@ -1,0 +1,25 @@
+schema_version: "1"
+policy_version: "t480s-evidence-2026.09-a"
+model_id: thinkpad-t480s
+requirements:
+  - id: graphics.identity
+    kind: hardware
+    completeness: observed
+    invalidated_by: [bios_change, snapshot_change]
+  - id: audio.codec
+    kind: hardware
+    completeness: observed
+    invalidated_by: [bios_change, snapshot_change]
+  - id: wifi.identity
+    kind: hardware
+    completeness: observed
+    invalidated_by: [hardware_change, snapshot_change]
+  - id: input.identity
+    kind: hardware
+    completeness: observed
+    invalidated_by: [hardware_change, snapshot_change]
+  - id: usb.physical_ports
+    kind: usb
+    completeness: complete
+    requires_physical_port_evidence: true
+    invalidated_by: [bios_change, usb_controller_change, snapshot_change]

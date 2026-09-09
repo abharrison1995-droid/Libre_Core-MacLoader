@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import copy
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 from macloader.database.loader import Database, get_database
@@ -68,6 +69,18 @@ class DependencyResolver:
             raise DependencyNotFoundError(f"Dependency resolution is blocked because the hardware model is not in the verified catalog: '{plan.target_model}'")
         if not plan.policy_version or plan.policy_version != self.catalog.policy_version:
             raise DependencyNotFoundError("Dependency resolution is blocked because the BuildPlan policy is stale or missing")
+        if plan.accepted_configuration_digest:
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", plan.accepted_configuration_digest)
+                or not plan.target_version
+                or not plan.target_build
+                or not re.fullmatch(r"[0-9a-f]{64}", plan.target_release_digest)
+                or not plan.stable_model_id
+                or not re.fullmatch(r"[0-9a-f]{64}", plan.hardware_content_digest)
+            ):
+                raise DependencyNotFoundError(
+                    "Dependency resolution is blocked because the accepted configuration binding is incomplete"
+                )
 
         target_macos = plan.target_macos.lower()
         os_profile = self.db.get_macos(target_macos)

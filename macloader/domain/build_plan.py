@@ -28,6 +28,15 @@ class BuildPlan:
     schema_version: str = "0.1"
     policy_version: str = ""
     build_ready: bool = False
+    # Exact configuration bindings are empty for legacy product-only plans.
+    target_version: str = ""
+    target_build: str = ""
+    target_release_digest: str = ""
+    stable_model_id: str = ""
+    accepted_configuration_digest: str = ""
+    hardware_content_digest: str = ""
+    evidence_digests: List[str] = field(default_factory=list)
+    profile_bindings: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Derive readiness from the validated policy inputs at the boundary."""
@@ -53,6 +62,14 @@ class BuildPlan:
             "schema_version": self.schema_version,
             "policy_version": self.policy_version,
             "build_ready": derived_build_ready,
+            "target_version": self.target_version,
+            "target_build": self.target_build,
+            "target_release_digest": self.target_release_digest,
+            "stable_model_id": self.stable_model_id,
+            "accepted_configuration_digest": self.accepted_configuration_digest,
+            "hardware_content_digest": self.hardware_content_digest,
+            "evidence_digests": list(self.evidence_digests),
+            "profile_bindings": list(self.profile_bindings),
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -103,4 +120,12 @@ class BuildPlan:
             schema_version=data.get("schema_version", "0.1"),
             policy_version=data.get("policy_version", ""),
             build_ready=derived_build_ready,
+            target_version=str(data.get("target_version", "")),
+            target_build=str(data.get("target_build", "")),
+            target_release_digest=str(data.get("target_release_digest", "")),
+            stable_model_id=str(data.get("stable_model_id", "")),
+            accepted_configuration_digest=str(data.get("accepted_configuration_digest", "")),
+            hardware_content_digest=str(data.get("hardware_content_digest", "")),
+            evidence_digests=[str(item) for item in data.get("evidence_digests", [])],
+            profile_bindings=[str(item) for item in data.get("profile_bindings", [])],
         )

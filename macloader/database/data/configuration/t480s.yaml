@@ -1,0 +1,90 @@
+schema_version: "1"
+policy_version: "t480s-configuration-2026.09-a"
+model_id: thinkpad-t480s
+profiles:
+  - t480s-sequoia-baseline
+options:
+  - id: profile.smbios
+    value_type: enum
+    control_hint: reviewed-preset
+    allowed_values: ["MacBookPro15,2"]
+    default: "MacBookPro15,2"
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: []
+    support_state: EXPERIMENTAL
+    requires_acknowledgement: true
+    explanation: "Reviewed SMBIOS preset candidate; physical acceptance is still required."
+    research_ref: "RESEARCH_LEDGER.md#research-item-002"
+  - id: profile.graphics
+    value_type: enum
+    control_hint: reviewed-preset
+    allowed_values: [kaby-lake-r-uhd620]
+    default: kaby-lake-r-uhd620
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: [graphics.identity]
+    support_state: EXPERIMENTAL
+    requires_acknowledgement: true
+    explanation: "UHD 620 acceleration remains a reviewed experimental policy until physical validation."
+    research_ref: "RESEARCH_LEDGER.md#research-item-002"
+  - id: profile.audio
+    value_type: enum
+    control_hint: bounded-value
+    allowed_values: [layout-11, layout-86, layout-97, layout-99]
+    default: layout-11
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: [audio.codec]
+    support_state: EXPERIMENTAL
+    requires_acknowledgement: true
+    explanation: "ALC257 layout candidates are bounded by policy; choose only with matching codec evidence."
+    research_ref: "RESEARCH_LEDGER.md#research-item-003"
+  - id: profile.network
+    value_type: enum
+    control_hint: reviewed-preset
+    allowed_values: [itlwm-sequoia]
+    default: itlwm-sequoia
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: [wifi.identity]
+    support_state: EXPERIMENTAL
+    requires_acknowledgement: true
+    explanation: "Intel WLAN uses the Sequoia itlwm path; Recovery networking remains a separate gate."
+    research_ref: "RESEARCH_LEDGER.md#research-item-005"
+  - id: profile.input
+    value_type: enum
+    control_hint: reviewed-preset
+    allowed_values: [ps2-and-i2c]
+    default: ps2-and-i2c
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: [input.identity]
+    support_state: EXPERIMENTAL
+    requires_acknowledgement: true
+    explanation: "Use the shared reviewed input stack for the observed T480s baseline."
+    research_ref: "ENGINEERING_SPEC_V0.1.md#18-acpi-strategy"
+  - id: profile.usb_map
+    value_type: enum
+    control_hint: reviewed-preset
+    allowed_values: [physical-evidence-required]
+    default: physical-evidence-required
+    applies_to_models: [thinkpad-t480s]
+    applies_to_products: [sequoia]
+    dependencies: []
+    conflicts: []
+    evidence_requirements: [usb.physical_ports]
+    support_state: UNKNOWN
+    requires_acknowledgement: false
+    explanation: "A USB map cannot be marked complete without physical port evidence."
+    research_ref: "CONFIGURATION_WORKFLOW_PLAN.md#usb"

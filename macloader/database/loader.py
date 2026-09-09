@@ -77,6 +77,11 @@ class Database:
         macos_dir = self.data_dir / "macos"
         if macos_dir.is_dir():
             for f in sorted(macos_dir.glob("*.yaml")):
+                # Exact release records are consumed by the configuration
+                # policy loader; the legacy macOS profile registry remains
+                # product-level compatibility data.
+                if f.name == "releases.yaml":
+                    continue
                 data = self._load_yaml(f)
                 os_prof = MacOsSchema.validate_and_load(data, filename=f.name)
                 if os_prof.id in self.macos_profiles:

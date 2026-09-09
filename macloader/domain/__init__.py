@@ -29,6 +29,19 @@ from macloader.domain.dependencies import (
     ResolvedDependency,
     ResolvedDependencySet,
 )
+from macloader.domain.targets import MacOsTarget
+from macloader.domain.evidence import EvidenceCompleteness, EvidenceConfidence, EvidenceRecord
+from macloader.domain.configuration import (
+    AcceptedConfiguration,
+    Acknowledgement,
+    BlockingStage,
+    ConfigurationIssue,
+    HardwareConfirmation,
+    HardwareObservation,
+    IssueSeverity,
+    ObservationStatus,
+    UserConfiguration,
+)
 
 __all__ = [
     "CompatibilityState",
@@ -54,4 +67,17 @@ __all__ = [
     "DependencySpec",
     "ResolvedDependency",
     "ResolvedDependencySet",
+    "MacOsTarget",
+    "EvidenceCompleteness",
+    "EvidenceConfidence",
+    "EvidenceRecord",
+    "AcceptedConfiguration",
+    "Acknowledgement",
+    "BlockingStage",
+    "ConfigurationIssue",
+    "HardwareConfirmation",
+    "HardwareObservation",
+    "IssueSeverity",
+    "ObservationStatus",
+    "UserConfiguration",
 ]

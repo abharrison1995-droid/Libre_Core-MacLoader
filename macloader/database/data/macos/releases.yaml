@@ -1,0 +1,10 @@
+schema_version: "1"
+policy_version: "macos-releases-2026.09-a"
+releases:
+  # A catalog record is an exact selectable target, not evidence that the
+  # current T480s hardware has been qualified for this release.
+  - product_id: sequoia
+    product_name: "macOS Sequoia"
+    version: "15.0"
+    build: "24A335"
+    qualification_state: candidate
