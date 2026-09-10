@@ -2,7 +2,9 @@
 
 > Next configuration-workflow phase: follow [CONFIGURATION_WORKFLOW_PLAN.md](CONFIGURATION_WORKFLOW_PLAN.md), dated 2026-09-09, and accepted ADR-007. It records the user's approved defaults, phased implementation, files, tests and human evidence requirements. It supplements this release plan; it does not close or weaken G0–G7. Historical baseline/status text below must be reconciled with current source and fresh evidence before implementation.
 
-Updated: 2026-09-09, after the P0-P3 configuration-workflow implementation slice. The current checkout remains an **uncommitted working tree**, not a release. Sequoia first remains the agreed scope; the pre-slice baseline and historical review findings are retained below for traceability.
+Updated: 2026-09-10, after the P0-P3 configuration-workflow implementation slice and real T480s evidence capture. The current checkout is **not a release candidate**. Sequoia first remains the agreed scope; the pre-slice baseline and historical review findings are retained below for traceability.
+
+Evidence update 2026-09-10: real sanitized T480s 20L8 inventory, BIOS observations, private ACPI tables, ALC257 identity and partial USB topology are available as summarized in [T480S_REFERENCE_EVIDENCE_2026-09-10.md](T480S_REFERENCE_EVIDENCE_2026-09-10.md). P4 may begin against that exact evidence. Type-C logical mapping, trusted `iasl`/`ocvalidate`, generated EFI qualification and all installation/physical acceptance remain open.
 
 This is the active execution plan. It supersedes earlier statements that G0 is closed and that the builder/recovery/media modules are wholly absent or complete. The engineering specification remains the product contract. Historical review resolutions remain in [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md); the open issue register below governs current work.
 
