@@ -1,0 +1,41 @@
+schema_version: "1"
+policy_version: "t480s-p4-toolchain-2026.09-a"
+toolchains:
+  - id: opencore-1.0.7-acpica-20260408-linux-x86_64
+    host_platform: linux
+    host_architecture: x86_64
+    opencore_version: "1.0.7"
+    archive_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip"
+    archive_sha256: "2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e"
+    sample_plist:
+      file_name: Sample-1.0.7.plist
+      version: "1.0.7"
+      source_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip#Docs/Sample.plist"
+      source_sha256: "2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e"
+      size_bytes: 55244
+      sha256: "1bd3a503d2d71b531249e9d52fb1b8307e61547f6e593743da4969e5e2574203"
+      invocation: ""
+    ocvalidate:
+      file_name: ocvalidate-1.0.7-linux
+      version: "1.0.7"
+      source_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip#Utilities/ocvalidate/ocvalidate.linux"
+      source_sha256: "2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e"
+      size_bytes: 628360
+      sha256: "46200ea44b93aae3421e8d1e37712003afa90f88098b2cd971741a8e9cf7218d"
+      invocation: ""
+    acpi_compiler:
+      file_name: iasl-20260408-linux
+      version: "20260408"
+      source_url: "https://github.com/open-acpica/acpica/releases/download/20260408/acpica-unix-20260408.tar.gz"
+      source_sha256: "e66ceb26d6d514ce164fe22f5a4f7ca165cc38349d7a97f41a21f19b364647a2"
+      size_bytes: 1465744
+      sha256: "4f0f732e7d417ef566e8fd2271f0a46e55efb921b1322a395e2a689ecb4a288d"
+      invocation: "-v"
+    identity_tool:
+      file_name: macserial-1.0.7-linux
+      version: "2.1.8"
+      source_url: "https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip#Utilities/macserial/macserial.linux"
+      source_sha256: "2ffab6ebf58c7aefb0bcb3a1a385d207746823d6dd87d44bd666e1286939943e"
+      size_bytes: 501688
+      sha256: "b0a4a3581c0f06b3ddce915165eb3a1726acfa876192fe9ee5ef9ea08a469ad8"
+      invocation: "--version"

@@ -25,6 +25,7 @@ from macloader.domain.dependencies import (
     ResolvedDependencySet,
 )
 from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
+from macloader.build.config import ReviewedEfiProfile
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.configuration import UserConfiguration
 from macloader.configuration.service import ConfigurationEvaluation, ConfigurationService
@@ -214,7 +215,20 @@ class Orchestrator:
         if dep_set.unresolved_requirements != expected.unresolved_requirements:
             raise ArtifactDownloadError("Resolved dependency set unresolved requirements are stale")
 
-    def build_efi(self, plan: BuildPlan, dep_set: ResolvedDependencySet, artifact_paths: Dict[str, Path], output_dir: Union[str, Path], fake_identity: Optional[Dict[str, str]] = None, toolchain: Optional[ToolchainSelection] = None, ocvalidate_path: Optional[Union[str, Path]] = None, ocvalidate_sha256: Optional[str] = None) -> EfiBuildResult:
+    def build_efi(
+        self,
+        plan: BuildPlan,
+        dep_set: ResolvedDependencySet,
+        artifact_paths: Dict[str, Path],
+        output_dir: Union[str, Path],
+        fake_identity: Optional[Dict[str, str]] = None,
+        toolchain: Optional[ToolchainSelection] = None,
+        ocvalidate_path: Optional[Union[str, Path]] = None,
+        ocvalidate_sha256: Optional[str] = None,
+        reviewed_profile: Optional[ReviewedEfiProfile] = None,
+        private_acpi_capture: Optional[Union[str, Path]] = None,
+        expected_acpi_evidence_digest: Optional[str] = None,
+    ) -> EfiBuildResult:
         if dep_set.plan_digest != plan.canonical_digest():
             raise ArtifactDownloadError("Dependency lock is bound to a different BuildPlan")
         if toolchain is None:
@@ -234,4 +248,9 @@ class Orchestrator:
                 ocvalidate_path=str(ocvalidate_path) if ocvalidate_path else None,
                 ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
             )
-        return self.builder.build(plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity, toolchain=toolchain)
+        return self.builder.build(
+            plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity, toolchain=toolchain,
+            reviewed_profile=reviewed_profile,
+            private_acpi_capture=Path(private_acpi_capture) if private_acpi_capture is not None else None,
+            expected_acpi_evidence_digest=expected_acpi_evidence_digest,
+        )

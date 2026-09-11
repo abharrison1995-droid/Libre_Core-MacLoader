@@ -1,0 +1,28 @@
+schema_version: "1"
+profile_id: t480s-sequoia-p4
+model_id: thinkpad-t480s
+product_id: sequoia
+version: "15.0"
+build: "24A335"
+bios_binding: "N22ET85W-1.62"
+graphics:
+  device_path: "PciRoot(0x0)/Pci(0x2,0x0)"
+  platform_id: "0000C087"
+  device_id: "16590000"
+  panel_scope: "internal-fhd-1920x1080-non-touch"
+  source_refs:
+    - "https://github.com/acidanthera/WhateverGreen/blob/master/Manual/FAQ.IntelHD.en.md"
+    - "https://dortania.github.io/OpenCore-Install-Guide/config-laptop.plist/kaby-lake.html"
+audio:
+  device_path: "PciRoot(0x0)/Pci(0x1f,0x3)"
+  codec: "10EC:0257/17AA:2258"
+  layout_id: 86
+  source_refs:
+    - "https://github.com/acidanthera/AppleALC/wiki/Supported-codecs"
+    - "https://github.com/acidanthera/AppleALC/blob/master/Changelog.md"
+usb:
+  routes: [SS01, SS02, SS03, HS06, HS07, HS08]
+  first_install_route: SS01
+  usb_c_correlation: unresolved
+wwan_policy: disabled-by-omission
+acpi_source_scope: private-dsdt-plus-eleven-ssdt-reviewed-generated-additions

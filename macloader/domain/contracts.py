@@ -72,6 +72,12 @@ class ToolchainSelection:
     provenance: Dict[str, str] = field(default_factory=dict)
     ocvalidate_path: Optional[str] = None
     ocvalidate_sha256: Optional[str] = None
+    acpi_compiler_path: Optional[str] = None
+    acpi_compiler_sha256: Optional[str] = None
+    identity_tool_path: Optional[str] = None
+    identity_tool_sha256: Optional[str] = None
+    sample_plist_path: Optional[str] = None
+    sample_plist_sha256: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +87,12 @@ class ToolchainSelection:
             "host_platform": self.host_platform, "host_architecture": self.host_architecture,
             "provenance": dict(self.provenance), "ocvalidate_path": self.ocvalidate_path,
             "ocvalidate_sha256": self.ocvalidate_sha256,
+            "acpi_compiler_path": self.acpi_compiler_path,
+            "acpi_compiler_sha256": self.acpi_compiler_sha256,
+            "identity_tool_path": self.identity_tool_path,
+            "identity_tool_sha256": self.identity_tool_sha256,
+            "sample_plist_path": self.sample_plist_path,
+            "sample_plist_sha256": self.sample_plist_sha256,
         }
 
     @property
@@ -128,6 +140,13 @@ class BuildManifest:
     identity_digest: str = ""
     output_digest: str = ""
     license_digests: Dict[str, str] = field(default_factory=dict)
+    schema_digest: str = ""
+    profile_digest: str = ""
+    acpi_digest: str = ""
+    evidence_digests: Tuple[str, ...] = field(default_factory=tuple)
+    usb_policy_state: str = ""
+    usb_first_install_route: str = ""
+    identity_reference: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -137,5 +156,12 @@ class BuildManifest:
             "toolchain_digest": self.toolchain_digest, "identity_digest": self.identity_digest,
             "output_digest": self.output_digest,
             "license_digests": dict(self.license_digests),
+            "schema_digest": self.schema_digest,
+            "profile_digest": self.profile_digest,
+            "acpi_digest": self.acpi_digest,
+            "evidence_digests": list(self.evidence_digests),
+            "usb_policy_state": self.usb_policy_state,
+            "usb_first_install_route": self.usb_first_install_route,
+            "identity_reference": self.identity_reference,
             "output_paths": dict(self.output_paths),
         }

@@ -366,3 +366,55 @@ No for public artifact provenance or synthetic identity tests; yes for the T480s
 - Capture the sanitized live T480s/BIOS/OS snapshot and freeze the Sequoia policy, including ACPI paths and USB map.
 - Generate a policy-based config from the pinned schema, validate it with the real matching `ocvalidate.exe`, and record the redacted report.
 - Run an opt-in Recovery acquisition and retain its signed chunklist evidence. Exact build reproducibility requires recording the server-resolved product/build.
+
+## Research Item 011 — Exact T480s graphics and audio policy inputs
+
+### Question
+Which authoritative public values are appropriate for the captured Kaby Lake Refresh UHD 620 and ALC257 candidate without inventing connector or physical audio results?
+
+### Sources
+- [WhateverGreen Intel graphics FAQ](https://github.com/acidanthera/WhateverGreen/blob/master/Manual/FAQ.IntelHD.en.md)
+- [Dortania Kaby Lake laptop configuration guide](https://dortania.github.io/OpenCore-Install-Guide/config-laptop.plist/kaby-lake.html)
+- [AppleALC supported codecs](https://github.com/acidanthera/AppleALC/wiki/Supported-codecs)
+- [AppleALC changelog](https://github.com/acidanthera/AppleALC/blob/master/Changelog.md)
+- Date inspected: 2026-09-10
+
+### Findings and decision
+- The reviewed graphics profile uses `AAPL,ig-platform-id=0000C087` and Kaby Lake Refresh fake `device-id=16590000` for the exact internal FHD non-touch policy. The profile is scoped to the captured panel and does not assert connector or brightness success.
+- AppleALC publicly lists ALC257 layout candidates including 11, 18, 86, 96, 97, 99 and 100/101. The changelog identifies layout 86 with ThinkPad T480 and layout 97 with T490; layout 86 is therefore the bounded experimental selection for this T480s candidate.
+- The selected values are encoded only in `macloader/database/data/profiles/t480s/p4-sequoia.yaml`, with source references and physical acceptance still required. No audio outcome or support promotion is inferred from the policy selection.
+
+### Confidence
+`MEDIUM-HIGH` for the public policy references and bounded values; `PENDING` for physical display/audio/connector acceptance on this exact machine.
+
+### Physical verification required?
+Yes — graphics acceleration, native resolution/brightness, speakers, headphone output, microphone and sleep/wake behavior remain untested.
+
+## Research Item 012 — P4 trusted Linux toolchain and real EFI qualification
+
+### Question
+Can the exact captured T480s/Sequoia candidate be built from the locked dependencies using independently verified tools and a real matching OpenCore validator on the current host?
+
+### Sources
+- [OpenCorePkg 1.0.7 release](https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.7)
+- [OpenCore 1.0.7 release archive](https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.7/OpenCore-1.0.7-RELEASE.zip)
+- [ACPICA 20260408 release](https://github.com/acpica/acpica/releases/tag/20260408)
+- OpenCore 1.0.7 `Docs/Sample.plist`, native Linux `ocvalidate` and native Linux `macserial` members from the pinned archive
+- Date run: 2026-09-10
+
+### Verified record and method
+- The trusted catalog verifies the OpenCore archive/member digests, the schema digest, native Linux `ocvalidate` `1.0.7`, iASL `20260408` built from the official ACPICA source archive, and macserial `2.1.8`. Caller-supplied paths cannot declare a selection qualified.
+- The private capture was validated machine-bound against the reviewed BIOS binding. All 13 tables disassembled; 12 OEM SSDTs compiled; the OEM DSDT compile failure was retained as a diagnostic and no OEM raw table was emitted. Three reviewed generated AML files compiled and were copied into the EFI ACPI directory.
+- The exact configuration gate accepted Sequoia 15.0 build 24A335 after acknowledgements and evidence review. USB evidence remains `PARTIAL`; the profile records SS01 as the first-install route and keeps USB-C logical correlation unresolved.
+- Ten pinned release dependencies were downloaded, integrity-checked and then replayed offline. The final schema-derived EFI passed structural validation and the real matching OpenCore 1.0.7 `ocvalidate` with exit 0; the redacted manifest binds output, toolchain, schema, profile, evidence, ACPI outputs, locks and identity reference.
+- Automated result: `python3 -m pytest -q` — **275 passed in 9.88s**. Focused P4 tests cover forged toolchains, identity lifecycle, ACPI failure cases, kext ordering and real validator acceptance.
+
+### Decision
+P4 is software-qualified for this exact candidate on the current Linux x86_64 host, with explicit experimental and unresolved-evidence boundaries. Do not acquire Recovery, write installer media, modify firmware or promote the T480s to `SUPPORTED` from this result.
+
+### Confidence
+`HIGH` for the current host's tool bytes, version checks, locked dependency build and real validator result; `PENDING` for other hosts, Recovery, live identity choice and all physical acceptance.
+
+### Follow-up
+- Keep the raw ACPI capture, real/private identity values and ignored diagnostics outside Git and public artifacts.
+- Complete Recovery, media, packaging/host-matrix and physical acceptance gates before any support-matrix promotion.

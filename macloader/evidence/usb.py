@@ -68,12 +68,14 @@ class UsbEvidenceSession:
     capture_version: str
     observations: Tuple[UsbPortObservation, ...] = field(default_factory=tuple)
     confidence: EvidenceConfidence = EvidenceConfidence.UNKNOWN
+    unresolved_logical_correlation: Tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema_version": "1", "snapshot_id": self.snapshot_id, "bios_binding": self.bios_binding,
             "private_ref": self.private_ref, "capture_version": self.capture_version,
             "observations": [item.to_dict() for item in self.observations], "confidence": self.confidence.value,
+            "unresolved_logical_correlation": list(self.unresolved_logical_correlation),
         }
 
     @property
@@ -90,6 +92,10 @@ class UsbEvidenceSession:
         )
         if unresolved:
             return EvidenceCompleteness.PARTIAL, unresolved
+        if self.unresolved_logical_correlation:
+            return EvidenceCompleteness.PARTIAL, tuple(
+                f"{item}: logical USB-C correlation unresolved" for item in self.unresolved_logical_correlation
+            )
         return EvidenceCompleteness.COMPLETE, ()
 
     def to_evidence_record(self) -> EvidenceRecord:
@@ -100,21 +106,26 @@ class UsbEvidenceSession:
             private_ref=self.private_ref, machine_snapshot_id=self.snapshot_id, bios_binding=self.bios_binding,
             capture_method="manual-physical-port-session", capture_version=self.capture_version,
             completeness=status, confidence=self.confidence, unresolved_checks=unresolved,
-            physical_port_evidence=status == EvidenceCompleteness.COMPLETE,
+            physical_port_evidence=status in (EvidenceCompleteness.COMPLETE, EvidenceCompleteness.PARTIAL)
+            and bool(self.observations),
         )
 
     @classmethod
     def from_dict(cls, data: Any) -> "UsbEvidenceSession":
         if not isinstance(data, dict):
             raise ValueError("USB evidence session must be a mapping")
-        required = {"schema_version", "snapshot_id", "bios_binding", "private_ref", "capture_version", "observations", "confidence"}
+        required = {"schema_version", "snapshot_id", "bios_binding", "private_ref", "capture_version", "observations", "confidence", "unresolved_logical_correlation"}
         if set(data) != required or data["schema_version"] != "1":
             raise ValueError("USB evidence session has an invalid schema")
         if not isinstance(data["observations"], list):
             raise ValueError("USB evidence observations must be a list")
+        unresolved = data["unresolved_logical_correlation"]
+        if not isinstance(unresolved, list) or not all(isinstance(item, str) and item.strip() for item in unresolved):
+            raise ValueError("USB unresolved logical correlation must be a list of strings")
         return cls(
             snapshot_id=str(data["snapshot_id"]), bios_binding=str(data["bios_binding"]),
             private_ref=str(data["private_ref"]), capture_version=str(data["capture_version"]),
             observations=tuple(UsbPortObservation.from_dict(item) for item in data["observations"]),
             confidence=EvidenceConfidence(str(data["confidence"])),
+            unresolved_logical_correlation=tuple(unresolved),
         )

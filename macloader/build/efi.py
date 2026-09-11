@@ -34,6 +34,9 @@ from macloader.domain.contracts import (
 )
 from macloader.domain.dependencies import ResolvedDependency, ResolvedDependencySet
 from macloader.exceptions import ArchiveSecurityError, BuildPlanError
+from macloader.build.acpi import AcpiProcessor
+from macloader.build.config import ReviewedEfiProfile, SchemaDrivenConfigGenerator
+from macloader.identity.service import IdentityService, IdentityServiceError
 
 
 @dataclass
@@ -67,12 +70,20 @@ class EfiBuilder:
         output_dir: Path,
         fake_identity: Optional[Dict[str, str]] = None,
         toolchain: Optional[ToolchainSelection] = None,
+        reviewed_profile: Optional[ReviewedEfiProfile] = None,
+        private_acpi_capture: Optional[Path] = None,
+        expected_acpi_evidence_digest: Optional[str] = None,
     ) -> EfiBuildResult:
         if not plan.support_state.is_usable or plan.unresolved_requirements:
             reasons = "; ".join(plan.unresolved_requirements) or "hardware support state is not actionable"
             raise BuildPlanError(f"EFI build is blocked until the plan is actionable and build-ready: {reasons}")
         if toolchain is None:
             raise BuildPlanError("EFI build requires a validated toolchain selection")
+        if reviewed_profile is not None:
+            if toolchain.provenance.get("source") != "trusted-catalog":
+                raise BuildPlanError("P4 EFI generation requires a toolchain selected by the trusted catalog")
+            if private_acpi_capture is None:
+                raise BuildPlanError("P4 EFI generation requires the private machine-bound ACPI capture")
         if not dependencies.is_complete or dependencies.unresolved_requirements:
             reasons = "; ".join(dependencies.unresolved_requirements) or "dependency set is incomplete"
             raise BuildPlanError(f"EFI build is blocked by unresolved dependency or policy requirements: {reasons}")
@@ -143,6 +154,7 @@ class EfiBuilder:
             drivers: List[str] = []
             license_digests: Dict[str, str] = {}
             total_build_bytes = 0
+            acpi_result = None
 
             def _track_build_bytes(chunk_len: int) -> None:
                 nonlocal total_build_bytes
@@ -201,16 +213,66 @@ class EfiBuilder:
                 license_digests[dependency.dependency_id] = license_digest
                 (licenses / f"{dependency.dependency_id}.txt").write_text(license_text, encoding="utf-8")
 
+            if reviewed_profile is not None:
+                if toolchain.acpi_compiler_path is None or toolchain.acpi_compiler_sha256 is None:
+                    raise BuildPlanError("P4 EFI generation requires the trusted iasl path and digest")
+                if private_acpi_capture is None:
+                    raise BuildPlanError("P4 EFI generation requires the private machine-bound ACPI capture")
+                acpi_result = AcpiProcessor(
+                    Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256,
+                    work_root=Path.cwd() / "workspace" / "p4-acpi-build",
+                ).build(
+                    private_acpi_capture, efi_root / "OC" / "ACPI",
+                    expected_bios_binding=reviewed_profile.bios_binding,
+                    expected_evidence_digest=expected_acpi_evidence_digest,
+                )
+
             identity_path = self._identity_path(plan, dependencies)
             stored_identity = self._load_identity(identity_path) if identity_path.is_file() else None
             if fake_identity is not None and stored_identity is not None and fake_identity != stored_identity:
                 raise BuildPlanError("Explicit EFI identity conflicts with the stored identity for this build scope")
             identity_preexisting = stored_identity is not None
-            identity_data = stored_identity or (fake_identity if fake_identity is not None else self._new_identity())
+            identity_data = stored_identity or fake_identity
+            if identity_data is None:
+                raise BuildPlanError("EFI build requires an explicit private identity or a deliberate stored identity")
+            if reviewed_profile is not None:
+                try:
+                    IdentityService.validate(identity_data)
+                except IdentityServiceError as exc:
+                    raise BuildPlanError(f"P4 EFI identity failed the private lifecycle policy: {exc}") from exc
             identity_errors = self._identity_errors(identity_data)
             if identity_errors:
                 raise BuildPlanError("Invalid EFI identity: " + "; ".join(identity_errors))
-            self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
+            if reviewed_profile is None:
+                self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
+                schema_digest = ""
+                profile_digest = ""
+                acpi_digest = ""
+                evidence_digests: tuple[str, ...] = ()
+                usb_policy_state = ""
+                usb_first_install_route = ""
+            else:
+                if toolchain.sample_plist_path is None or toolchain.sample_plist_sha256 is None:
+                    raise BuildPlanError("P4 EFI generation requires the trusted OpenCore schema path and digest")
+                generator = SchemaDrivenConfigGenerator(Path(toolchain.sample_plist_path), toolchain.sample_plist_sha256)
+                acpi_files = acpi_result.output_files if acpi_result is not None else ()
+                config = generator.generate(
+                    reviewed_profile,
+                    identity=identity_data,
+                    kexts=kexts,
+                    drivers=drivers,
+                    acpi_files=acpi_files,
+                    opencore_version=toolchain.opencore_version,
+                    acpi_digest=acpi_result.generated_digest if acpi_result is not None else "",
+                    evidence_digests=((acpi_result.source_evidence_digest,) if acpi_result is not None else ()),
+                )
+                generator.write(config, efi_root / "OC" / "config.plist")
+                schema_digest = generator.schema_digest
+                profile_digest = reviewed_profile.source_digest
+                acpi_digest = acpi_result.generated_digest if acpi_result is not None else ""
+                evidence_digests = (acpi_result.source_evidence_digest,) if acpi_result is not None else ()
+                usb_policy_state = reviewed_profile.usb.usb_c_correlation
+                usb_first_install_route = reviewed_profile.usb.first_install_route
             validation = self.validate_tree(staging, toolchain=None, identity=identity_data)
             if validation.errors:
                 raise BuildPlanError("Generated EFI failed structural validation: " + "; ".join(validation.errors))
@@ -224,6 +286,12 @@ class EfiBuilder:
                     "toolchain_digest": toolchain.digest,
                     "identity_digest": canonical_json_digest(identity_data),
                     "output_digest": output_digest,
+                    "schema_digest": schema_digest,
+                    "profile_digest": profile_digest,
+                    "acpi_digest": acpi_digest,
+                    "evidence_digests": list(evidence_digests),
+                    "usb_policy_state": usb_policy_state,
+                    "usb_first_install_route": usb_first_install_route,
                     "schema_version": CONTRACT_SCHEMA_VERSION,
                 }),
                 target_model=plan.target_model,
@@ -234,6 +302,13 @@ class EfiBuilder:
                 identity_digest=canonical_json_digest(identity_data),
                 output_digest=output_digest,
                 license_digests=license_digests,
+                schema_digest=schema_digest,
+                profile_digest=profile_digest,
+                acpi_digest=acpi_digest,
+                evidence_digests=evidence_digests,
+                usb_policy_state=usb_policy_state,
+                usb_first_install_route=usb_first_install_route,
+                identity_reference=identity_path.name,
                 output_paths={"efi": "EFI", "licenses": "LICENSES"},
             )
             (staging / "manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
@@ -246,7 +321,13 @@ class EfiBuilder:
             if validation.status != "VALID":
                 raise BuildPlanError("Published EFI failed manifest validation: " + "; ".join(validation.errors))
             if not identity_preexisting:
-                self._write_private_identity(identity_path, identity_data)
+                if reviewed_profile is not None:
+                    try:
+                        IdentityService(identity_path.parent).store(identity_data, storage_ref=identity_path.name)
+                    except IdentityServiceError as exc:
+                        raise BuildPlanError(f"Unable to store private EFI identity: {exc}") from exc
+                else:
+                    self._write_private_identity(identity_path, identity_data)
             staging.replace(output_dir)
             identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, identity_path.name, redacted=True)
             return EfiBuildResult(output_dir, manifest, validation, identity_ref)
@@ -287,15 +368,19 @@ class EfiBuilder:
                     errors.extend(self._config_file_errors(root, config))
                     generic = config.get("PlatformInfo", {}).get("Generic") if isinstance(config.get("PlatformInfo"), dict) else None
                     identity_for_redaction = identity
-                    if identity_for_redaction is None and isinstance(generic, dict) and all(isinstance(key, str) and isinstance(value, str) for key, value in generic.items()):
+                    if identity_for_redaction is None and isinstance(generic, dict):
                         identity_for_redaction = generic
                     if not isinstance(generic, dict) or self._identity_errors(generic):
                         errors.append("PlatformInfo.Generic does not contain a valid identity")
-                    elif identity is not None and generic != identity:
-                        errors.append("PlatformInfo.Generic does not match the selected private identity")
+                    elif identity is not None:
+                        for identity_key, identity_value in identity.items():
+                            expected_value: Any = bytes.fromhex(identity_value) if identity_key == "ROM" else identity_value
+                            if generic.get(identity_key) != expected_value:
+                                errors.append("PlatformInfo.Generic does not match the selected private identity")
+                                break
                     if toolchain is not None:
                         configured_version = config.get("OC", {}).get("Version") if isinstance(config.get("OC"), dict) else None
-                        if configured_version != toolchain.opencore_version:
+                        if configured_version is not None and configured_version != toolchain.opencore_version:
                             errors.append("config.plist OpenCore version does not match the selected toolchain")
         except (OSError, plistlib.InvalidFileException) as exc:
             errors.append(f"Invalid config.plist: {exc}")
@@ -329,6 +414,8 @@ class EfiBuilder:
                     "schema_version", "build_digest", "target_model", "target_macos",
                     "artifact_lock_digest", "validation_report", "toolchain_digest",
                     "identity_digest", "output_digest", "license_digests", "output_paths",
+                    "schema_digest", "profile_digest", "acpi_digest", "evidence_digests",
+                    "usb_policy_state", "usb_first_install_route", "identity_reference",
                 }
                 if set(manifest_data) != required_manifest_keys:
                     return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Build manifest has an invalid schema"], warnings)
@@ -590,12 +677,17 @@ class EfiBuilder:
             value = identity.get(key)
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"{key} is required and must be a non-empty string")
-        if set(identity) - set(required):
-            errors.append("identity contains unsupported fields")
         for key in ("SystemSerialNumber", "MLB"):
             value = identity.get(key, "")
             if value and not re.fullmatch(r"[A-Za-z0-9]{4,32}", value):
                 errors.append(f"{key} has an invalid format")
+        allowed = {
+            "SystemProductName", "SystemSerialNumber", "MLB", "SystemUUID", "ROM",
+            "AdviseFeatures", "MaxBIOSVersion", "ProcessorType", "SpoofVendor",
+            "SystemMemoryStatus",
+        }
+        if set(identity) - allowed:
+            errors.append("identity contains unsupported fields")
         uuid_value = identity.get("SystemUUID", "")
         if uuid_value and not re.fullmatch(r"[0-9A-Fa-f-]{8,64}", uuid_value):
             errors.append("SystemUUID has an invalid format")

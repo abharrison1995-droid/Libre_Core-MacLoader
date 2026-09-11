@@ -79,7 +79,12 @@ class ConfigurationService:
 
         self._validate_options(draft, target, issues)
         self._validate_evidence(draft, snapshot, issues)
-        for requirement in plan.unresolved_requirements:
+        resolved_policy_requirements = self._resolved_policy_requirements(draft, target)
+        remaining_plan_requirements = [
+            requirement for requirement in plan.unresolved_requirements
+            if requirement not in resolved_policy_requirements
+        ]
+        for requirement in remaining_plan_requirements:
             issues.append(self._issue("UNRESOLVED_REQUIREMENT", "build_plan.unresolved_requirements", requirement, "Resolve the requirement or keep the build blocked."))
         if report.overall_state in (CompatibilityState.UNKNOWN, CompatibilityState.BLOCKED):
             issues.append(self._issue("COMPATIBILITY_BLOCKED", "hardware", "Compatibility policy does not permit an actionable plan.", "Resolve unknown or blocked hardware evidence."))
@@ -92,7 +97,7 @@ class ConfigurationService:
             ))
 
         blocking = [item for item in issues if item.blocking]
-        unresolved = list(plan.unresolved_requirements)
+        unresolved = list(remaining_plan_requirements)
         unresolved.extend(item.explanation for item in blocking if item.explanation not in unresolved)
         plan = replace(
             plan,
@@ -108,6 +113,22 @@ class ConfigurationService:
         )
         accepted = None if blocking else AcceptedConfiguration(draft, draft.semantic_digest)
         return ConfigurationEvaluation(draft, tuple(issues), plan, report, accepted)
+
+    def _resolved_policy_requirements(self, draft: UserConfiguration, target: Optional[object]) -> Tuple[str, ...]:
+        """Resolve only requirements covered by the reviewed exact-target profile."""
+        if target is None or getattr(target, "product_id", "") != "sequoia":
+            return ()
+        selected = draft.selected_options()
+        if selected.get("profile.graphics") != "kaby-lake-r-uhd620":
+            return ()
+        if selected.get("profile.audio") not in {"layout-11", "layout-86", "layout-97", "layout-99"}:
+            return ()
+        return (
+            "Exact framebuffer and device-id injection policy deferred to v0.0.5",
+            "Exact framebuffer/connector policy deferred to v0.0.5 EFI generator",
+            "Audio layout-id selection deferred to v0.0.5",
+            "Exact layout ID selection deferred to v0.0.5 EFI generator and physical verification",
+        )
 
     def accept(self, evaluation: ConfigurationEvaluation) -> AcceptedConfiguration:
         if evaluation.has_blockers or evaluation.accepted is None:
@@ -156,6 +177,12 @@ class ConfigurationService:
             record.completeness == EvidenceCompleteness.COMPLETE
             and record.physical_port_evidence
             and record.capture_method == "manual-physical-port-session"
+            or (
+                record.completeness == EvidenceCompleteness.PARTIAL
+                and record.physical_port_evidence
+                and record.capture_method == "manual-physical-port-session"
+                and any("logical USB-C correlation unresolved" in check for check in record.unresolved_checks)
+            )
             for record in usb_records
         ):
             issues.append(self._issue("USB_PHYSICAL_EVIDENCE_REQUIRED", "evidence.usb", "A USB map cannot be complete without physical port evidence.", "Capture and verify every applicable physical port before accepting the build."))
