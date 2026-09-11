@@ -1,10 +1,12 @@
 import collections
+import base64
 import hashlib
 import io
 import os
 from pathlib import Path
 import shutil
 import sys
+import struct
 from typing import Any, Callable, Optional
 import unittest.mock
 
@@ -12,7 +14,8 @@ import pytest
 
 from macloader.exceptions import ArtifactDownloadError, ChecksumMismatchError
 from macloader.recovery import RecoveryAcquirer, RecoveryAsset
-from macloader.recovery.acquirer import _RecoveryRedirectHandler, is_approved_recovery_host
+from macloader.recovery.acquirer import _RecoveryRedirectHandler, is_approved_recovery_host, verify_apple_chunklist
+import macloader.recovery.acquirer as acquirer_module
 
 
 def _asset(payload: bytes, url: str = "https://osrecovery.apple.com/recovery") -> RecoveryAsset:
@@ -20,10 +23,17 @@ def _asset(payload: bytes, url: str = "https://osrecovery.apple.com/recovery") -
 
 
 class _MockResponse:
-    def __init__(self, data: bytes, headers: Optional[dict[str, str]] = None, url: str = "https://osrecovery.apple.com/recovery") -> None:
+    def __init__(
+        self,
+        data: bytes,
+        headers: Optional[dict[str, str]] = None,
+        url: str = "https://osrecovery.apple.com/recovery",
+        status: int = 200,
+    ) -> None:
         self._bio = io.BytesIO(data)
         self.headers = headers if headers is not None else {"Content-Length": str(len(data))}
         self._url = url
+        self.status = status
         self.fp = unittest.mock.MagicMock()
         self.fp.raw._sock.settimeout = unittest.mock.MagicMock()
 
@@ -32,6 +42,9 @@ class _MockResponse:
 
     def geturl(self) -> str:
         return self._url
+
+    def getcode(self) -> int:
+        return self.status
 
     def __enter__(self) -> "_MockResponse":
         return self
@@ -269,6 +282,78 @@ def test_recovery_urllib_streaming_success(tmp_path: Path) -> None:
     assert mock_resp.fp.raw._sock.settimeout.called
 
 
+def test_recovery_resume_retains_partial_and_uses_validated_http_range(tmp_path: Path) -> None:
+    payload = b"0123456789abcdef"
+    asset = _asset(payload)
+    destination = tmp_path / "resumable.dmg"
+    acquirer = RecoveryAcquirer(resume=True, timeout_seconds=10.0)
+    partial, metadata = acquirer._resume_paths(asset, destination)
+    partial.write_bytes(payload[:6])
+    acquirer._write_resume_metadata(metadata, asset)
+
+    response = _MockResponse(
+        payload[6:],
+        headers={"Content-Length": str(len(payload) - 6), "Content-Range": f"bytes 6-{len(payload) - 1}/{len(payload)}"},
+        status=206,
+    )
+    opener = unittest.mock.MagicMock()
+    opener.open.return_value = response
+    with unittest.mock.patch("urllib.request.build_opener", return_value=opener):
+        assert acquirer.download(asset, destination) == destination
+
+    request = opener.open.call_args.args[0]
+    assert request.headers["Range"] == "bytes=6-"
+    assert destination.read_bytes() == payload
+    assert not partial.exists()
+    assert not metadata.exists()
+
+
+def test_recovery_resume_cancellation_retains_partial_and_server_range_fallback_restarts(tmp_path: Path) -> None:
+    payload = b"0123456789abcdef"
+    asset = _asset(payload)
+    destination = tmp_path / "resumable.dmg"
+    cancelled = [False]
+
+    class CancelAfterOneChunk(_MockResponse):
+        def read(self, amt: int = -1) -> bytes:
+            value = super().read(amt)
+            if value:
+                cancelled[0] = True
+            return value
+
+    opener = unittest.mock.MagicMock()
+    opener.open.return_value = CancelAfterOneChunk(payload)
+    with unittest.mock.patch("urllib.request.build_opener", return_value=opener):
+        with pytest.raises(ArtifactDownloadError, match="cancelled"):
+            RecoveryAcquirer(resume=True, cancel=lambda: cancelled[0]).download(asset, destination)
+    partial, metadata = RecoveryAcquirer._resume_paths(asset, destination)
+    assert partial.exists()
+    assert metadata.exists()
+
+    # A 200 response that ignores Range must replace, not concatenate, the
+    # retained prefix.
+    opener.open.return_value = _MockResponse(payload, status=200)
+    with unittest.mock.patch("urllib.request.build_opener", return_value=opener):
+        assert RecoveryAcquirer(resume=True).download(asset, destination) == destination
+    assert destination.read_bytes() == payload
+
+
+def test_recovery_resume_rejects_non_regular_metadata_without_blocking(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO test requires POSIX")
+    payload = b"fifo-safe-recovery"
+    asset = _asset(payload)
+    destination = tmp_path / "fifo-safe.dmg"
+    partial, metadata = RecoveryAcquirer._resume_paths(asset, destination)
+    partial.write_bytes(b"prefix")
+    os.mkfifo(metadata)
+    opener = unittest.mock.MagicMock()
+    opener.open.return_value = _MockResponse(payload)
+    with unittest.mock.patch("urllib.request.build_opener", return_value=opener):
+        assert RecoveryAcquirer(resume=True).download(asset, destination) == destination
+    assert destination.read_bytes() == payload
+
+
 def test_recovery_urllib_detects_deadline_timeout_during_streaming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = b"chunk1" + b"chunk2" + b"chunk3"
     asset = _asset(payload)
@@ -430,3 +515,138 @@ def test_recovery_normalizes_network_errors(tmp_path: Path) -> None:
 
     assert not dest.exists()
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_recovery_bundle_failure_preserves_prior_pair(tmp_path: Path) -> None:
+    image_payload = b"new recovery image"
+    chunklist_header = struct.pack("<4sIBBBxQQQ", b"CNKL", 0x24, 1, 1, 2, 1, 0x24, 0x24 + 0x24)
+    chunklist_entry = struct.pack("<I32s", len(image_payload), hashlib.sha256(image_payload).digest())
+    chunklist_payload = chunklist_header + chunklist_entry + hashlib.sha256(chunklist_header + chunklist_entry).digest()
+    image_destination = tmp_path / "Recovery.dmg"
+    chunklist_destination = tmp_path / "Recovery.chunklist"
+    image_destination.write_bytes(b"prior image")
+    chunklist_destination.write_bytes(b"prior chunklist")
+
+    def transport(url: str, destination: Path) -> None:
+        destination.write_bytes(chunklist_payload if url.endswith("chunklist") else image_payload)
+
+    image = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/image", hashlib.sha256(image_payload).hexdigest(), len(image_payload))
+    chunklist = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/chunklist", hashlib.sha256(chunklist_payload).hexdigest(), len(chunklist_payload))
+    with pytest.raises(ArtifactDownloadError):
+        RecoveryAcquirer(transport=transport).download_bundle(
+            image, chunklist, image_destination, chunklist_destination, "a" * 64
+        )
+    assert image_destination.read_bytes() == b"prior image"
+    assert chunklist_destination.read_bytes() == b"prior chunklist"
+
+
+def test_recovery_bundle_publishes_only_after_verification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_payload = b"verified image"
+    chunklist_payload = b"verified signed chunklist"
+    image_destination = tmp_path / "Recovery.dmg"
+    chunklist_destination = tmp_path / "Recovery.chunklist"
+    image = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/image", hashlib.sha256(image_payload).hexdigest(), len(image_payload))
+    chunklist = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/chunklist", hashlib.sha256(chunklist_payload).hexdigest(), len(chunklist_payload))
+
+    def fake_download(self: RecoveryAcquirer, asset: RecoveryAsset, destination: Path) -> Path:
+        destination.write_bytes(image_payload if asset is image else chunklist_payload)
+        return destination
+
+    monkeypatch.setattr(RecoveryAcquirer, "download", fake_download)
+    monkeypatch.setattr(
+        "macloader.recovery.acquirer.verify_apple_chunklist",
+        lambda *_args: (1, len(image_payload)),
+    )
+    bundle = RecoveryAcquirer().download_bundle(
+        image, chunklist, image_destination, chunklist_destination, "b" * 64
+    )
+    assert bundle.image_path == image_destination
+    assert bundle.chunklist_path == chunklist_destination
+    assert image_destination.read_bytes() == image_payload
+    assert chunklist_destination.read_bytes() == chunklist_payload
+    assert bundle.evidence.verified_chunks == 1
+
+
+def test_recovery_verifies_signed_chunklist_encoding_with_deterministic_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the OpenCore CNKL RSA encoding without storing a private key.
+
+    The release gate still requires a real Apple chunklist readback; this
+    deterministic fixture only proves the parser's byte order and padding path.
+    """
+    image_payload = base64.b64decode("Zml4dHVyZSBzaWduZWQgaW1hZ2U=")
+    chunklist_payload = base64.b64decode(
+        "Q05LTCQAAAABAQEAAQAAAAAAAAAkAAAAAAAAAEgAAAAAAAAAFAAAACJ0vvMymY5Lj1WHSj913vuwk+u8XpTtGGHkNI4ty0VlluGUe+I+EhegVcbNZwUv3hHiGysV1qq0cuRZTjEVZ+RPfAkUkKlodynlYtH9oYL5/jrV44gqLj28PGD2VEYRng0O+qB4gD1JtuFPKGKLoqRdM1vL8rm/zI69DmFGZ3lWxnqZLAsdGjX0k0ncr4TBgyT4WBCXini1BBnMCM5rqPRLmOZpIGODOVqebOlsYKn8JEyoJjMnrbM1RPuSuO0bX4LnNvdvo7JiD+zlH4gvSx8Se5dla08Ez/MG8E8mp0uDjf6MFKWd4BqCPbLR2eXkXf6If6FBiIXu2PhCLMlC5/hH1X/ITYS5BIMEjMKfNLMHxWvzaBpi1LM1WBV6p83EGA=="
+    )
+    image_path = tmp_path / "image"
+    chunklist_path = tmp_path / "chunklist"
+    image_path.write_bytes(image_payload)
+    chunklist_path.write_bytes(chunklist_payload)
+    test_public_key = int(
+        "b4415cbce1ad9d50f0c824f18bc6ef6d5f681d14cd8cf3ae810cca3e391d511f76217957b9c2e350fbf5a90417e1a8a05cb0b746610884cb5dceb96d6e30fe97becec6866af6a7c8c3593468f4e3736468e4d589349bb87680213f86dcaaac7841b6686daf56851a0c4d82428b25962d0262a5e5b2cb9b1ac83c5ba7498cbb13c8b0ebc93cb51292295b6d238a213d0213a4087a376edbee0409f64d4a54dc328e3c8c3c0364357f8e937b4b7da54197de98542ec36ebf959632e3100a7c6e777691a23f2d80c7e6899259c9fcc89cce3e3d51ebce32e7861a26fd99f738ac47e9e64012691dce7db11fbf91760145e932ec187032d8d6a1c0ddd46f97da780b",
+        16,
+    )
+    monkeypatch.setattr(acquirer_module, "_APPLE_EFI_ROM_PUBLIC_KEY", test_public_key)
+    chunks, size = verify_apple_chunklist(
+        image_path,
+        chunklist_path,
+        "2274bef332998e4b8f55874a3f75defbb093ebbc5e94ed1861e4348e2dcb4565",
+        "d3a8e903d3319ed6dbf42261af41be8a4b5139caa7f117a3d320dff65cd7ca60",
+    )
+    assert chunks == 1
+    assert size == len(image_payload)
+    corrupted = bytearray(chunklist_payload)
+    corrupted[-1] ^= 0x01
+    chunklist_path.write_bytes(corrupted)
+    with pytest.raises(ArtifactDownloadError, match="signature is invalid"):
+        verify_apple_chunklist(
+            image_path,
+            chunklist_path,
+            "2274bef332998e4b8f55874a3f75defbb093ebbc5e94ed1861e4348e2dcb4565",
+            hashlib.sha256(corrupted).hexdigest(),
+        )
+
+
+def test_recovery_bundle_rolls_back_if_second_publication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_payload = b"replacement image"
+    chunklist_payload = b"replacement chunklist"
+    image_destination = tmp_path / "Recovery.dmg"
+    chunklist_destination = tmp_path / "Recovery.chunklist"
+    image_destination.write_bytes(b"original image")
+    chunklist_destination.write_bytes(b"original chunklist")
+    image = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/image", hashlib.sha256(image_payload).hexdigest(), len(image_payload))
+    chunklist = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/chunklist", hashlib.sha256(chunklist_payload).hexdigest(), len(chunklist_payload))
+
+    def fake_download(self: RecoveryAcquirer, asset: RecoveryAsset, destination: Path) -> Path:
+        destination.write_bytes(image_payload if asset is image else chunklist_payload)
+        return destination
+
+    publications = 0
+
+    def fail_second(part: Path, destination: Path, _destination_directory_fd: Optional[int] = None) -> None:
+        nonlocal publications
+        publications += 1
+        if publications == 2:
+            raise OSError("simulated publication interruption")
+        part.replace(destination)
+
+    monkeypatch.setattr(RecoveryAcquirer, "download", fake_download)
+    monkeypatch.setattr("macloader.recovery.acquirer.verify_apple_chunklist", lambda *_args: (1, len(image_payload)))
+    monkeypatch.setattr(RecoveryAcquirer, "_publish_owned", staticmethod(fail_second))
+    with pytest.raises(OSError, match="publication interruption"):
+        RecoveryAcquirer().download_bundle(
+            image, chunklist, image_destination, chunklist_destination, "c" * 64
+        )
+    assert image_destination.read_bytes() == b"original image"
+    assert chunklist_destination.read_bytes() == b"original chunklist"
+
+
+def test_recovery_publication_fails_closed_without_no_follow_primitives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = b"payload"
+    asset = _asset(payload)
+    monkeypatch.setattr(os, "name", "nt")
+
+    def transport(_url: str, destination: Path) -> None:
+        destination.write_bytes(payload)
+
+    with pytest.raises(ArtifactDownloadError, match="Safe Recovery publication primitives"):
+        RecoveryAcquirer(transport=transport).download(asset, tmp_path / "Recovery.dmg")

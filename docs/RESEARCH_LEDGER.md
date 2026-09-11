@@ -418,3 +418,54 @@ P4 is software-qualified for this exact candidate on the current Linux x86_64 ho
 ### Follow-up
 - Keep the raw ACPI capture, real/private identity values and ignored diagnostics outside Git and public artifacts.
 - Complete Recovery, media, packaging/host-matrix and physical acceptance gates before any support-matrix promotion.
+
+## Research Item 013 — P5 exact Apple Recovery discovery result
+
+### Question
+Does Apple's Recovery service identify an exact Sequoia 15.0 build `24A335` for the pinned OpenCore 1.0.7 Sequoia board request?
+
+### Sources and method
+- [OpenCorePkg 1.0.7 `macrecovery.py`](https://raw.githubusercontent.com/acidanthera/OpenCorePkg/1.0.7/Utilities/macrecovery/macrecovery.py)
+- [OpenCorePkg 1.0.7 Recovery README](https://raw.githubusercontent.com/acidanthera/OpenCorePkg/1.0.7/Utilities/macrecovery/README.md)
+- [Apple Recovery service](https://osrecovery.apple.com/)
+- Date inspected: 2026-09-11
+- The pinned OpenCore query was run once with board ID `Mac-7BA5B2D9E42DDD94` and the documented zero MLB. Session tokens and asset URLs were redacted and not retained in tracked files.
+
+### Verified result
+- Apple returned product identifier `696-28424` and image/chunklist metadata, but the response did not identify an exact macOS build or version.
+- It therefore cannot prove the requested Sequoia `15.0/24A335` Recovery target. MacLoader classifies this as `AMBIGUOUS` and does not create a Recovery lock or download the payload.
+- The pinned upstream client uses the legacy HTTP query endpoint. MacLoader's release policy requires HTTPS for authoritative discovery; the HTTPS endpoint returned HTTP 405 during a non-destructive probe. No weaker HTTP result is accepted as a release lock.
+- No real Recovery image or chunklist was downloaded. No third-party mirror, alternate build, or target change was used.
+
+### Decision and blocker
+Keep the exact Sequoia `15.0/24A335` target frozen. P5 software contracts and failure handling are implemented, but the exact Recovery exit gate is **externally blocked** until Apple provides an exact authenticated relationship or the user explicitly chooses a different target. P7/P8 exact-target qualification cannot be claimed from this result.
+
+### Confidence
+`HIGH` that the recorded response was obtained from the pinned Apple service and did not identify `24A335`; `PENDING` for exact-target Recovery availability.
+
+### Follow-up
+- Do not silently substitute `696-28424` or any later Sequoia build.
+- If the user approves a target change, record it as a new exact policy decision before any acquisition.
+
+## Research Item 014 — P6 workflow and installed-package evidence
+
+### Question
+Does the shared CLI/TUI workflow preserve semantic configuration, issue, plan and lock results while remaining non-destructive and resumable outside the source checkout?
+
+### Method and result
+- Date run: 2026-09-11; local Linux x86_64, Python 3.13.
+- `python3 -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79`: **317 passed, 79.34% branch coverage**.
+- `python3 -m mypy macloader tests --follow-imports=skip`: clean across 102 source files.
+- `python3 -m compileall -q macloader tests` and `git diff --check`: clean.
+- A wheel was built and installed into an isolated target outside the checkout. The artifact was `libre_core_macloader-0.0.4-py3-none-any.whl`, SHA-256 `f6d411eb1562d860851b93db51cd264334cc7892ead4c5a48e1abf6395ba9381`; the installed-package smoke compared CLI/TUI semantic results and passed. The host lacks the `build` module, so local sdist generation was not claimed; the tracked hosted CI workflow remains the source of wheel/sdist matrix evidence.
+- Headless Textual tests exercise keyboard-accessible workflow actions, cancellation, safe resume, bounded import/export, evidence/review, Recovery cache verification and disabled media writes. Legacy standalone CLI utilities are documented as CLI-only utilities rather than implied one-screen-per-command TUI parity.
+
+### Decision
+P6 software behavior is locally qualified for the non-destructive schema-driven workflow. R6 completed with no unresolved correctness, security or release-blocking finding after repair. Hosted Windows/Linux CI, local sdist output and physical media remain open and are not represented as passed.
+
+### Confidence
+HIGH for local service/client parity and tested non-destructive boundaries; PENDING for hosted package/platform qualification and all physical gates.
+
+### Follow-up
+- Push the accepted tracked source and documentation so hosted CI can provide the required Windows/Linux wheel/sdist evidence.
+- Keep P7 destructive media work behind its own sacrificial-device checkpoint and review gate.

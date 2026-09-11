@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import sys
+import tempfile
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = PROJECT_ROOT / "macloader" / "database" / "data"
@@ -16,7 +17,16 @@ def _default_workspace() -> Path:
         base = Path.home() / "Library" / "Caches"
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
-    return base / "Libre_Core-MacLoader"
+    preferred = base / "Libre_Core-MacLoader"
+    # Some managed/CI hosts expose a read-only home directory.  Keep the
+    # default user location on normal hosts, but make the CLI usable without
+    # requiring an unrelated environment override.
+    probe = base
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if probe.exists() and os.access(probe, os.W_OK):
+        return preferred
+    return Path(tempfile.gettempdir()) / "Libre_Core-MacLoader"
 
 
 DEFAULT_WORKSPACE_DIR = _default_workspace()

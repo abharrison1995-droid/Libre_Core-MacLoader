@@ -3,7 +3,7 @@
 import logging
 import platform
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Mapping, Optional, Union
 
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.database.loader import Database, get_database
@@ -30,6 +30,8 @@ from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.configuration import UserConfiguration
 from macloader.configuration.service import ConfigurationEvaluation, ConfigurationService
 from macloader.exceptions import ArtifactDownloadError
+from macloader.recovery.service import RecoveryService
+from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class Orchestrator:
         self._cache_dir = cache_dir
         self.builder = EfiBuilder(db=self.db)
         self._configuration_service: Optional[ConfigurationService] = None
+        self._recovery_service: Optional[RecoveryService] = None
 
     @property
     def configuration_service(self) -> ConfigurationService:
@@ -52,6 +55,20 @@ class Orchestrator:
         if self._configuration_service is None:
             self._configuration_service = ConfigurationService(db=self.db)
         return self._configuration_service
+
+    @property
+    def recovery_service(self) -> RecoveryService:
+        """Shared exact-target Recovery service for CLI and Textual clients."""
+        if self._recovery_service is None:
+            self._recovery_service = RecoveryService()
+        return self._recovery_service
+
+    def discover_recovery(
+        self,
+        transport: Optional[Callable[[str, Mapping[str, str], bytes], DiscoveryResponse]] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> RecoveryDiscoveryResult:
+        return self.recovery_service.discover(transport=transport, cancel=cancel)
 
     @property
     def resolver(self) -> DependencyResolver:

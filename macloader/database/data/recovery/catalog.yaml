@@ -1,0 +1,21 @@
+schema_version: "1"
+policy_id: "recovery-apple-2026-09"
+tool:
+  project: "acidanthera/OpenCorePkg"
+  version: "1.0.7"
+  source: "https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.7"
+  digest: "68edc6c44b7f2b65bb23d5e5083cd1227a7f52f4bfaa716f7faa58d25be554b9"
+targets:
+  - product_id: "sequoia"
+    product_name: "macOS Sequoia"
+    version: "15.0"
+    build: "24A335"
+    board_id: "Mac-7BA5B2D9E42DDD94"
+    discovery_host: "osrecovery.apple.com"
+    query_scheme: "https"
+    asset_hosts:
+      - "osrecovery.apple.com"
+      - "updates.cdn-apple.com"
+      - "cdn-apple.com"
+    authentication: "apple-signed-chunklist"
+    minimum_free_bytes: 17179869184

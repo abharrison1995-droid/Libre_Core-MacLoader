@@ -206,6 +206,48 @@ def test_writer_refuses_incomplete_efi_source(safe_device: RemovableDevice, tmp_
         writer.dry_run(safe_device, 1024, source_dir=broken_source)
 
 
+def test_writer_refuses_symlinked_efi_boundary(safe_device: RemovableDevice, tmp_path: Path) -> None:
+    source = tmp_path / "symlink_source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (source / "EFI").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
+    with pytest.raises(UnsafeRemovableTarget, match="EFI directory must not be a symlink"):
+        RemovableMediaWriter().dry_run(safe_device, 1024, source_dir=source)
+
+
+def test_writer_snapshot_rejects_entry_swapped_after_validation(
+    safe_device: RemovableDevice, valid_source_efi: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside-config.plist"
+    outside.write_text("outside", encoding="utf-8")
+    swapped = [False]
+
+    def swap_after_validation(_: Path) -> bool:
+        if not swapped[0]:
+            target = valid_source_efi / "EFI" / "OC" / "config.plist"
+            target.unlink()
+            try:
+                target.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                pytest.skip("symbolic links are unavailable on this host")
+            swapped[0] = True
+        return True
+
+    writer = RemovableMediaWriter(
+        destructive_write=lambda _plan, _source: None,
+        readback_verifier=lambda _plan, _source: True,
+        source_validator=swap_after_validation,
+    )
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
+    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    with pytest.raises(UnsafeRemovableTarget, match="symlink"):
+        writer.write(plan, valid_source_efi, confirmation)
+
+
 def test_writer_refuses_custom_source_validator_failure(
     safe_device: RemovableDevice, valid_source_efi: Path
 ) -> None:

@@ -26,6 +26,13 @@ from macloader.domain.configuration import UserConfiguration
 from macloader.exceptions import DependencyError, MacLoaderError
 from macloader.orchestrator import Orchestrator
 from macloader.build.efi import EfiBuilder
+from macloader.domain.recovery import RecoveryBinding, RecoveryState
+from macloader.domain.configuration import UserConfiguration
+from macloader.evidence.usb import UsbEvidenceSession
+from macloader.evidence.acpi import AcpiEvidenceBundle
+from macloader.workflow.service import WorkflowService
+from macloader.ui.tui import run_tui
+from macloader.removable import RemovableDevice, RemovableMediaWriter
 
 console = Console()
 err_console = Console(stderr=True)
@@ -113,12 +120,18 @@ def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], out
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 @click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Load hardware snapshot from a fixture file.")
 @click.option("-o", "--output", type=click.Path(dir_okay=False, writable=True, path_type=Path), help="Save JSON plan to file.")
-def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output: Optional[Path]) -> None:
+@click.option("--config", "configuration_id", type=str, help="Evaluate a persisted exact configuration instead of a product-only plan.")
+def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output: Optional[Path], configuration_id: Optional[str]) -> None:
     """Generate a preliminary BuildPlan detailing future EFI requirements."""
     try:
         orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
-        plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
+        if configuration_id:
+            workflow = WorkflowService(orchestrator=orchestrator)
+            state = workflow.evaluate(workflow.load(configuration_id), snapshot)
+            plan = state.evaluation.plan
+        else:
+            plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
 
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +186,387 @@ def configure_cmd(macos_version: Optional[str], macos_build: Optional[str], json
     except (MacLoaderError, ValueError, click.ClickException) as exc:
         err_console.print(f"[bold red]Configuration Error:[/bold red] {exc}")
         sys.exit(1)
+
+
+@cli.group("config")
+def config_group() -> None:
+    """Create, review, migrate and persist schema-driven configurations."""
+    pass
+
+
+@config_group.command("new")
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Hardware fixture for deterministic creation.")
+@click.option("--sanitize/--no-sanitize", default=False)
+@click.option("--json", "json_mode", is_flag=True)
+def config_new_cmd(fixture: Optional[Path], sanitize: bool, json_mode: bool) -> None:
+    """Create and atomically persist a new configuration draft."""
+    try:
+        service = WorkflowService()
+        draft, snapshot = service.create(fixture, sanitize=sanitize)
+        path = service.save(draft)
+        payload = {"configuration": draft.to_dict(), "snapshot": {"snapshot_id": snapshot.snapshot_id}, "saved": True}
+        if json_mode:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print(f"Created configuration {draft.configuration_id}")
+            console.print(f"Saved revision {draft.revision}")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("show")
+@click.argument("configuration_id")
+@click.option("--json", "json_mode", is_flag=True)
+def config_show_cmd(configuration_id: str, json_mode: bool) -> None:
+    """Show one persisted configuration without probing hardware or networking."""
+    try:
+        draft = WorkflowService().load(configuration_id)
+        if json_mode:
+            click.echo(draft.to_json(indent=2))
+        else:
+            console.print(f"Configuration {draft.configuration_id} revision {draft.revision}")
+            console.print(f"Semantic digest: {draft.semantic_digest}")
+            console.print(f"Target: {draft.target.to_dict() if draft.target else 'not selected'}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("set")
+@click.argument("configuration_id")
+@click.option("--version", "macos_version", type=str)
+@click.option("--build", "macos_build", type=str)
+@click.option("--option", "options", multiple=True, help="Set a policy option as option.id=value.")
+@click.option("--json", "json_mode", is_flag=True)
+def config_set_cmd(configuration_id: str, macos_version: Optional[str], macos_build: Optional[str], options: tuple[str, ...], json_mode: bool) -> None:
+    """Apply exact target and policy option changes, invalidating stale acknowledgements."""
+    try:
+        service = WorkflowService()
+        draft = service.load(configuration_id)
+        if (macos_version is None) != (macos_build is None):
+            raise click.ClickException("--version and --build must be supplied together")
+        if macos_version and macos_build:
+            draft = service.set_target(draft, macos_version, macos_build)
+        for item in options:
+            if "=" not in item:
+                raise click.ClickException("--option must use option.id=value")
+            option_id, value = item.split("=", 1)
+            draft = service.set_option(draft, option_id, value)
+        path = service.save(draft)
+        payload = {"configuration": draft.to_dict(), "saved": True}
+        click.echo(json.dumps(payload, indent=2) if json_mode else f"Saved revision {draft.revision}")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("check")
+@click.argument("configuration_id")
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--json", "json_mode", is_flag=True)
+def config_check_cmd(configuration_id: str, fixture: Path, json_mode: bool) -> None:
+    """Evaluate configuration, issues and exact BuildPlan against current evidence."""
+    try:
+        service = WorkflowService()
+        draft = service.load(configuration_id)
+        _, snapshot = service.create(fixture)
+        state = service.evaluate(draft, snapshot)
+        if json_mode:
+            click.echo(service.render_json(state))
+        else:
+            console.print(f"Configuration issues: {len(state.evaluation.issues)}")
+            for issue in state.evaluation.issues:
+                console.print(f"- {issue.code}: {issue.explanation}")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("acknowledge")
+@click.argument("configuration_id")
+@click.option("--rule", "rule_id", required=True, help="Exact policy rule or option ID being acknowledged.")
+@click.option("--warning", "warning_text", required=True, help="Exact warning text shown during review.")
+@click.option("--json", "json_mode", is_flag=True)
+def config_acknowledge_cmd(configuration_id: str, rule_id: str, warning_text: str, json_mode: bool) -> None:
+    """Record an experimental acknowledgement bound to the current draft."""
+    try:
+        service = WorkflowService()
+        updated = service.acknowledge(service.load(configuration_id), rule_id, warning_text)
+        path = service.save(updated)
+        payload = {"configuration": updated.to_dict(), "saved": True}
+        click.echo(json.dumps(payload, indent=2) if json_mode else f"Saved acknowledgement in revision {updated.revision}")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("export")
+@click.argument("configuration_id")
+@click.argument("output", type=click.Path(dir_okay=False, writable=True, path_type=Path))
+def config_export_cmd(configuration_id: str, output: Path) -> None:
+    """Export a redacted public configuration review artifact."""
+    try:
+        service = WorkflowService()
+        service.export_file(service.load(configuration_id), output)
+        console.print(f"Exported redacted configuration to {output.name}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("import")
+@click.argument("input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--json", "json_mode", is_flag=True)
+def config_import_cmd(input_path: Path, json_mode: bool) -> None:
+    """Import schema-1 JSON or migrate a legacy product-only plan for review."""
+    try:
+        service = WorkflowService()
+        draft, issues = service.import_as_new(input_path)
+        path = service.save(draft)
+        payload = {"configuration": draft.to_dict(), "issues": [getattr(issue, "to_dict")() for issue in issues], "saved": True}
+        click.echo(json.dumps(payload, indent=2) if json_mode else f"Imported revision {draft.revision}")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@config_group.command("migrate")
+@click.argument("input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--json", "json_mode", is_flag=True)
+def config_migrate_cmd(input_path: Path, json_mode: bool) -> None:
+    """Explicit alias for the review-required configuration import boundary."""
+    try:
+        service = WorkflowService()
+        draft, issues = service.migrate_file(input_path)
+        path = service.save(draft)
+        payload = {"configuration": draft.to_dict(), "issues": [getattr(issue, "to_dict")() for issue in issues], "saved": True}
+        click.echo(json.dumps(payload, indent=2) if json_mode else f"Migrated revision {draft.revision}")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.group("evidence")
+def evidence_group() -> None:
+    """Import reviewed hardware evidence into a configuration draft."""
+    pass
+
+
+@evidence_group.command("import")
+@click.argument("configuration_id")
+@click.argument("input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--kind", type=click.Choice(["usb", "acpi"], case_sensitive=False), required=True)
+@click.option("--json", "json_mode", is_flag=True)
+def evidence_import_cmd(configuration_id: str, input_path: Path, kind: str, json_mode: bool) -> None:
+    """Import sanitized USB or ACPI evidence metadata; private raw captures stay local."""
+    try:
+        service = WorkflowService()
+        draft = service.load(configuration_id)
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+        record = (
+            UsbEvidenceSession.from_dict(payload).to_evidence_record()
+            if kind.lower() == "usb"
+            else AcpiEvidenceBundle.from_dict(payload).to_evidence_record()
+        )
+        updated = service.add_evidence(draft, record)
+        path = service.save(updated)
+        result = {"configuration": updated.to_dict(), "evidence": record.to_dict(), "saved": True}
+        click.echo(json.dumps(result, indent=2) if json_mode else f"Imported {kind.lower()} evidence into revision {updated.revision}")
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("tui")
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--config", "configuration_id", type=str)
+def tui_cmd(fixture: Optional[Path], configuration_id: Optional[str]) -> None:
+    """Open the keyboard-accessible non-destructive Textual workflow."""
+    run_tui(fixture=fixture, config_id=configuration_id)
+
+
+@cli.group("usb")
+def usb_group() -> None:
+    """Inspect removable targets and create non-destructive media plans."""
+    pass
+
+
+@usb_group.command("list")
+@click.option("--json", "json_mode", is_flag=True)
+def usb_list_cmd(json_mode: bool) -> None:
+    """List only explicitly supported adapters; never writes or dismounts devices."""
+    payload = {"status": "discovery_not_qualified", "devices": [], "writes_enabled": False}
+    if json_mode:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        console.print("No qualified removable-media adapter is enabled; no device operation was attempted.")
+
+
+@usb_group.command("plan")
+@click.option("--device-id", required=True)
+@click.option("--model", required=True)
+@click.option("--capacity-bytes", type=int, required=True)
+@click.option("--serial", required=True)
+@click.option("--required-bytes", type=int, required=True)
+@click.option("--removable/--not-removable", default=True)
+@click.option("--system-disk/--not-system-disk", default=False)
+@click.option("--mounted/--unmounted", default=False)
+@click.option("--read-only/--writable", default=False)
+@click.option("--json", "json_mode", is_flag=True)
+def usb_plan_cmd(
+    device_id: str,
+    model: str,
+    capacity_bytes: int,
+    serial: str,
+    required_bytes: int,
+    removable: bool,
+    system_disk: bool,
+    mounted: bool,
+    read_only: bool,
+    json_mode: bool,
+) -> None:
+    """Create an immutable-looking, non-destructive preflight plan from an explicit descriptor."""
+    try:
+        device = RemovableDevice(
+            device_id=device_id,
+            model=model,
+            capacity_bytes=capacity_bytes,
+            is_system_disk=system_disk,
+            is_removable=removable,
+            mounted=mounted,
+            serial=serial,
+            read_only=read_only,
+        )
+        plan = RemovableMediaWriter().dry_run(device, required_bytes)
+        payload = plan.to_dict()
+        click.echo(json.dumps(payload, indent=2) if json_mode else f"Non-destructive media plan created for {device.model}; writes remain disabled")
+    except (MacLoaderError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.group("recovery")
+def recovery_group() -> None:
+    """Discover and verify the exact Apple Recovery target (never silently substitute)."""
+    pass
+
+
+@recovery_group.command("list")
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_list_cmd(json_mode: bool) -> None:
+    """Show the frozen Recovery policy without network access."""
+    service = Orchestrator().recovery_service
+    target = service.target()
+    payload = {
+        "policy_id": service.policy.policy_id,
+        "policy_digest": service.policy.digest,
+        "tool_version": service.policy.tool_version,
+        "tool_digest": service.policy.tool_digest,
+        "target": target.to_dict(),
+        "board_id": service.policy.board_id,
+        "query_scheme": service.policy.query_scheme,
+        "discovery_host": service.policy.discovery_host,
+        "asset_hosts": list(service.policy.asset_hosts),
+        "authentication": service.policy.authentication,
+        "minimum_free_bytes": service.policy.minimum_free_bytes,
+    }
+    if json_mode:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        console.print(f"Recovery target: {target.product_name} {target.version} ({target.build})")
+        console.print(f"Authentication: {payload['authentication']}")
+        console.print(f"Policy digest: {payload['policy_digest']}")
+
+
+@recovery_group.command("resolve")
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_resolve_cmd(json_mode: bool) -> None:
+    """Query Apple for the exact frozen target; a default/latest response is not accepted."""
+    try:
+        result = Orchestrator().discover_recovery()
+        payload = result.to_dict()
+        if json_mode:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print(f"Recovery discovery: {result.state.value}")
+            for diagnostic in result.diagnostics:
+                console.print(f"- {diagnostic}")
+        if result.state != RecoveryState.DISCOVERED:
+            raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        err_console.print(f"[bold red]Recovery Discovery Error:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
+
+
+@recovery_group.command("download")
+@click.option("--binding", "binding_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True, help="JSON Recovery binding created by the reviewed workflow.")
+@click.option("--destination", type=click.Path(file_okay=False, path_type=Path), required=True, help="Ignored/private directory for the Recovery cache.")
+@click.option("--allow-large-download", is_flag=True, help="Explicitly authorize the large Apple Recovery acquisition checkpoint.")
+@click.option("--resume/--no-resume", default=True, help="Retain validated partial assets and resume with HTTPS Range after interruption.")
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_download_cmd(binding_path: Path, destination: Path, allow_large_download: bool, resume: bool, json_mode: bool) -> None:
+    """Acquire the exact discovered Recovery bundle into ignored storage."""
+    if not allow_large_download:
+        raise click.ClickException("Large Apple Recovery acquisition requires an explicit checkpoint approval")
+    try:
+        binding_data = json.loads(binding_path.read_text(encoding="utf-8"))
+        if not isinstance(binding_data, dict):
+            raise ValueError("Recovery binding file must contain an object")
+        binding = RecoveryBinding.from_dict(binding_data)
+        orchestrator = Orchestrator()
+        result = orchestrator.discover_recovery()
+        if result.state != RecoveryState.DISCOVERED:
+            raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
+        lock, bundle = orchestrator.recovery_service.acquire(result, binding, destination, resume=resume)
+        lock_path = destination / "recovery.lock.json"
+        evidence_path = destination / "recovery.evidence.json"
+        orchestrator.recovery_service.save_lock(lock, lock_path)
+        orchestrator.recovery_service.save_evidence(bundle.evidence, evidence_path)
+        payload = {"state": lock.state.value, "lock": lock_path.name, "evidence": evidence_path.name, **bundle.evidence.to_dict()}
+        if json_mode:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print(f"Recovery acquired and verified: {bundle.image_path.name}")
+            console.print(f"Evidence: {evidence_path.name}")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        err_console.print(f"[bold red]Recovery Acquisition Error:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
+
+
+def _verify_recovery_cache(lock_path: Path, image_path: Path, chunklist_path: Path, json_mode: bool) -> None:
+    service = Orchestrator().recovery_service
+    lock = service.load_lock(lock_path)
+    evidence = service.verify(lock, image_path, chunklist_path)
+    payload = {"state": RecoveryState.VERIFIED.value, **evidence.to_dict()}
+    if json_mode:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        console.print(f"Recovery cache verified: {evidence.verified_chunks} signed chunks")
+
+
+@recovery_group.command("verify")
+@click.option("--lock", "lock_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True, help="Redacted Recovery lock JSON.")
+@click.option("--image", "image_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--chunklist", "chunklist_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_verify_cmd(lock_path: Path, image_path: Path, chunklist_path: Path, json_mode: bool) -> None:
+    """Verify a cached Recovery bundle offline against its redacted lock."""
+    try:
+        _verify_recovery_cache(lock_path, image_path, chunklist_path, json_mode)
+    except (MacLoaderError, OSError, ValueError) as exc:
+        err_console.print(f"[bold red]Recovery Verification Error:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
+
+
+@recovery_group.group("cache")
+def recovery_cache_group() -> None:
+    """Inspect or verify the private offline Recovery cache."""
+    pass
+
+
+@recovery_cache_group.command("verify")
+@click.option("--lock", "lock_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--image", "image_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--chunklist", "chunklist_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_cache_verify_cmd(lock_path: Path, image_path: Path, chunklist_path: Path, json_mode: bool) -> None:
+    """Offline replay of the exact Recovery cache verification."""
+    try:
+        _verify_recovery_cache(lock_path, image_path, chunklist_path, json_mode)
+    except (MacLoaderError, OSError, ValueError) as exc:
+        err_console.print(f"[bold red]Recovery Cache Error:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
 
 
 # =========================================================================
@@ -435,12 +829,20 @@ def validate_cmd(efi_dir: Path, json_mode: bool, ocvalidate_path: Optional[Path]
 @click.option("--offline", is_flag=True, help="Use only verified cached dependencies.")
 @click.option("--ocvalidate", "ocvalidate_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Matching OpenCore ocvalidate executable or script.")
 @click.option("--ocvalidate-sha256", type=str, help="SHA-256 for the selected ocvalidate executable/script.")
-def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str]) -> None:
+@click.option("--config", "configuration_id", type=str, help="Build from a persisted configuration and its exact target bindings.")
+def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str], configuration_id: Optional[str]) -> None:
     """Build a validated EFI tree from the actionable hardware plan."""
     try:
         orchestrator = Orchestrator()
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
-        plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
+        if configuration_id:
+            workflow = WorkflowService(orchestrator=orchestrator)
+            state = workflow.evaluate(workflow.load(configuration_id), snapshot)
+            if state.evaluation.has_blockers:
+                raise click.ClickException("EFI build blocked by configuration issues; review config check first")
+            plan = state.evaluation.plan
+        else:
+            plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
         dep_set = orchestrator.resolve_dependencies(plan)
         if not dep_set.is_complete:
             raise click.ClickException("EFI build blocked: unresolved requirements remain in the dependency plan")

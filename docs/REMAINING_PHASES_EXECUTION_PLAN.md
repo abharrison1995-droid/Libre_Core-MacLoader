@@ -6,7 +6,7 @@ Updated: 2026-09-11
 
 This is the execution playbook from the accepted P4 baseline to a narrowly qualified v0.1.0 candidate. It supplements, and never weakens, `IMPLEMENTATION_PLAN.md`, `CONFIGURATION_WORKFLOW_PLAN.md`, the engineering specification, or G0–G7.
 
-Starting commit: `920f2f66ff46b6bcad01e9c640854bbccb9f1743`.
+Starting commit: `cc6612d31f48d44c7dd795aa35006b21da47f0e1` (the expected user-provided starting commit).
 
 - Exact candidate: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, Sequoia 15.0 build 24A335.
 - P4 produced a machine-bound EFI; matching OpenCore 1.0.7 `ocvalidate` returned `VALID` / exit 0.
@@ -91,6 +91,8 @@ Perform one opt-in real discovery. If available, perform one real bounded verifi
 
 Run the standard three Luna reviewers, emphasizing Apple-source trust, exact-build binding, redirects, authenticated integrity, cache races and cancellation. Only isolated fixture-based P6 scaffolding may proceed before R5 acceptance.
 
+P5/R5 execution record 2026-09-11: the pinned Apple query returned product `696-28424` with no exact build. The candidate now requires HTTPS discovery, exact policy/runtime validation, signed chunklists and rollback-safe publication. No Recovery payload was downloaded. The exact-target gate remains externally blocked pending Apple/user direction; independent P6 work may proceed, but P7/P8 cannot claim exact-target qualification. Three independent Luna reviewers completed the R5 gate; required acquisition, path, cancellation, and evidence-boundary repairs were applied and the rechecks reported no unresolved blocker.
+
 ## 6. P6 — Unified CLI/TUI workflow
 
 ### P6A: semantic workflow
@@ -114,11 +116,15 @@ Run the standard three Luna reviewers, emphasizing Apple-source trust, exact-bui
 - Prove secrets/private paths do not enter screens, JSON, logs or tracebacks.
 - Build wheel/sdist and test fresh installations outside the checkout. Verify all YAML, licence, profile, schema and reviewed ACPI resources are packaged.
 
-**P6 exit:** a novice can complete the non-destructive workflow without manual EFI assembly; parity, package smoke and standard checks pass; writes remain disabled; R6 passes.
+P6 execution record 2026-09-11: the shared `WorkflowService` now drives the CLI and workflow-scoped Textual TUI through configuration creation/resume/import/export/migration, evidence review, exact target/profile/options, acknowledgements, dependency resolution, EFI preview/validation, Recovery discovery/acquisition/cache verification and non-destructive media planning. Workers support cancellation and safe resume; destructive media writing remains disabled. Headless parity tests compare semantic configuration, issue codes and plan/lock results. Local verification was `python3 -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79`: **317 passed, 79.34% branch coverage**; `python3 -m mypy macloader tests --follow-imports=skip`: **clean across 102 source files**; compileall and `git diff --check`: clean. A wheel was built and installed into an isolated target outside the checkout; CLI/TUI package parity smoke passed. Local sdist generation was not possible because the host lacks the `build` module; the hosted wheel/sdist workflow is defined but no hosted result has yet been observed.
+
+The P6 parity claim is intentionally scoped to the schema-driven workflow in P6A/P6B. Legacy standalone CLI utilities such as direct probe, dependency utility commands, standalone validation and Recovery utility subcommands are not claimed as separate TUI screens; they continue to use the same underlying services. This scope is documented so the TUI does not imply unsupported command-for-command parity.
+
+**P6 exit:** the non-destructive workflow is implemented and locally verified without manual EFI assembly; parity, package smoke and standard checks pass locally; writes remain disabled; R6 has no unresolved critical/high or release-affecting medium finding. Hosted Windows/Linux and local sdist evidence remain open release qualifications, not fabricated results.
 
 ## 7. R6 — Workflow review
 
-Run three Luna reviewers emphasizing service/UI divergence, stale review state, cancellation, secret exposure, packaged resources, accessibility and misleading readiness. P7 cannot trust UI-produced plans before R6 acceptance.
+Run three Luna reviewers emphasizing service/UI divergence, stale review state, cancellation, secret exposure, packaged resources, accessibility and misleading readiness. R6 execution record 2026-09-11: three independent Luna reviewers completed the gate. Correctness and security rechecks found no critical, high or medium blocker after the worker cancellation, safe source snapshot, bounded import, descriptor-safe resume metadata and HTTPS Recovery-size-probe repairs. The workflow reviewer retained two medium evidence limitations: parity is workflow-scoped rather than every legacy CLI utility, and hosted Windows/Linux plus sdist evidence is still unexecuted. Both are documented above and remain open release qualifications; no destructive or misleading-readiness defect remains. P7 cannot trust UI-produced plans before this documented gate.
 
 ## 8. P7 — Qualified media and distribution
 

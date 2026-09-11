@@ -7,9 +7,13 @@ perform any destructive call. Re-enumeration protects against hot-swap races.
 
 from dataclasses import dataclass, field
 import hashlib
+import os
 from pathlib import Path
 import shutil
-from typing import Callable, List, Optional
+import stat
+import tempfile
+from contextlib import contextmanager
+from typing import Callable, Iterator, List, Optional
 
 from macloader.exceptions import MacLoaderError
 
@@ -37,6 +41,24 @@ class WritePlan:
     required_bytes: int
     partitions: List[str] = field(default_factory=lambda: ["GPT", "EFI", "Recovery"])
     destroys_data: bool = True
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "device": {
+                "device_id": self.target.device_id,
+                "model": self.target.model,
+                "capacity_bytes": self.target.capacity_bytes,
+                "serial": "<redacted>" if self.target.serial else None,
+                "is_removable": self.target.is_removable,
+                "is_system_disk": self.target.is_system_disk,
+                "mounted": self.target.mounted,
+                "read_only": self.target.read_only,
+            },
+            "required_bytes": self.required_bytes,
+            "partitions": list(self.partitions),
+            "destroys_data": self.destroys_data,
+            "destructive_write_enabled": False,
+        }
 
 
 class DisposableImageAdapter:
@@ -197,17 +219,58 @@ class RemovableMediaWriter:
 
         # 5. Execute destructive write
         try:
-            self.destructive_write(fresh_plan, source_dir)
+            # Validate once, then hand the adapter an immutable no-follow
+            # snapshot. This closes the validation-to-copy symlink race.
+            with self._immutable_source_snapshot(source_dir) as snapshot:
+                self.destructive_write(fresh_plan, snapshot)
+                verified = self.readback_verifier(fresh_plan, snapshot)
         except (Exception, KeyboardInterrupt) as exc:
-            raise UnsafeRemovableTarget(f"Write operation failed or was interrupted: {exc}") from exc
-
-        # 6. Readback verification
-        try:
-            verified = self.readback_verifier(fresh_plan, source_dir)
-        except (Exception, KeyboardInterrupt) as exc:
-            raise UnsafeRemovableTarget(f"Readback verification raised an error: {exc}") from exc
+            raise UnsafeRemovableTarget(f"Write operation failed or was interrupted; readback may also have failed: {exc}") from exc
         if not verified:
             raise UnsafeRemovableTarget("Readback verification failed after write")
+
+    @contextmanager
+    def _immutable_source_snapshot(self, source_dir: Path) -> Iterator[Path]:
+        snapshot = Path(tempfile.mkdtemp(prefix="macloader-media-source-"))
+        try:
+            self._copy_no_follow(Path(source_dir), snapshot)
+            yield snapshot
+        finally:
+            shutil.rmtree(snapshot, ignore_errors=True)
+
+    @classmethod
+    def _copy_no_follow(cls, source: Path, destination: Path) -> None:
+        source_stat = os.lstat(source)
+        if stat.S_ISLNK(source_stat.st_mode):
+            raise UnsafeRemovableTarget(f"Source tree changed to a symlink: {source.name}")
+        if stat.S_ISDIR(source_stat.st_mode):
+            destination.mkdir(parents=True, exist_ok=True)
+            directory_flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                directory_flags |= os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                directory_flags |= os.O_NOFOLLOW
+            directory_fd = os.open(source, directory_flags)
+            try:
+                scan_path = Path(f"/proc/self/fd/{directory_fd}") if Path("/proc/self/fd").is_dir() else source
+                for entry in os.scandir(scan_path):
+                    cls._copy_no_follow(Path(entry.path), destination / entry.name)
+            finally:
+                os.close(directory_fd)
+            return
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise UnsafeRemovableTarget(f"Source tree contains a non-regular file: {source.name}")
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        source_fd = os.open(source, file_flags)
+        try:
+            opened_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise UnsafeRemovableTarget(f"Source tree entry is not a regular file: {source.name}")
+            with os.fdopen(source_fd, "rb", closefd=False) as source_handle, destination.open("wb") as destination_handle:
+                while chunk := source_handle.read(1024 * 1024):
+                    destination_handle.write(chunk)
+        finally:
+            os.close(source_fd)
 
     def _recheck_device(self, expected_target: RemovableDevice, required_bytes: int) -> RemovableDevice:
         """Re-enumerate devices to verify the target is still present, unaltered, and safe."""
@@ -259,7 +322,13 @@ class RemovableMediaWriter:
                 raise UnsafeRemovableTarget(f"Source directory ancestor is a symlink: {p}")
 
         # Check for structural EFI presence if source claims to be an EFI tree
-        efi_dir = source_dir / "EFI" if (source_dir / "EFI").is_dir() else source_dir
+        efi_candidate = source_dir / "EFI"
+        if efi_candidate.is_symlink():
+            raise UnsafeRemovableTarget(f"EFI directory must not be a symlink: {efi_candidate}")
+        efi_dir = efi_candidate if efi_candidate.is_dir() else source_dir
+        for entry in efi_dir.rglob("*"):
+            if entry.is_symlink():
+                raise UnsafeRemovableTarget(f"EFI source contains a symlink: {entry.name}")
         boot_efi = efi_dir / "BOOT" / "BOOTx64.efi"
         oc_efi = efi_dir / "OC" / "OpenCore.efi"
 
