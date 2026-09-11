@@ -495,3 +495,31 @@ HIGH for the tested shared guard and disposable-image contract; PENDING for plat
 ### R7 review record
 
 The first independent three-agent Luna review found high-risk mounted-volume detection and post-write invalidation gaps, plus a medium privacy leak in stale-device diagnostics. The candidate was repaired with fail-closed Windows volume mount detection, durable invalidation hooks/markers before remount, and opaque device references. The repeated three-agent review and originating security recheck reported no remaining findings. These review results qualify the software boundary only; they do not substitute for hosted platform or physical USB evidence.
+
+## Research Item 016 — P7 hosted platform and distribution evidence
+
+### Question
+
+Does the accepted P7 candidate pass the required hosted Windows/Linux test, type-check and wheel/sdist installation checks without claiming physical USB qualification?
+
+### Method and result
+
+- Hosted GitHub Actions run: `34644459857`, candidate commit `48638e5769bfb0ba5a47ebc9c2367f7e79e75c2`, workflow `verification`.
+- Test matrix passed on Ubuntu and Windows with Python 3.11 and 3.14. Branch coverage was **80.88%** (Ubuntu 3.11), **80.34%** (Ubuntu 3.14), **80.18%** (Windows 3.11) and **79.61%** (Windows 3.14); each job enforced `--cov-fail-under=79`.
+- Hosted mypy passed with `python -m mypy macloader tests --follow-imports=skip`, clean across 104 source files, on all four test jobs.
+- Hosted Ubuntu and Windows wheel/sdist smoke jobs passed. They built both artifacts and ran the installed-package smoke outside the checkout against the T480s fixture.
+- Local follow-up verification recorded **373 passed**, **81.00%** branch coverage, mypy clean across 104 files, compileall clean and `git diff --check` clean. Local sdist generation remains unavailable because the host cannot run `build.__main__`.
+
+### Decision
+
+P7 software and hosted distribution qualification are evidenced for this candidate. This does not qualify a physical Windows device, advertise Linux destructive media support, prove exact Sequoia `15.0/24A335` Recovery availability, or authorize a sacrificial USB write.
+
+### Confidence
+
+`HIGH` for the recorded hosted software/package matrix; `PENDING` for physical media, exact Recovery and all P8 hardware acceptance.
+
+### Follow-up
+
+- Keep the Windows destructive backend behind the explicit sacrificial-USB checkpoint.
+- Record the exact opaque device reference, capacity, consequence and recovery route before any physical write.
+- Do not promote the machine from `EXPERIMENTAL` or alter the frozen Recovery target from this evidence.
