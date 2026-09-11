@@ -3,6 +3,7 @@ disposable image adapter, and recovery asset matrix verification.
 """
 
 from pathlib import Path
+from dataclasses import replace
 import hashlib
 import os
 import shutil
@@ -18,7 +19,9 @@ from macloader.recovery import (
     verify_recovery_integrity,
 )
 from macloader.removable import (
+    DestructiveConfirmation,
     DisposableImageAdapter,
+    MediaBindings,
     RemovableDevice,
     RemovableMediaWriter,
     UnsafeRemovableTarget,
@@ -45,6 +48,8 @@ def valid_source_efi(tmp_path: Path) -> Path:
 
     config = oc_dir / "config.plist"
     config.write_text("<?xml version='1.0'?><plist version='1.0'></plist>", encoding="utf-8")
+    (source_dir / "Recovery").mkdir()
+    (source_dir / "Recovery" / "BaseSystem.dmg").write_bytes(b"FAKE_RECOVERY")
     return source_dir
 
 
@@ -61,6 +66,31 @@ def safe_device() -> RemovableDevice:
         read_only=False,
         serial="SD12345678",
     )
+
+
+@pytest.fixture
+def qualified_bindings() -> MediaBindings:
+    return MediaBindings(
+        efi_manifest_digest="a" * 64,
+        recovery_lock_digest="b" * 64,
+        validation_digest="c" * 64,
+        configuration_digest="d" * 64,
+        toolchain_digest="e" * 64,
+        evidence_digest="f" * 64,
+    )
+
+
+def qualified_plan(
+    writer: RemovableMediaWriter,
+    device: RemovableDevice,
+    source: Path,
+    bindings: MediaBindings,
+) -> WritePlan:
+    return writer.dry_run(device, 1024, source_dir=source, bindings=bindings)
+
+
+def confirmation(plan: WritePlan) -> DestructiveConfirmation:
+    return DestructiveConfirmation.issue(plan)
 
 
 # =========================================================================
@@ -220,21 +250,22 @@ def test_writer_refuses_symlinked_efi_boundary(safe_device: RemovableDevice, tmp
 
 
 def test_writer_snapshot_rejects_entry_swapped_after_validation(
-    safe_device: RemovableDevice, valid_source_efi: Path, tmp_path: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, tmp_path: Path, qualified_bindings: MediaBindings
 ) -> None:
     outside = tmp_path / "outside-config.plist"
     outside.write_text("outside", encoding="utf-8")
-    swapped = [False]
+    calls = [0]
 
     def swap_after_validation(_: Path) -> bool:
-        if not swapped[0]:
+        calls[0] += 1
+        if calls[0] > 1:
             target = valid_source_efi / "EFI" / "OC" / "config.plist"
             target.unlink()
             try:
                 target.symlink_to(outside)
             except (OSError, NotImplementedError):
                 pytest.skip("symbolic links are unavailable on this host")
-            swapped[0] = True
+            return True
         return True
 
     writer = RemovableMediaWriter(
@@ -242,10 +273,10 @@ def test_writer_snapshot_rejects_entry_swapped_after_validation(
         readback_verifier=lambda _plan, _source: True,
         source_validator=swap_after_validation,
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
     with pytest.raises(UnsafeRemovableTarget, match="symlink"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_refuses_custom_source_validator_failure(
@@ -268,20 +299,20 @@ def test_writer_handles_source_validator_exception(
 
 
 def test_writer_requires_readback_verifier_before_destructive_write(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     writes: list[bool] = []
     writer = RemovableMediaWriter(destructive_write=lambda _plan, _source: writes.append(True))
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="No readback verifier is configured"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
     assert writes == []
 
 
 def test_writer_requires_stable_identity_before_destructive_write(
-    valid_source_efi: Path,
+    valid_source_efi: Path, qualified_bindings: MediaBindings,
 ) -> None:
     device = RemovableDevice(
         device_id="DISK_USB_NO_SERIAL",
@@ -297,16 +328,16 @@ def test_writer_requires_stable_identity_before_destructive_write(
         destructive_write=lambda _plan, _source: writes.append(True),
         readback_verifier=lambda _plan, _source: True,
     )
-    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {device.device_id} {device.capacity_bytes}"
+    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="stable device serial"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
     assert writes == []
 
 
 def test_writer_normalizes_keyboard_interrupt(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     def interrupt(_plan: WritePlan, _source: Path) -> None:
         raise KeyboardInterrupt()
@@ -315,11 +346,11 @@ def test_writer_normalizes_keyboard_interrupt(
         destructive_write=interrupt,
         readback_verifier=lambda _plan, _source: True,
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Write operation failed or was interrupted"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 # =========================================================================
@@ -327,64 +358,60 @@ def test_writer_normalizes_keyboard_interrupt(
 # =========================================================================
 
 def test_writer_refuses_wrong_confirmation(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     writer = RemovableMediaWriter(destructive_write=lambda p, s: None)
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
 
-    # Wrong device ID
-    with pytest.raises(UnsafeRemovableTarget, match="Confirmation does not match"):
-        writer.write(plan, valid_source_efi, f"WRITE DISK_WRONG {safe_device.capacity_bytes}")
-
-    # Wrong capacity
-    with pytest.raises(UnsafeRemovableTarget, match="Confirmation does not match"):
-        writer.write(plan, valid_source_efi, f"WRITE {safe_device.device_id} 99999")
-
-    # Generic YES
-    with pytest.raises(UnsafeRemovableTarget, match="Confirmation does not match"):
-        writer.write(plan, valid_source_efi, "YES")
+    issued = confirmation(plan)
+    with pytest.raises(UnsafeRemovableTarget, match="invalid, stale, or expired"):
+        writer.write(plan, valid_source_efi, replace(issued, device_id="DISK_WRONG"))
+    with pytest.raises(UnsafeRemovableTarget, match="invalid, stale, or expired"):
+        writer.write(plan, valid_source_efi, replace(issued, capacity_bytes=99999))
+    with pytest.raises(UnsafeRemovableTarget, match="typed expiring"):
+        writer.write(plan, valid_source_efi, "YES")  # type: ignore[arg-type]
 
 
 def test_writer_refuses_missing_platform_write_adapter(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     writer = RemovableMediaWriter(destructive_write=None)
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
     with pytest.raises(UnsafeRemovableTarget, match="No platform write adapter is configured"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_re_enumeration_detects_removed_device(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     writer = RemovableMediaWriter(
         destructive_write=lambda p, s: None,
         enumerator=lambda: [],  # Target disappeared!
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="is no longer present"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_re_enumeration_detects_ambiguous_devices(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     writer = RemovableMediaWriter(
         destructive_write=lambda p, s: None,
         enumerator=lambda: [safe_device, safe_device],  # Duplicate!
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Ambiguous target devices found"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_re_enumeration_detects_capacity_change(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     swapped_device = RemovableDevice(
         device_id=safe_device.device_id,
@@ -399,15 +426,15 @@ def test_writer_re_enumeration_detects_capacity_change(
         destructive_write=lambda p, s: None,
         enumerator=lambda: [swapped_device],
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Target device capacity changed.*possible hot-swap"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_re_enumeration_detects_model_or_serial_change(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     swapped_device = RemovableDevice(
         device_id=safe_device.device_id,
@@ -422,15 +449,15 @@ def test_writer_re_enumeration_detects_model_or_serial_change(
         destructive_write=lambda p, s: None,
         enumerator=lambda: [swapped_device],
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Target device identity changed.*possible hot-swap"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_writer_re_enumeration_detects_device_mounted_between_plan_and_write(
-    safe_device: RemovableDevice, valid_source_efi: Path
+    safe_device: RemovableDevice, valid_source_efi: Path, qualified_bindings: MediaBindings
 ) -> None:
     now_mounted = RemovableDevice(
         device_id=safe_device.device_id,
@@ -445,11 +472,11 @@ def test_writer_re_enumeration_detects_device_mounted_between_plan_and_write(
         destructive_write=lambda p, s: None,
         enumerator=lambda: [now_mounted],
     )
-    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {safe_device.device_id} {safe_device.capacity_bytes}"
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Target is mounted or busy"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 # =========================================================================
@@ -457,7 +484,7 @@ def test_writer_re_enumeration_detects_device_mounted_between_plan_and_write(
 # =========================================================================
 
 def test_disposable_image_adapter_positive_write_and_readback(
-    valid_source_efi: Path, tmp_path: Path
+    valid_source_efi: Path, tmp_path: Path, qualified_bindings: MediaBindings
 ) -> None:
     target_image_dir = tmp_path / "mock_usb_mount"
     target_image_dir.mkdir()
@@ -472,11 +499,11 @@ def test_disposable_image_adapter_positive_write_and_readback(
         device_id="DISPOSABLE_USB_IMAGE",
         capacity_bytes=32 * 1024 * 1024 * 1024,
     )
-    plan = writer.dry_run(device, 1024 * 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {device.device_id} {device.capacity_bytes}"
+    plan = writer.dry_run(device, 1024 * 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     # Perform write and readback
-    writer.write(plan, valid_source_efi, confirmation)
+    writer.write(plan, valid_source_efi, typed_confirmation)
 
     # Validate that files were written and are structurally intact
     dest_efi = target_image_dir / "EFI"
@@ -489,7 +516,7 @@ def test_disposable_image_adapter_positive_write_and_readback(
 
 
 def test_disposable_image_adapter_handles_write_interruption(
-    valid_source_efi: Path, tmp_path: Path
+    valid_source_efi: Path, tmp_path: Path, qualified_bindings: MediaBindings
 ) -> None:
     target_image_dir = tmp_path / "mock_usb_mount"
     target_image_dir.mkdir()
@@ -501,15 +528,17 @@ def test_disposable_image_adapter_handles_write_interruption(
     )
 
     device = adapter.create_mock_device()
-    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {device.device_id} {device.capacity_bytes}"
+    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Write operation failed or was interrupted"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
+    assert (target_image_dir / "WRITE-INCOMPLETE").is_file()
+    assert adapter.verify_readback(plan, valid_source_efi) is False
 
 
 def test_disposable_image_adapter_detects_corrupted_readback(
-    valid_source_efi: Path, tmp_path: Path
+    valid_source_efi: Path, tmp_path: Path, qualified_bindings: MediaBindings
 ) -> None:
     target_image_dir = tmp_path / "mock_usb_mount"
     target_image_dir.mkdir()
@@ -521,11 +550,11 @@ def test_disposable_image_adapter_detects_corrupted_readback(
     )
 
     device = adapter.create_mock_device()
-    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi)
-    confirmation = f"WRITE {device.device_id} {device.capacity_bytes}"
+    plan = writer.dry_run(device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    typed_confirmation = confirmation(plan)
 
     with pytest.raises(UnsafeRemovableTarget, match="Readback verification failed after write"):
-        writer.write(plan, valid_source_efi, confirmation)
+        writer.write(plan, valid_source_efi, typed_confirmation)
 
 
 def test_disposable_image_adapter_rejects_extra_payload_files(

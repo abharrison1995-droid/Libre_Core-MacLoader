@@ -22,7 +22,7 @@ from macloader.domain.recovery import RecoveryBinding, RecoveryLock
 from macloader.orchestrator import Orchestrator
 from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
 from macloader.recovery.acquirer import RecoveryBundle
-from macloader.removable.writer import RemovableDevice, RemovableMediaWriter, WritePlan
+from macloader.removable import MediaBindings, RemovableDevice, RemovableMediaWriter, WritePlan, current_adapter
 
 
 MAX_IMPORT_BYTES = 4 * 1024 * 1024
@@ -133,7 +133,31 @@ class WorkflowService:
 
     @staticmethod
     def removable_status() -> dict[str, object]:
-        return {"status": "discovery_not_qualified", "devices": [], "writes_enabled": False}
+        adapter = current_adapter()
+        devices: list[dict[str, object]] = []
+        if adapter.status.advertised:
+            devices = [
+                {
+                    "device_id": device.public_device_ref,
+                    "model": device.model,
+                    "capacity_bytes": device.capacity_bytes,
+                    "serial": "<redacted>" if device.serial else None,
+                    "vendor": device.vendor,
+                    "partitions": list(device.partitions),
+                    "whole_device": device.whole_device,
+                    "is_system_disk": device.is_system_disk,
+                    "is_removable": device.is_removable,
+                    "mounted": device.mounted,
+                    "read_only": device.read_only,
+                }
+                for device in adapter.enumerate()
+            ]
+        return {
+            "status": "qualified" if adapter.status.qualified else "discovery_not_qualified",
+            "adapter": adapter.status.to_dict(),
+            "devices": devices,
+            "writes_enabled": False,
+        }
 
     def resolve_dependencies(
         self,
@@ -193,8 +217,15 @@ class WorkflowService:
         device: RemovableDevice,
         required_bytes: int,
         writer: Optional[RemovableMediaWriter] = None,
+        source_dir: Optional[Path] = None,
+        bindings: Optional[MediaBindings] = None,
     ) -> WritePlan:
-        return (writer or RemovableMediaWriter()).dry_run(device, required_bytes)
+        return (writer or RemovableMediaWriter()).dry_run(
+            device,
+            required_bytes,
+            source_dir=source_dir,
+            bindings=bindings,
+        )
 
     @staticmethod
     def render_json(state: WorkflowState) -> str:

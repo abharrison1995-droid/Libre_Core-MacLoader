@@ -469,3 +469,29 @@ HIGH for local service/client parity and tested non-destructive boundaries; PEND
 ### Follow-up
 - Push the accepted tracked source and documentation so hosted CI can provide the required Windows/Linux wheel/sdist evidence.
 - Keep P7 destructive media work behind its own sacrificial-device checkpoint and review gate.
+
+## Research Item 015 — P7 removable-media safety implementation
+
+### Question
+Does the P7 software boundary prevent stale, ambiguous or unsafe removable targets from reaching destructive I/O while preserving complete payload readback?
+
+### Method and result
+- Date run: 2026-09-11; local Linux x86_64, Python 3.13.
+- `RemovableMediaWriter` now binds source file digests and EFI/Recovery/validation/configuration/toolchain/evidence digests into a frozen `WritePlan`; only a `DestructiveConfirmation` issued for that plan and still within its bounded lifetime can reach the adapter.
+- The Windows adapter parses whole-disk records using serial/physical-disk identity, model, capacity, partitions, system/removable/read-only/mounted flags and refuses any missing qualified lock/dismount/flush/remount/readback backend. Linux is not advertised.
+- Disposable-image qualification covers EFI and Recovery file hashes, incomplete-write markers, source mutation, symlink/TOCTOU races, mounted/system/read-only/ambiguous/stale targets, cancellation, readback corruption and backend lifecycle order.
+- Automated result: `python3 -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79` — **329 passed, 79.22% branch coverage**; `python3 -m mypy macloader tests --follow-imports=skip` — clean across 104 source files; compileall and diff checks clean. The wheel `libre_core_macloader-0.0.4-py3-none-any.whl` was built with SHA-256 `90bbb7eee39e2bc10a041cef857b6b5e09f4a7422917a9fa7c8efbf75a7b3732` and its isolated clean-target package smoke passed. Local `python3 -m build --wheel --sdist --no-isolation` exited 1 because `build.__main__` is unavailable; no sdist pass is claimed.
+
+### Decision
+P7 software safety behavior is implemented and ready for independent R7 review. It is not physically qualified: no real Windows host run, sacrificial USB write/readback or Linux advertisement has occurred. No destructive adapter is enabled on the current Linux host.
+
+### Confidence
+HIGH for the tested shared guard and disposable-image contract; PENDING for platform-host, physical-media and firmware boot evidence.
+
+### Follow-up
+- Obtain hosted Windows/Linux package evidence through CI after the accepted P7 commit.
+- Ask for a fresh checkpoint before selecting and erasing any physical USB; record the exact opaque device reference, capacity, consequence and recovery route.
+
+### R7 review record
+
+The first independent three-agent Luna review found high-risk mounted-volume detection and post-write invalidation gaps, plus a medium privacy leak in stale-device diagnostics. The candidate was repaired with fail-closed Windows volume mount detection, durable invalidation hooks/markers before remount, and opaque device references. The repeated three-agent review and originating security recheck reported no remaining findings. These review results qualify the software boundary only; they do not substitute for hosted platform or physical USB evidence.

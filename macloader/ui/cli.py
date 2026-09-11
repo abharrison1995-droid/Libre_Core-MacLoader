@@ -387,11 +387,14 @@ def usb_group() -> None:
 @click.option("--json", "json_mode", is_flag=True)
 def usb_list_cmd(json_mode: bool) -> None:
     """List only explicitly supported adapters; never writes or dismounts devices."""
-    payload = {"status": "discovery_not_qualified", "devices": [], "writes_enabled": False}
+    payload = WorkflowService.removable_status()
     if json_mode:
         click.echo(json.dumps(payload, indent=2))
     else:
-        console.print("No qualified removable-media adapter is enabled; no device operation was attempted.")
+        console.print(
+            f"Removable adapter status: {payload['status']}; "
+            "no write or dismount operation was attempted."
+        )
 
 
 @usb_group.command("plan")
@@ -400,6 +403,7 @@ def usb_list_cmd(json_mode: bool) -> None:
 @click.option("--capacity-bytes", type=int, required=True)
 @click.option("--serial", required=True)
 @click.option("--required-bytes", type=int, required=True)
+@click.option("--source-dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--removable/--not-removable", default=True)
 @click.option("--system-disk/--not-system-disk", default=False)
 @click.option("--mounted/--unmounted", default=False)
@@ -411,13 +415,14 @@ def usb_plan_cmd(
     capacity_bytes: int,
     serial: str,
     required_bytes: int,
+    source_dir: Optional[Path],
     removable: bool,
     system_disk: bool,
     mounted: bool,
     read_only: bool,
     json_mode: bool,
 ) -> None:
-    """Create an immutable-looking, non-destructive preflight plan from an explicit descriptor."""
+    """Create an immutable, non-destructive preflight plan from an explicit descriptor."""
     try:
         device = RemovableDevice(
             device_id=device_id,
@@ -429,7 +434,7 @@ def usb_plan_cmd(
             serial=serial,
             read_only=read_only,
         )
-        plan = RemovableMediaWriter().dry_run(device, required_bytes)
+        plan = RemovableMediaWriter().dry_run(device, required_bytes, source_dir=source_dir)
         payload = plan.to_dict()
         click.echo(json.dumps(payload, indent=2) if json_mode else f"Non-destructive media plan created for {device.model}; writes remain disabled")
     except (MacLoaderError, ValueError) as exc:
