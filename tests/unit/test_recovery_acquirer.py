@@ -346,7 +346,7 @@ def test_recovery_resume_rejects_non_regular_metadata_without_blocking(tmp_path:
     destination = tmp_path / "fifo-safe.dmg"
     partial, metadata = RecoveryAcquirer._resume_paths(asset, destination)
     partial.write_bytes(b"prefix")
-    os.mkfifo(metadata)
+    getattr(os, "mkfifo")(metadata)
     opener = unittest.mock.MagicMock()
     opener.open.return_value = _MockResponse(payload)
     with unittest.mock.patch("urllib.request.build_opener", return_value=opener):

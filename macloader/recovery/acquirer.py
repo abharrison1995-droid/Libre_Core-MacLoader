@@ -338,7 +338,7 @@ class RecoveryAcquirer:
                 return False
             return bool(data == {"sha256": asset.sha256.lower(), "size_bytes": asset.size_bytes})
         try:
-            flags = os.O_RDONLY | os.O_NOFOLLOW
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             if hasattr(os, "O_NONBLOCK"):
                 flags |= os.O_NONBLOCK
             fd = os.open(name, flags, dir_fd=directory_fd)
@@ -363,7 +363,7 @@ class RecoveryAcquirer:
                 raise ArtifactDownloadError("Recovery resume file must not be a symlink")
             fd = os.open(path, flags, 0o600)
         else:
-            fd = os.open(name, flags | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+            fd = os.open(name, flags | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=directory_fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
             raise ArtifactDownloadError("Recovery resume file must be a regular file")
@@ -552,7 +552,10 @@ class RecoveryAcquirer:
                 raise ArtifactDownloadError("Recovery publication directory is not safely accessible")
             return path
         try:
-            return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            return os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
         except OSError as exc:
             raise ArtifactDownloadError("Recovery publication directory is not safely accessible") from exc
 
