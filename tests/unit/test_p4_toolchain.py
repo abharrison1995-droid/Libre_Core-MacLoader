@@ -75,12 +75,17 @@ def _synthetic_loader(tmp_path: Path) -> TrustedToolchainLoader:
 
 
 def _trusted_selection(tmp_path: Path) -> tuple[TrustedToolchainLoader, ToolchainSelection]:
-    try:
-        loader = TrustedToolchainLoader()
-        return loader, loader.select()
-    except ToolchainTrustError:
+    loader = TrustedToolchainLoader()
+    # CI intentionally has no ignored private tool bundle.  Use the synthetic
+    # fixture only when that entire private root is absent; any catalog,
+    # digest, size, version, or path failure in an available root must fail.
+    if not loader.tool_root.exists():
         loader = _synthetic_loader(tmp_path)
         return loader, loader.select()
+    try:
+        return loader, loader.select()
+    except ToolchainTrustError:
+        raise
 
 
 def test_catalog_selects_qualified_matching_opencore_toolchain(tmp_path: Path) -> None:
