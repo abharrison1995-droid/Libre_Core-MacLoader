@@ -6,6 +6,8 @@ Updated: 2026-09-10, after the P0-P4 configuration-workflow implementation and e
 
 Evidence update 2026-09-10: real sanitized T480s 20L8 inventory, BIOS observations, private ACPI tables, ALC257 identity and partial USB topology are available as summarized in [T480S_REFERENCE_EVIDENCE_2026-09-10.md](T480S_REFERENCE_EVIDENCE_2026-09-10.md). P4 software qualification is complete for the exact Sequoia 15.0 build 24A335 candidate on the current Linux x86_64 host. Type-C logical mapping, Recovery/media, installation and physical acceptance remain open.
 
+Detailed continuation: execute P5–P8 and their mandatory three-agent Luna review gates from [REMAINING_PHASES_EXECUTION_PLAN.md](REMAINING_PHASES_EXECUTION_PLAN.md). It defines phase evidence, safety/human checkpoints, review roles, repair loops and the release decision without weakening G0–G7.
+
 This is the active execution plan. It supersedes earlier statements that G0 is closed and that the builder/recovery/media modules are wholly absent or complete. The engineering specification remains the product contract. Historical review resolutions remain in [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md); the open issue register below governs current work.
 
 ### Current progress and evidence
