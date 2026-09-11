@@ -2,6 +2,9 @@
 
 from dataclasses import replace
 from pathlib import Path
+import subprocess
+from typing import Any, cast
+from unittest import mock
 
 import pytest
 
@@ -12,8 +15,10 @@ from macloader.removable import (
     RemovableDevice,
     UnsafeRemovableTarget,
     WindowsRemovableAdapter,
+    current_adapter,
 )
 from macloader.removable.writer import RemovableMediaWriter
+import macloader.removable.adapters as adapters_module
 import macloader.removable.writer as writer_module
 
 
@@ -37,6 +42,106 @@ def test_windows_discovery_rejects_malformed_rows() -> None:
     adapter = WindowsRemovableAdapter(runner=lambda _script: "[1]", platform="win32")
     with pytest.raises(UnsafeRemovableTarget, match="non-object row"):
         adapter.enumerate()
+
+
+def test_windows_discovery_parses_single_row_and_whole_disk_safety_fields() -> None:
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: '{"Number": 4, "FriendlyName": " USB Disk ", "SerialNumber": "  ", "Size": "1000", "BusType": "USB", "IsBoot": "1", "IsReadOnly": "yes", "OperationalStatus": "Mounted", "Partitions": [1, "", null], "IsWholeDevice": false}',
+        platform="win32",
+    )
+    device = adapter.enumerate()[0]
+    assert device.device_id == "windows:physical:4"
+    assert device.model == "USB Disk"
+    assert device.capacity_bytes == 1000
+    assert device.is_system_disk is True
+    assert device.is_removable is True
+    assert device.mounted is True
+    assert device.read_only is True
+    assert device.partitions == ("1",)
+    assert device.whole_device is False
+    assert device.system_disk_ref == device.device_id
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("not-json", "malformed JSON"),
+        ("null", "invalid shape"),
+        ('[{"Number": true, "FriendlyName": "USB", "Size": 1}]', "invalid disk number"),
+        ('[{"Number": -1, "FriendlyName": "USB", "Size": 1}]', "negative disk number"),
+        ('[{"Number": 1, "Size": 1}]', "no model"),
+        ('[{"Number": 1, "FriendlyName": "USB", "Size": -1}]', "negative capacity"),
+    ],
+)
+def test_windows_discovery_rejects_invalid_metadata(raw: str, message: str) -> None:
+    adapter = WindowsRemovableAdapter(runner=lambda _script: raw, platform="win32")
+    with pytest.raises(UnsafeRemovableTarget, match=message):
+        adapter.enumerate()
+
+
+def test_windows_adapter_is_unavailable_off_host() -> None:
+    adapter = WindowsRemovableAdapter(platform="linux")
+    assert adapter.status.to_dict() == {
+        "platform": "windows",
+        "advertised": False,
+        "qualified": False,
+        "reason": "Windows adapter is unavailable on this host",
+    }
+    assert adapter.enumerate() == []
+
+
+class IncompleteWindowsBackend:
+    pass
+
+
+def test_windows_backend_status_fails_closed_when_methods_are_missing() -> None:
+    adapter = WindowsRemovableAdapter(
+        backend=cast(Any, IncompleteWindowsBackend()), platform="win32"
+    )
+    assert adapter.status.qualified is False
+    assert "lacks" in adapter.status.reason
+
+
+def test_windows_backend_rejects_invalid_plan_and_safe_noops_for_invalid_readback() -> None:
+    backend = FakeWindowsBackend()
+    adapter = WindowsRemovableAdapter(backend=backend, platform="win32")
+    with pytest.raises(UnsafeRemovableTarget, match="invalid media plan"):
+        adapter.write(object(), Path("."))
+    assert adapter.readback(object(), Path(".")) is False
+    adapter.invalidate(object(), "ignored")
+    assert backend.events == []
+
+
+def test_windows_backend_failure_invalidates_and_remounts(
+    valid_source: Path,
+) -> None:
+    backend = FailingWindowsBackend()
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        backend=backend,
+        platform="win32",
+    )
+    device = adapter.enumerate()[0]
+    plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
+    with pytest.raises(OSError, match="simulated write failure"):
+        adapter.write(plan, valid_source)
+    assert backend.events == ["lock-dismount", "write", "invalidate", "remount"]
+
+
+def test_windows_backend_readback_and_invalidation_always_remount(
+    valid_source: Path,
+) -> None:
+    backend = FalseReadbackWindowsBackend()
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        backend=backend,
+        platform="win32",
+    )
+    device = adapter.enumerate()[0]
+    plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
+    assert adapter.readback(plan, valid_source) is False
+    adapter.invalidate(plan, "test invalidation")
+    assert backend.events == ["readback", "remount", "invalidate", "remount"]
 
 
 def test_windows_discovery_fails_closed_when_mount_state_is_missing() -> None:
@@ -86,6 +191,18 @@ class FakeWindowsBackend:
         self.events.append("remount")
 
 
+class FailingWindowsBackend(FakeWindowsBackend):
+    def write(self, plan: object, source_dir: Path) -> None:
+        self.events.append("write")
+        raise OSError("simulated write failure")
+
+
+class FalseReadbackWindowsBackend(FakeWindowsBackend):
+    def readback(self, plan: object, source_dir: Path) -> bool:
+        self.events.append("readback")
+        return False
+
+
 def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Exercise the platform-specific no-follow snapshot branch on every host;
     # the real Windows run covers the native filesystem implementation too.
@@ -129,6 +246,36 @@ def test_linux_is_disabled_until_explicitly_advertised() -> None:
         "reason": "Linux removable-media support is not advertised",
     }
     assert adapter.enumerate() == []
+
+
+def test_linux_advertised_discovery_remains_nonqualified() -> None:
+    device = RemovableDevice("linux:serial:1", "USB", 1024, False, True, False, serial="1")
+    adapter = LinuxRemovableAdapter(advertised=True, enumerator=lambda: [device])
+    assert adapter.status.qualified is False
+    assert "qualification" in adapter.status.reason
+    assert adapter.enumerate() == [device]
+
+
+def test_current_adapter_does_not_enable_unqualified_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(adapters_module.sys, "platform", "linux")
+    assert isinstance(current_adapter(), LinuxRemovableAdapter)
+    monkeypatch.setattr(adapters_module.sys, "platform", "win32")
+    adapter = current_adapter()
+    assert isinstance(adapter, WindowsRemovableAdapter)
+    assert adapter.status.qualified is False
+
+
+def test_powershell_runner_uses_bounded_noninteractive_command() -> None:
+    completed = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
+    with mock.patch.object(adapters_module.subprocess, "run", return_value=completed) as run:
+        assert WindowsRemovableAdapter._run_powershell("Get-Disk") == "[]"
+    run.assert_called_once_with(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Get-Disk"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def test_confirmation_expires_and_binds_plan(valid_source: Path, tmp_path: Path) -> None:
