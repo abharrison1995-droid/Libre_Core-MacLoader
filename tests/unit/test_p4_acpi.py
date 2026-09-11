@@ -58,25 +58,28 @@ def test_acpi_capture_requires_exact_table_set(tmp_path: Path) -> None:
 
 def _fake_iasl(path: Path) -> str:
     if os.name == "nt":
+        runner = path.with_name("fake_iasl_runner.py")
+        runner.write_text(
+            """import sys
+from pathlib import Path
+
+if sys.argv[1] == "-v":
+    print("ASL+ Optimizing Compiler/Disassembler version 20260408")
+elif sys.argv[1] == "-d":
+    Path(sys.argv[3] + ".dsl").write_text('DefinitionBlock ("", "SSDT", 2, "LENOVO", "P4TEST", 1) {}\\n', encoding="utf-8")
+    print("disassembled")
+elif sys.argv[1] == "-tc":
+    Path(sys.argv[3] + ".aml").write_bytes(b"AML")
+    print("compiled with 1 Warning")
+else:
+    raise SystemExit(2)
+""",
+            encoding="utf-8",
+            newline="\r\n",
+        )
         path = path.with_suffix(".cmd")
         path.write_text(
-            """@echo off
-if "%~1" == "-v" (
-  echo ASL+ Optimizing Compiler/Disassembler version 20260408
-  exit /b 0
-)
-if "%~1" == "-d" (
-  echo DefinitionBlock ("", "SSDT", 2, "LENOVO", "P4TEST", 1) {} > "%~3.dsl"
-  echo disassembled
-  exit /b 0
-)
-if "%~1" == "-tc" (
-  <nul set /p "=AML" > "%~3.aml"
-  echo compiled with 1 Warning
-  exit /b 0
-)
-exit /b 2
-""",
+            "@echo off\npython \"%~dp0fake_iasl_runner.py\" %*\n",
             encoding="utf-8",
             newline="\r\n",
         )

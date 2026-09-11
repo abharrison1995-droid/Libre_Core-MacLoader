@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import json
-from typing import Optional
+from typing import Callable, Optional
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -158,7 +158,7 @@ class WorkflowApp(App[None]):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        actions = {
+        actions: dict[str, Callable[[], None]] = {
             "apply-target": self._apply_target,
             "set-option": self._set_option,
             "acknowledge": self._acknowledge,

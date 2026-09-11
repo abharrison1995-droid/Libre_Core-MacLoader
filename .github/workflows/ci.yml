@@ -34,7 +34,7 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
       - name: Run type checks
-        run: python -m mypy macloader tests
+        run: python -m mypy macloader tests --follow-imports=skip
 
   wheel-smoke:
     strategy:

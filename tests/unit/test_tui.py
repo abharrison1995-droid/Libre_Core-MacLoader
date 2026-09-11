@@ -3,7 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
-from textual.widgets import Button
+from textual.widgets import Button, Input
 
 from macloader.configuration.store import ConfigurationStore
 from macloader.ui.tui import WorkflowApp
@@ -73,34 +73,34 @@ def test_tui_exposes_non_destructive_workflow_stages(
             app.on_button_pressed(Button.Pressed(app.query_one("#cancel", Button)))
             app.on_button_pressed(Button.Pressed(Button("unmapped")))
             app._apply_target()
-            app.query_one("#config-path-input").value = str(export_path)
+            app.query_one("#config-path-input", Input).value = str(export_path)
             app._export_config()
             assert export_path.is_file()
             app._import_config()
             assert app._draft is not None
             app._migrate_config()
             _, app._snapshot = service.create(t480s_baseline_fixture)
-            app.query_one("#evidence-path-input").value = str(evidence_path)
-            app.query_one("#evidence-kind-input").value = "usb"
+            app.query_one("#evidence-path-input", Input).value = str(evidence_path)
+            app.query_one("#evidence-kind-input", Input).value = "usb"
             app._import_evidence()
             app._support_review()
             app._resolve_dependencies()
             await pilot.pause(1.0)
-            app.query_one("#efi-output-input").value = str(tmp_path / "efi-output")
+            app.query_one("#efi-output-input", Input).value = str(tmp_path / "efi-output")
             app._build_efi()
             await pilot.pause(1.0)
-            app.query_one("#media-device-id-input").value = "USB-EXAMPLE"
-            app.query_one("#media-model-input").value = "Disposable USB"
-            app.query_one("#media-capacity-input").value = "16000000000"
-            app.query_one("#media-required-input").value = "1000000000"
+            app.query_one("#media-device-id-input", Input).value = "USB-EXAMPLE"
+            app.query_one("#media-model-input", Input).value = "Disposable USB"
+            app.query_one("#media-capacity-input", Input).value = "16000000000"
+            app.query_one("#media-required-input", Input).value = "1000000000"
             app._media_plan()
             app._usb_status()
             app._verify_recovery()
-            app.query_one("#version-input").value = "99.0"
-            app.query_one("#build-input").value = "99Z99"
+            app.query_one("#version-input", Input).value = "99.0"
+            app.query_one("#build-input", Input).value = "99Z99"
             app._apply_target()
-            app.query_one("#ack-rule-input").value = "unknown-rule"
-            app.query_one("#ack-warning-input").value = "not a policy warning"
+            app.query_one("#ack-rule-input", Input).value = "unknown-rule"
+            app.query_one("#ack-warning-input", Input).value = "not a policy warning"
             app._acknowledge()
             app._recovery_result = RecoveryDiscoveryResult(
                 RecoveryState.UNAVAILABLE,
