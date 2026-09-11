@@ -12,7 +12,8 @@ from macloader.domain.recovery import RecoveryBinding, RecoveryEvidence, Recover
 from macloader.recovery.acquirer import verify_apple_chunklist
 from macloader.recovery.discovery import AppleRecoveryDiscovery, DiscoveryResponse
 from macloader.recovery.service import RecoveryService, load_recovery_policy
-from macloader.exceptions import ArtifactDownloadError
+import macloader.recovery.service as service_module
+from macloader.exceptions import ArtifactDownloadError, ChecksumMismatchError
 
 
 def _target() -> RecoveryTarget:
@@ -95,6 +96,111 @@ def test_discovery_rejects_unapproved_asset_urls() -> None:
         AppleRecoveryDiscovery._asset_url("https://updates.cdn-apple.com:444/recovery")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("board_id", "invalid", "board ID"),
+        ("mlb", "short", "17-character"),
+        ("tool_version", "0.0.0", "pinned OpenCore"),
+        ("discovery_host", "example.invalid", "pinned HTTPS"),
+        ("query_scheme", "http", "pinned HTTPS"),
+        ("asset_hosts", ("osrecovery.apple.com",), "asset hosts"),
+    ],
+)
+def test_discovery_rejects_policy_constructor_drift(field: str, value: object, message: str) -> None:
+    kwargs: dict[str, object] = {field: value}
+    with pytest.raises(ValueError, match=message):
+        AppleRecoveryDiscovery(**kwargs)  # type: ignore[arg-type]
+
+
+def test_discovery_rejects_missing_cookie_and_cancellation() -> None:
+    with pytest.raises(ArtifactDownloadError, match="session cookie"):
+        AppleRecoveryDiscovery(
+            transport=lambda url, _headers, _data: DiscoveryResponse({}, b"")
+        ).discover(_target())
+
+    calls = 0
+
+    def cancel_after_first() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    def transport(url: str, _headers: object, _data: bytes) -> DiscoveryResponse:
+        return DiscoveryResponse({"Set-Cookie": "session=opaque"} if url.endswith("/") else {}, _response("InstallAssistant 24A335"))
+
+    with pytest.raises(ArtifactDownloadError, match="cancelled"):
+        AppleRecoveryDiscovery(transport=transport, cancel=cancel_after_first).discover(_target())
+
+
+def test_discovery_parser_and_size_probe_fail_closed() -> None:
+    assert AppleRecoveryDiscovery._parse_key_values(b"\n") == {}
+    with pytest.raises(ArtifactDownloadError, match="invalid metadata"):
+        AppleRecoveryDiscovery._parse_key_values(b"aA: value\n")
+    with pytest.raises(ArtifactDownloadError, match="invalid metadata"):
+        AppleRecoveryDiscovery._parse_key_values(b"AP: \n")
+    with pytest.raises(ArtifactDownloadError, match="session cookie"):
+        AppleRecoveryDiscovery._session_cookie({"Set-Cookie": "other=value"})
+
+    class Response:
+        def __init__(self, headers: dict[str, str], url: str = "https://updates.cdn-apple.com/recovery/image.dmg") -> None:
+            self.headers = headers
+            self._url = url
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    discovery = AppleRecoveryDiscovery()
+    for headers in ({}, {"Content-Length": "invalid"}, {"Content-Length": "0"}, {"Content-Length": str(17 * 1024 * 1024 * 1024)}):
+        opener = unittest.mock.MagicMock()
+        opener.open.return_value = Response(headers)
+        with unittest.mock.patch("macloader.recovery.discovery.build_opener", return_value=opener):
+            assert discovery._asset_size("https://updates.cdn-apple.com/recovery/image.dmg", "opaque") is None
+
+    opener = unittest.mock.MagicMock()
+    opener.open.side_effect = OSError("network")
+    with unittest.mock.patch("macloader.recovery.discovery.build_opener", return_value=opener):
+        assert discovery._asset_size("https://updates.cdn-apple.com/recovery/image.dmg", "opaque") is None
+
+
+def test_discovery_transport_enforces_endpoint_and_response_limits() -> None:
+    discovery = AppleRecoveryDiscovery()
+    with pytest.raises(ArtifactDownloadError, match="outside the pinned Apple policy"):
+        discovery._transport("http://osrecovery.apple.com/", {}, b"")
+
+    class Response:
+        headers: dict[str, str] = {}
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def read(self, size: int) -> bytes:
+            return self.body[:size]
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    with unittest.mock.patch(
+        "macloader.recovery.discovery.urlopen",
+        return_value=Response(b"x" * (64 * 1024 + 1)),
+    ):
+        with pytest.raises(ArtifactDownloadError, match="bounded limit"):
+            discovery._transport("https://osrecovery.apple.com/", {}, b"")
+
+    with unittest.mock.patch("macloader.recovery.discovery.urlopen", side_effect=OSError("offline")):
+        with pytest.raises(ArtifactDownloadError, match="OSError"):
+            discovery._transport("https://osrecovery.apple.com/", {}, b"")
+
+
 def test_recovery_lock_rejects_stale_binding() -> None:
     digest = "a" * 64
     binding = RecoveryBinding(digest, "thinkpad-t480s", digest, digest, digest, digest, digest, digest)
@@ -158,6 +264,7 @@ def test_recovery_lock_round_trips_without_private_session_values(tmp_path: Path
         {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
         b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
     ))
+    assert result.product is not None
     digest = "f" * 64
     binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
     lock = service.lock(result, binding)
@@ -180,6 +287,110 @@ def test_recovery_service_blocks_unbounded_live_acquisition(tmp_path: Path) -> N
     binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
     with pytest.raises(ArtifactDownloadError, match="asset sizes"):
         service.acquire(result, binding, tmp_path)
+
+
+def test_recovery_service_rejects_stale_lock_bindings() -> None:
+    policy = load_recovery_policy()
+    service = RecoveryService(policy)
+    result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
+        {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
+        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
+    ))
+    base = RecoveryBinding(
+        policy.target.digest,
+        "thinkpad-t480s",
+        "a" * 64,
+        "b" * 64,
+        policy.digest,
+        "c" * 64,
+        "d" * 64,
+        "e" * 64,
+    )
+    with pytest.raises(ValueError, match="target"):
+        service.lock(result, replace(base, target_digest="f" * 64))
+    with pytest.raises(ValueError, match="policy"):
+        service.lock(result, replace(base, policy_digest="f" * 64))
+    assert result.product is not None
+    different_target = RecoveryTarget("sonoma", "macOS Sonoma", "14.0", "23F79")
+    different_product = replace(result.product, target=different_target)
+    different_result = replace(result, product=different_product)
+    with pytest.raises(ValueError, match="policy target"):
+        service.lock(different_result, base)
+
+
+def test_recovery_service_rejects_malformed_locks_and_unbounded_assets(tmp_path: Path) -> None:
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        RecoveryService.load_lock(malformed)
+    not_object = tmp_path / "list.json"
+    not_object.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="object"):
+        RecoveryService.load_lock(not_object)
+
+    policy = load_recovery_policy()
+    service = RecoveryService(policy)
+    product = RecoveryProduct(
+        policy.target,
+        "https://updates.cdn-apple.com/image",
+        "a" * 64,
+        None,
+        "https://updates.cdn-apple.com/chunklist",
+        "b" * 64,
+        1,
+        "<private>",
+        "<private>",
+    )
+    with pytest.raises(ArtifactDownloadError, match="bounded Recovery asset sizes"):
+        service._assets_for(product)
+
+
+def test_recovery_service_verify_binds_readback_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = load_recovery_policy()
+    service = RecoveryService(policy)
+    result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
+        {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
+        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
+    ))
+    assert result.product is not None
+    result = replace(result, product=replace(result.product, image_size_bytes=5))
+    binding = RecoveryBinding(
+        policy.target.digest,
+        "thinkpad-t480s",
+        "a" * 64,
+        "b" * 64,
+        policy.digest,
+        "c" * 64,
+        "d" * 64,
+        "e" * 64,
+    )
+    lock = service.lock(result, binding)
+    image = tmp_path / "image"
+    chunklist = tmp_path / "chunklist"
+    image.write_bytes(b"image")
+    chunklist.write_bytes(b"chunklist")
+    monkeypatch.setattr(service_module, "verify_apple_chunklist", lambda *_args: (1, 5))
+    evidence = service.verify(lock, image, chunklist)
+    assert evidence.verified_chunks == 1
+    monkeypatch.setattr(service_module, "verify_apple_chunklist", lambda *_args: (1, 4))
+    with pytest.raises(ChecksumMismatchError, match="image size"):
+        service.verify(lock, image, chunklist)
+
+
+def test_recovery_service_rejects_unsafe_metadata_destinations(tmp_path: Path) -> None:
+    policy = load_recovery_policy()
+    service = RecoveryService(policy)
+    file_path = tmp_path / "not-a-directory"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(ArtifactDownloadError, match="not a directory"):
+        service._assert_safe_directory(file_path)
+    try:
+        symlink = tmp_path / "symlink"
+        symlink.symlink_to(file_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
+    with pytest.raises(ArtifactDownloadError, match="symlinked directory"):
+        service._assert_safe_directory(symlink)
 
 
 def test_discovery_parser_and_target_guards() -> None:

@@ -106,7 +106,9 @@ def test_cli_live_probe_runs_without_error() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["probe", "--json"])
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    # Click keeps stderr separate on hosted Windows, where the live probe may
+    # emit a redacted timeout warning while still returning a valid snapshot.
+    data = json.loads(result.stdout)
     assert "snapshot_id" in data
     assert "manufacturer" in data
 

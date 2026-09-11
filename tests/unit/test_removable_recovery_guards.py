@@ -196,6 +196,11 @@ def test_writer_refuses_insufficient_capacity(safe_device: RemovableDevice) -> N
         writer.dry_run(small_disk, 1024 * 1024 * 1024)
 
 
+def test_write_plan_rejects_negative_required_bytes(safe_device: RemovableDevice) -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        WritePlan(safe_device, -1)
+
+
 # =========================================================================
 # 2. Source Directory & EFI Tree Validation
 # =========================================================================
@@ -568,6 +573,123 @@ def test_disposable_image_adapter_rejects_extra_payload_files(
     (target_image_dir / "EFI" / "unexpected.bin").write_bytes(b"unexpected")
 
     assert adapter.verify_readback(plan, valid_source_efi) is False
+
+
+def test_disposable_image_adapter_reports_each_readback_structure_failure(
+    valid_source_efi: Path, tmp_path: Path
+) -> None:
+    missing_target = DisposableImageAdapter(tmp_path / "missing")
+    missing_plan = WritePlan(missing_target.create_mock_device(), 1024)
+    assert missing_target.verify_readback(missing_plan, valid_source_efi) is False
+
+    empty_target = tmp_path / "empty"
+    empty_target.mkdir()
+    empty_adapter = DisposableImageAdapter(empty_target)
+    assert empty_adapter.verify_readback(missing_plan, valid_source_efi) is False
+
+    marker_target = tmp_path / "marker"
+    marker_adapter = DisposableImageAdapter(marker_target)
+    marker_plan = WritePlan(marker_adapter.create_mock_device(), 1024)
+    marker_adapter.write(marker_plan, valid_source_efi)
+    marker_adapter.invalidate(marker_plan, "interrupted")
+    assert marker_adapter.verify_readback(marker_plan, valid_source_efi) is False
+
+    partial_target = tmp_path / "partial"
+    partial_adapter = DisposableImageAdapter(partial_target)
+    partial_plan = WritePlan(partial_adapter.create_mock_device(), 1024)
+    partial_adapter.write(partial_plan, valid_source_efi)
+    (partial_target / "payload.part").mkdir()
+    assert partial_adapter.verify_readback(partial_plan, valid_source_efi) is False
+
+    wrong_partition_target = tmp_path / "wrong-partition"
+    wrong_partition_adapter = DisposableImageAdapter(wrong_partition_target)
+    wrong_partition_plan = WritePlan(wrong_partition_adapter.create_mock_device(), 1024)
+    wrong_partition_adapter.write(wrong_partition_plan, valid_source_efi)
+    (wrong_partition_target / "PARTITIONS.txt").write_text("GPT\nEFI", encoding="utf-8")
+    assert wrong_partition_adapter.verify_readback(wrong_partition_plan, valid_source_efi) is False
+
+    corrupt_target = tmp_path / "corrupt"
+    corrupt_adapter = DisposableImageAdapter(corrupt_target)
+    corrupt_plan = WritePlan(corrupt_adapter.create_mock_device(), 1024)
+    corrupt_adapter.write(corrupt_plan, valid_source_efi)
+    boot_file = corrupt_target / "EFI" / "BOOT" / "BOOTx64.efi"
+    original_boot = boot_file.read_bytes()
+    boot_file.write_bytes(original_boot + b"size-change")
+    assert corrupt_adapter.verify_readback(corrupt_plan, valid_source_efi) is False
+    boot_file.write_bytes(b"x" * len(original_boot))
+    assert corrupt_adapter.verify_readback(corrupt_plan, valid_source_efi) is False
+
+
+def test_disposable_image_adapter_supports_efi_only_source(
+    valid_source_efi: Path, tmp_path: Path
+) -> None:
+    efi_only = tmp_path / "efi-only"
+    shutil.copytree(valid_source_efi / "EFI", efi_only / "EFI")
+    target = tmp_path / "efi-only-target"
+    adapter = DisposableImageAdapter(target)
+    plan = WritePlan(adapter.create_mock_device(), 1024)
+    adapter.write(plan, efi_only)
+    assert adapter.verify_readback(plan, efi_only) is True
+
+
+def test_writer_reports_progress_and_cancels_before_destructive_io(
+    valid_source_efi: Path, safe_device: RemovableDevice, qualified_bindings: MediaBindings, tmp_path: Path
+) -> None:
+    target = tmp_path / "progress-target"
+    adapter = DisposableImageAdapter(target)
+    progress: list[tuple[int, int]] = []
+    writer = RemovableMediaWriter(
+        destructive_write=adapter.write,
+        readback_verifier=adapter.verify_readback,
+    )
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    writer.write(plan, valid_source_efi, confirmation(plan), progress=lambda done, total: progress.append((done, total)))
+    assert progress[0] == (0, progress[0][1])
+    assert progress[-1] == (progress[-1][1], progress[-1][1])
+
+    writes: list[bool] = []
+    cancelled_writer = RemovableMediaWriter(
+        destructive_write=lambda _plan, _source: writes.append(True),
+        readback_verifier=lambda _plan, _source: True,
+    )
+    cancelled_plan = cancelled_writer.dry_run(
+        safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings
+    )
+    with pytest.raises(UnsafeRemovableTarget, match="before source preparation"):
+        cancelled_writer.write(cancelled_plan, valid_source_efi, confirmation(cancelled_plan), cancel=lambda: True)
+    assert writes == []
+
+
+def test_writer_reports_invalidation_failure_without_hiding_readback_failure(
+    valid_source_efi: Path, safe_device: RemovableDevice, qualified_bindings: MediaBindings
+) -> None:
+    def fail_invalidation(_plan: WritePlan, _reason: str) -> None:
+        raise OSError("invalidation unavailable")
+
+    writer = RemovableMediaWriter(
+        destructive_write=lambda _plan, _source: None,
+        readback_verifier=lambda _plan, _source: False,
+        invalidator=fail_invalidation,
+    )
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    with pytest.raises(UnsafeRemovableTarget, match="invalidation failed: invalidation unavailable"):
+        writer.write(plan, valid_source_efi, confirmation(plan))
+
+
+def test_writer_reports_device_reenumeration_failure(
+    valid_source_efi: Path, safe_device: RemovableDevice, qualified_bindings: MediaBindings
+) -> None:
+    def fail_enumeration() -> list[RemovableDevice]:
+        raise OSError("device query failed")
+
+    writer = RemovableMediaWriter(
+        destructive_write=lambda _plan, _source: None,
+        enumerator=fail_enumeration,
+        readback_verifier=lambda _plan, _source: True,
+    )
+    plan = writer.dry_run(safe_device, 1024, source_dir=valid_source_efi, bindings=qualified_bindings)
+    with pytest.raises(UnsafeRemovableTarget, match="Device re-enumeration failed"):
+        writer.write(plan, valid_source_efi, confirmation(plan))
 
 
 # =========================================================================
