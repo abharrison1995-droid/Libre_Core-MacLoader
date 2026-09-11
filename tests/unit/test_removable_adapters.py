@@ -14,6 +14,7 @@ from macloader.removable import (
     WindowsRemovableAdapter,
 )
 from macloader.removable.writer import RemovableMediaWriter
+import macloader.removable.writer as writer_module
 
 
 QUALIFIED = MediaBindings("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64, "f" * 64)
@@ -85,7 +86,10 @@ class FakeWindowsBackend:
         self.events.append("remount")
 
 
-def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path) -> None:
+def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercise the platform-specific no-follow snapshot branch on every host;
+    # the real Windows run covers the native filesystem implementation too.
+    monkeypatch.setattr(writer_module, "_WINDOWS_PLATFORM", True)
     backend = FakeWindowsBackend()
     adapter = WindowsRemovableAdapter(
         runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',

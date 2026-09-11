@@ -116,8 +116,6 @@ class IdentityService:
             path.chmod(0o600)
         except OSError as exc:
             raise IdentityServiceError(f"Unable to protect private identity storage: {exc}") from exc
-        if path.stat().st_mode & 0o077:
-            raise IdentityServiceError("Private identity storage permissions are too broad")
         if path.is_file() and os.name == "nt":
             account = getpass.getuser()
             result = subprocess.run(
@@ -126,6 +124,8 @@ class IdentityService:
             )
             if result.returncode != 0:
                 raise IdentityServiceError("Unable to apply private Windows ACL")
+        elif path.stat().st_mode & 0o077:
+            raise IdentityServiceError("Private identity storage permissions are too broad")
         return PrivateIdentity(dict(values), ref, canonical_json_digest(values))
 
     def reuse(self, reference: IdentityReference) -> PrivateIdentity:

@@ -209,6 +209,7 @@ MAX_MEDIA_FILES = 10_000
 MAX_MEDIA_FILE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_MEDIA_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
 COPY_CHUNK_BYTES = 1024 * 1024
+_WINDOWS_PLATFORM = os.name == "nt"
 
 
 def _is_sha256(value: str) -> bool:
@@ -535,6 +536,26 @@ class RemovableMediaWriter:
             raise UnsafeRemovableTarget(f"Source tree changed to a symlink: {source.name}")
         if stat.S_ISDIR(source_stat.st_mode):
             destination.mkdir(parents=True, exist_ok=True)
+            if _WINDOWS_PLATFORM:
+                # Windows does not provide the POSIX /proc/self/fd and
+                # O_NOFOLLOW/O_DIRECTORY combination used below.  Enumerate
+                # without following reparse points, recheck each entry, and
+                # open regular files only after the boundary checks.  The
+                # source snapshot remains disposable and is never used as a
+                # device identity.
+                try:
+                    entries = list(os.scandir(source))
+                except OSError as exc:
+                    raise UnsafeRemovableTarget(f"Unable to read media source directory: {source.name}") from exc
+                for entry in entries:
+                    entry_path = Path(entry.path)
+                    if entry.is_symlink():
+                        raise UnsafeRemovableTarget(f"Source tree changed to a symlink: {entry.name}")
+                    entry_stat = os.lstat(entry_path)
+                    if stat.S_ISLNK(entry_stat.st_mode):
+                        raise UnsafeRemovableTarget(f"Source tree changed to a symlink: {entry.name}")
+                    cls._copy_no_follow(entry_path, destination / entry.name)
+                return
             directory_flags = os.O_RDONLY
             if hasattr(os, "O_DIRECTORY"):
                 directory_flags |= os.O_DIRECTORY

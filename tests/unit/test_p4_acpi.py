@@ -1,6 +1,7 @@
 """Machine-bound ACPI validation failure coverage without private fixtures."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -56,8 +57,32 @@ def test_acpi_capture_requires_exact_table_set(tmp_path: Path) -> None:
 
 
 def _fake_iasl(path: Path) -> str:
-    path.write_text(
-        """#!/bin/sh
+    if os.name == "nt":
+        path = path.with_suffix(".cmd")
+        path.write_text(
+            """@echo off
+if "%~1" == "-v" (
+  echo ASL+ Optimizing Compiler/Disassembler version 20260408
+  exit /b 0
+)
+if "%~1" == "-d" (
+  > "%~3.dsl" echo DefinitionBlock ("", "SSDT", 2, "LENOVO", "P4TEST", 1) {}
+  echo disassembled
+  exit /b 0
+)
+if "%~1" == "-tc" (
+  > "%~3.aml" <nul set /p "=AML"
+  echo compiled with 1 Warning
+  exit /b 0
+)
+exit /b 2
+""",
+            encoding="utf-8",
+            newline="\r\n",
+        )
+    else:
+        path.write_text(
+            """#!/bin/sh
 if [ "$1" = "-v" ]; then
   echo "ASL+ Optimizing Compiler/Disassembler version 20260408"
   exit 0
@@ -74,8 +99,8 @@ if [ "$1" = "-tc" ]; then
 fi
 exit 2
 """,
-        encoding="utf-8",
-    )
+            encoding="utf-8",
+        )
     path.chmod(0o700)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -90,6 +115,8 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: P
         signature = "DSDT" if name == "dsdt.dat" else "SSDT"
         (table_dir / name).write_bytes(_table(signature, name.encode("ascii")))
 
+    if os.name == "nt":
+        tool = tool.with_suffix(".cmd")
     processor = AcpiProcessor(tool, tool_digest, tmp_path / "work")
     output = tmp_path / "output" / "ACPI"
     result = processor.build(capture, output, expected_bios_binding="N22ET85W-1.62")
@@ -121,6 +148,8 @@ def test_acpi_processor_rejects_missing_capture_and_untrusted_tool(tmp_path: Pat
 
     tool = tmp_path / "iasl"
     _fake_iasl(tool)
+    if os.name == "nt":
+        tool = tool.with_suffix(".cmd")
     wrong_digest = AcpiProcessor(tool, "0" * 64, tmp_path / "work2")
     with pytest.raises(BuildPlanError, match="digest"):
         wrong_digest.build(tmp_path / "capture", tmp_path / "output", expected_bios_binding="bios")

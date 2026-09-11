@@ -46,6 +46,8 @@ _APPLE_EFI_ROM_PUBLIC_KEY = int(
 _CHUNKLIST_HEADER = struct.Struct("<4sIBBBxQQQ")
 _CHUNK = struct.Struct("<I32s")
 _MAX_CHUNKS = 2_000_000
+DirectoryHandle = int | Path
+_WINDOWS_PLATFORM = os.name == "nt"
 
 
 def is_approved_recovery_host(host: Optional[str]) -> bool:
@@ -130,7 +132,7 @@ class RecoveryAcquirer:
 
         part: Optional[Path] = None
         metadata: Optional[Path] = None
-        resume_directory_fd: Optional[int] = None
+        resume_directory_fd: Optional[DirectoryHandle] = None
         part_fd: Optional[int] = None
         metadata_fd: Optional[int] = None
         try:
@@ -292,12 +294,14 @@ class RecoveryAcquirer:
                 part.unlink(missing_ok=True)
             raise ArtifactDownloadError(f"Unexpected error acquiring Recovery asset: {e}") from e
         finally:
-            for candidate in (part_fd, metadata_fd, resume_directory_fd):
+            for candidate in (part_fd, metadata_fd):
                 if candidate is not None:
                     try:
                         os.close(candidate)
                     except OSError:
                         pass
+            if resume_directory_fd is not None:
+                self._close_directory(resume_directory_fd)
 
     @staticmethod
     def _resume_paths(asset: RecoveryAsset, destination: Path) -> tuple[Path, Path]:
@@ -314,7 +318,16 @@ class RecoveryAcquirer:
         return bool(data == {"sha256": asset.sha256.lower(), "size_bytes": asset.size_bytes})
 
     @staticmethod
-    def _resume_metadata_matches_fd(directory_fd: int, name: str, asset: RecoveryAsset) -> bool:
+    def _resume_metadata_matches_fd(directory_fd: DirectoryHandle, name: str, asset: RecoveryAsset) -> bool:
+        if isinstance(directory_fd, Path):
+            metadata = directory_fd / name
+            try:
+                if metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size > 16 * 1024:
+                    return False
+                data = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, UnicodeError):
+                return False
+            return bool(data == {"sha256": asset.sha256.lower(), "size_bytes": asset.size_bytes})
         try:
             flags = os.O_RDONLY | os.O_NOFOLLOW
             if hasattr(os, "O_NONBLOCK"):
@@ -332,10 +345,16 @@ class RecoveryAcquirer:
         return bool(data == {"sha256": asset.sha256.lower(), "size_bytes": asset.size_bytes})
 
     @staticmethod
-    def _open_resume_fd(directory_fd: int, name: str, flags: int) -> int:
+    def _open_resume_fd(directory_fd: DirectoryHandle, name: str, flags: int) -> int:
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
-        fd = os.open(name, flags | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        if isinstance(directory_fd, Path):
+            path = directory_fd / name
+            if path.is_symlink():
+                raise ArtifactDownloadError("Recovery resume file must not be a symlink")
+            fd = os.open(path, flags, 0o600)
+        else:
+            fd = os.open(name, flags | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
             raise ArtifactDownloadError("Recovery resume file must be a regular file")
@@ -443,12 +462,12 @@ class RecoveryAcquirer:
                                 entry.unlink()
                         staging.rmdir()
                 finally:
-                    os.close(staging_directory_fd)
+                    self._close_directory(staging_directory_fd)
             finally:
                 if not use_resume:
                     shutil.rmtree(staging, ignore_errors=False)
         finally:
-            os.close(destination_directory_fd)
+            self._close_directory(destination_directory_fd)
         evidence = RecoveryEvidence(
             lock_digest=lock_digest,
             image_digest=image.sha256.lower(),
@@ -461,7 +480,7 @@ class RecoveryAcquirer:
         return RecoveryBundle(image_destination, chunklist_destination, evidence)
 
     @staticmethod
-    def _publish_owned(part: Path, destination: Path, destination_directory_fd: Optional[int] = None) -> None:
+    def _publish_owned(part: Path, destination: Path, destination_directory_fd: Optional[DirectoryHandle] = None) -> None:
         """Publish inside a rechecked directory without following it."""
         RecoveryAcquirer._require_safe_publication()
         RecoveryAcquirer._reject_symlink_ancestors(part.parent)
@@ -470,10 +489,23 @@ class RecoveryAcquirer:
             raise ArtifactDownloadError("Recovery temporary asset must not be a symlink")
         if destination.is_symlink():
             raise ArtifactDownloadError("Recovery destination must not be a symlink")
+        if _WINDOWS_PLATFORM:
+            # Windows has no dir_fd/O_NOFOLLOW equivalent in the stdlib.  The
+            # private staging and destination directories are rechecked for
+            # symlink boundaries immediately before an atomic replace; the
+            # destination is never opened or traversed as a volume path.
+            if destination_directory_fd is not None and not isinstance(destination_directory_fd, Path):
+                raise ArtifactDownloadError("Recovery publication directory handle is invalid on Windows")
+            if destination.exists() and destination.is_symlink():
+                raise ArtifactDownloadError("Recovery destination must not be a symlink")
+            os.replace(part, destination)
+            return
         source_directory_fd = RecoveryAcquirer._open_owned_directory(part.parent)
         close_destination_fd = destination_directory_fd is None
         if destination_directory_fd is None:
             destination_directory_fd = RecoveryAcquirer._open_owned_directory(destination.parent)
+        assert isinstance(source_directory_fd, int)
+        assert isinstance(destination_directory_fd, int)
         try:
             os.rename(
                 part.name,
@@ -488,19 +520,38 @@ class RecoveryAcquirer:
 
     @staticmethod
     def _require_safe_publication() -> None:
-        if os.name == "nt" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        if _WINDOWS_PLATFORM:
+            # Windows uses validated private directories plus atomic
+            # os.replace publication.  POSIX dir_fd primitives are not
+            # available there, so all Windows helpers fail closed on symlink
+            # boundaries instead of pretending those primitives exist.
+            return
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
             raise ArtifactDownloadError("Safe Recovery publication primitives are unavailable on this platform")
 
     @staticmethod
-    def _open_owned_directory(path: Path) -> int:
+    def _close_directory(directory: DirectoryHandle) -> None:
+        if isinstance(directory, Path):
+            return
+        os.close(directory)
+
+    @staticmethod
+    def _open_owned_directory(path: Path) -> DirectoryHandle:
         RecoveryAcquirer._reject_symlink_ancestors(path)
+        if _WINDOWS_PLATFORM:
+            if path.is_symlink() or not path.is_dir():
+                raise ArtifactDownloadError("Recovery publication directory is not safely accessible")
+            return path
         try:
             return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError as exc:
             raise ArtifactDownloadError("Recovery publication directory is not safely accessible") from exc
 
     @staticmethod
-    def _entry_exists(directory_fd: int, name: str) -> bool:
+    def _entry_exists(directory_fd: DirectoryHandle, name: str) -> bool:
+        if isinstance(directory_fd, Path):
+            entry = directory_fd / name
+            return entry.exists() or entry.is_symlink()
         try:
             os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -508,11 +559,27 @@ class RecoveryAcquirer:
         return True
 
     @staticmethod
-    def _rename_relative(source: str, destination: str, source_directory_fd: int, destination_directory_fd: int) -> None:
+    def _rename_relative(
+        source: str, destination: str, source_directory_fd: DirectoryHandle, destination_directory_fd: DirectoryHandle
+    ) -> None:
+        if isinstance(source_directory_fd, Path) and isinstance(destination_directory_fd, Path):
+            source_path = source_directory_fd / source
+            destination_path = destination_directory_fd / destination
+            if source_path.is_symlink() or destination_path.is_symlink():
+                raise ArtifactDownloadError("Recovery publication entry must not be a symlink")
+            os.rename(source_path, destination_path)
+            return
+        assert isinstance(source_directory_fd, int)
+        assert isinstance(destination_directory_fd, int)
         os.rename(source, destination, src_dir_fd=source_directory_fd, dst_dir_fd=destination_directory_fd)
 
     @staticmethod
-    def _unlink_relative(directory_fd: int, name: str) -> None:
+    def _unlink_relative(directory_fd: DirectoryHandle, name: str) -> None:
+        if isinstance(directory_fd, Path):
+            path = directory_fd / name
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+            return
         try:
             os.unlink(name, dir_fd=directory_fd)
         except FileNotFoundError:

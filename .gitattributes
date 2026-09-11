@@ -1,0 +1,2 @@
+# Pinned license digests are defined over canonical LF bytes on every host.
+macloader/database/data/licenses/*.txt text eol=lf

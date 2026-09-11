@@ -567,6 +567,48 @@ def test_recovery_bundle_publishes_only_after_verification(tmp_path: Path, monke
     assert bundle.evidence.verified_chunks == 1
 
 
+def test_recovery_windows_bundle_uses_path_transaction_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_payload = b"windows image"
+    chunklist_payload = b"windows chunklist"
+    image_destination = tmp_path / "Recovery.dmg"
+    chunklist_destination = tmp_path / "Recovery.chunklist"
+    image_destination.write_bytes(b"old image")
+    chunklist_destination.write_bytes(b"old chunklist")
+    image = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/image", hashlib.sha256(image_payload).hexdigest(), len(image_payload))
+    chunklist = RecoveryAsset("InstallAssistant", "24A335", "https://osrecovery.apple.com/chunklist", hashlib.sha256(chunklist_payload).hexdigest(), len(chunklist_payload))
+
+    def fake_download(self: RecoveryAcquirer, asset: RecoveryAsset, destination: Path) -> Path:
+        destination.write_bytes(image_payload if asset is image else chunklist_payload)
+        return destination
+
+    monkeypatch.setattr(acquirer_module, "_WINDOWS_PLATFORM", True)
+    monkeypatch.setattr(RecoveryAcquirer, "download", fake_download)
+    monkeypatch.setattr("macloader.recovery.acquirer.verify_apple_chunklist", lambda *_args: (1, len(image_payload)))
+    bundle = RecoveryAcquirer().download_bundle(
+        image, chunklist, image_destination, chunklist_destination, "d" * 64
+    )
+    assert bundle.image_path.read_bytes() == image_payload
+    assert bundle.chunklist_path.read_bytes() == chunklist_payload
+
+
+def test_recovery_windows_resume_helpers_reject_symlinks_and_non_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(acquirer_module, "_WINDOWS_PLATFORM", True)
+    directory = tmp_path / "staging"
+    directory.mkdir()
+    asset = _asset(b"resume")
+    partial, metadata = RecoveryAcquirer._resume_paths(asset, directory / "Recovery.dmg")
+    partial.write_bytes(b"resume")
+    RecoveryAcquirer._write_resume_metadata(metadata, asset)
+    assert RecoveryAcquirer._resume_metadata_matches_fd(directory, metadata.name, asset) is True
+    resume_fd = RecoveryAcquirer._open_resume_fd(directory, partial.name, os.O_RDWR)
+    os.close(resume_fd)
+    assert RecoveryAcquirer._open_owned_directory(directory) == directory
+    with pytest.raises(ArtifactDownloadError, match="not safely accessible"):
+        RecoveryAcquirer._open_owned_directory(tmp_path / "missing")
+
+
 def test_recovery_verifies_signed_chunklist_encoding_with_deterministic_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise the OpenCore CNKL RSA encoding without storing a private key.
 
@@ -640,13 +682,14 @@ def test_recovery_bundle_rolls_back_if_second_publication_fails(tmp_path: Path, 
     assert chunklist_destination.read_bytes() == b"original chunklist"
 
 
-def test_recovery_publication_fails_closed_without_no_follow_primitives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recovery_publication_uses_validated_windows_atomic_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = b"payload"
     asset = _asset(payload)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(acquirer_module, "_WINDOWS_PLATFORM", True)
 
     def transport(_url: str, destination: Path) -> None:
         destination.write_bytes(payload)
 
-    with pytest.raises(ArtifactDownloadError, match="Safe Recovery publication primitives"):
-        RecoveryAcquirer(transport=transport).download(asset, tmp_path / "Recovery.dmg")
+    destination = tmp_path / "Recovery.dmg"
+    assert RecoveryAcquirer(transport=transport).download(asset, destination) == destination
+    assert destination.read_bytes() == payload
