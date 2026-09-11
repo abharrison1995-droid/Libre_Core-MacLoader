@@ -66,12 +66,12 @@ if "%~1" == "-v" (
   exit /b 0
 )
 if "%~1" == "-d" (
-  > "%~3.dsl" echo DefinitionBlock ("", "SSDT", 2, "LENOVO", "P4TEST", 1) {}
+  echo DefinitionBlock ("", "SSDT", 2, "LENOVO", "P4TEST", 1) {} > "%~3.dsl"
   echo disassembled
   exit /b 0
 )
 if "%~1" == "-tc" (
-  > "%~3.aml" <nul set /p "=AML"
+  <nul set /p "=AML" > "%~3.aml"
   echo compiled with 1 Warning
   exit /b 0
 )

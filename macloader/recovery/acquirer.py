@@ -266,6 +266,15 @@ class RecoveryAcquirer:
                 raise ArtifactDownloadError("Recovery temporary file became a symlink")
             if digest.lower() != asset.sha256.lower():
                 raise ChecksumMismatchError(f"Recovery checksum mismatch: expected {asset.sha256}, got {digest}")
+            if _WINDOWS_PLATFORM:
+                # Windows does not permit replacing an open file.  Close all
+                # resumable handles only after size/hash validation and before
+                # the atomic publication boundary.
+                for candidate in (part_fd, metadata_fd):
+                    if candidate is not None:
+                        os.close(candidate)
+                part_fd = None
+                metadata_fd = None
             self._publish_owned(part, destination)
             if metadata is not None:
                 if resume_directory_fd is not None:

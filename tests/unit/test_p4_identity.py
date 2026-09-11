@@ -1,6 +1,7 @@
 """Private SMBIOS identity lifecycle guards."""
 
 from pathlib import Path
+import os
 
 import pytest
 
@@ -16,7 +17,8 @@ def test_fake_identity_is_explicitly_test_only_and_round_trips_privately(tmp_pat
     stored = service.store(values)
     assert stored.storage_ref.endswith(".json")
     assert stored.storage_ref not in values.values()
-    assert (tmp_path / stored.storage_ref).stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert (tmp_path / stored.storage_ref).stat().st_mode & 0o077 == 0
     reused = service.reuse(IdentityReference("0.1", stored.storage_ref, redacted=True))
     assert reused.values == values
     assert service.redact("identity=" + values["SystemSerialNumber"], values).endswith("<redacted>")
