@@ -56,6 +56,19 @@ def test_acpi_capture_requires_exact_table_set(tmp_path: Path) -> None:
         AcpiProcessor._find_tables(table_dir)
 
 
+def test_acpi_table_symlink_is_not_machine_bound_evidence(tmp_path: Path) -> None:
+    table_dir = tmp_path / "PRIVATE-ACPI"
+    table_dir.mkdir()
+    outside = tmp_path / "outside.dat"
+    outside.write_bytes(_table())
+    try:
+        (table_dir / "dsdt.dat").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
+    with pytest.raises(BuildPlanError, match="missing or unsafe"):
+        AcpiProcessor._validate_table(table_dir / "dsdt.dat")
+
+
 def _fake_iasl(path: Path) -> str:
     if os.name == "nt":
         runner = path.with_name("fake_iasl_runner.py")

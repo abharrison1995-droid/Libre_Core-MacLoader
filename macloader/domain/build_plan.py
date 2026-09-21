@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import uuid
 
 from macloader.domain.compatibility import CompatibilityState
@@ -37,6 +37,9 @@ class BuildPlan:
     hardware_content_digest: str = ""
     evidence_digests: List[str] = field(default_factory=list)
     profile_bindings: List[str] = field(default_factory=list)
+    effective_option_selections: List[List[str]] = field(default_factory=list)
+    effective_profile_digest: str = ""
+    effective_audio_layout: Optional[int] = None
 
     def __post_init__(self) -> None:
         """Derive readiness from the validated policy inputs at the boundary."""
@@ -70,6 +73,9 @@ class BuildPlan:
             "hardware_content_digest": self.hardware_content_digest,
             "evidence_digests": list(self.evidence_digests),
             "profile_bindings": list(self.profile_bindings),
+            "effective_option_selections": [list(item) for item in self.effective_option_selections],
+            "effective_profile_digest": self.effective_profile_digest,
+            "effective_audio_layout": self.effective_audio_layout,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -128,4 +134,7 @@ class BuildPlan:
             hardware_content_digest=str(data.get("hardware_content_digest", "")),
             evidence_digests=[str(item) for item in data.get("evidence_digests", [])],
             profile_bindings=[str(item) for item in data.get("profile_bindings", [])],
+            effective_option_selections=[list(item) for item in data.get("effective_option_selections", [])],
+            effective_profile_digest=str(data.get("effective_profile_digest", "")),
+            effective_audio_layout=(int(data["effective_audio_layout"]) if data.get("effective_audio_layout") is not None else None),
         )

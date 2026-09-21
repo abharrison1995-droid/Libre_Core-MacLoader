@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
+import tempfile
 import uuid
 from typing import Dict, Optional
 
@@ -35,8 +37,91 @@ class IdentityService:
     """Keep identity values private and expose only opaque references."""
 
     def __init__(self, store_dir: Path, identity_tool: Optional[Path] = None) -> None:
-        self.store_dir = Path(store_dir).expanduser().resolve()
-        self.identity_tool = identity_tool.resolve() if identity_tool else None
+        # Keep the lexical path so symlinked roots/ancestors can be rejected;
+        # resolving here would silently turn an unsafe destination into an
+        # apparently safe one.
+        self.store_dir = Path(store_dir).expanduser().absolute()
+        self.identity_tool = identity_tool.absolute() if identity_tool else None
+
+    def _assert_private_root(self) -> None:
+        for ancestor in (self.store_dir, *self.store_dir.parents):
+            if ancestor.exists() and ancestor.is_symlink():
+                raise IdentityServiceError("Private identity storage path contains a symlink")
+        if self.store_dir.exists() and not self.store_dir.is_dir():
+            raise IdentityServiceError("Private identity storage root is not a directory")
+        self.store_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.store_dir.is_symlink():
+            raise IdentityServiceError("Private identity storage root must not be a symlink")
+        if os.name != "nt" and self.store_dir.stat().st_mode & 0o077:
+            try:
+                self.store_dir.chmod(0o700)
+            except OSError as exc:
+                raise IdentityServiceError(f"Unable to protect private identity directory: {exc}") from exc
+            if self.store_dir.stat().st_mode & 0o077:
+                raise IdentityServiceError("Private identity storage directory permissions are too broad")
+        if os.name == "nt":
+            account = getpass.getuser()
+            try:
+                result = subprocess.run(
+                    [
+                        "icacls", str(self.store_dir), "/inheritance:r", "/grant:r",
+                        f"{account}:(OI)(CI)F",
+                    ],
+                    capture_output=True, text=True, check=False,
+                )
+            except OSError as exc:
+                raise IdentityServiceError("Unable to protect private identity Windows ACL") from exc
+            if result.returncode != 0:
+                raise IdentityServiceError("Unable to protect private identity Windows ACL")
+            self._assert_private_acl(self.store_dir)
+
+    @staticmethod
+    def _assert_private_acl(path: Path) -> None:
+        try:
+            result = subprocess.run(
+                ["icacls", str(path)], capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            raise IdentityServiceError("Unable to inspect private identity Windows ACL") from exc
+        if result.returncode != 0:
+            raise IdentityServiceError("Unable to inspect private identity Windows ACL")
+        acl = result.stdout.casefold()
+        if "(i)" in acl or any(
+            principal in acl
+            for principal in ("everyone:", "users:", "authenticated users:")
+        ):
+            raise IdentityServiceError("Private identity Windows ACL is too broad or inherited")
+
+    @staticmethod
+    def _assert_private_file(path: Path) -> None:
+        if path.is_symlink() or not path.is_file():
+            raise IdentityServiceError("Private identity reference is missing or unsafe")
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise IdentityServiceError("Private identity permissions are too broad")
+        if os.name == "nt":
+            IdentityService._assert_private_acl(path)
+
+    @staticmethod
+    def _read_private_values(path: Path) -> Dict[str, str]:
+        """Read through a regular no-follow descriptor after boundary checks."""
+        fd: Optional[int] = None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode) or status.st_size > 64 * 1024:
+                raise IdentityServiceError("Private identity reference is missing or unsafe")
+            data = json.loads(os.read(fd, status.st_size).decode("utf-8"))
+        except IdentityServiceError:
+            raise
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise IdentityServiceError(f"Private identity cannot be read: {exc}") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+            raise IdentityServiceError("Private identity has an invalid shape")
+        return data
 
     @staticmethod
     def validate(values: Dict[str, str]) -> None:
@@ -102,45 +187,63 @@ class IdentityService:
         self.validate(values)
         return values
 
-    def store(self, values: Dict[str, str], *, storage_ref: Optional[str] = None) -> PrivateIdentity:
-        self.validate(values)
+    def store(
+        self,
+        values: Dict[str, str],
+        *,
+        storage_ref: Optional[str] = None,
+        validate_values: bool = True,
+    ) -> PrivateIdentity:
+        if validate_values:
+            self.validate(values)
         ref = storage_ref or f"{canonical_json_digest(values)}.json"
         if Path(ref).name != ref or not ref.endswith(".json"):
             raise IdentityServiceError("Private identity storage reference must be a simple JSON filename")
+        self._assert_private_root()
         path = self.store_dir / ref
         if path.is_symlink():
             raise IdentityServiceError("Private identity path must not be a symlink")
-        self.store_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(values, sort_keys=True, indent=2), encoding="utf-8")
+        temporary: Optional[Path] = None
         try:
-            path.chmod(0o600)
+            fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=self.store_dir)
+            temporary = Path(name)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(values, sort_keys=True, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name == "nt":
+                account = getpass.getuser()
+                result = subprocess.run(
+                    ["icacls", str(temporary), "/inheritance:r", "/grant:r", f"{account}:(R,W)"],
+                    capture_output=True, text=True, check=False,
+                )
+                if result.returncode != 0:
+                    raise IdentityServiceError("Unable to apply private Windows ACL before publication")
+            self._assert_private_root()
+            if path.is_symlink():
+                raise IdentityServiceError("Private identity path became a symlink")
+            os.replace(temporary, path)
+            temporary = None
         except OSError as exc:
             raise IdentityServiceError(f"Unable to protect private identity storage: {exc}") from exc
-        if path.is_file() and os.name == "nt":
-            account = getpass.getuser()
-            result = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:(R,W)"],
-                capture_output=True, text=True, check=False,
-            )
-            if result.returncode != 0:
-                raise IdentityServiceError("Unable to apply private Windows ACL")
-        elif path.stat().st_mode & 0o077:
-            raise IdentityServiceError("Private identity storage permissions are too broad")
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        self._assert_private_file(path)
         return PrivateIdentity(dict(values), ref, canonical_json_digest(values))
 
     def reuse(self, reference: IdentityReference) -> PrivateIdentity:
         if not reference.redacted or Path(reference.storage_ref).name != reference.storage_ref:
             raise IdentityServiceError("Identity reference is not a redacted local filename")
         path = self.store_dir / reference.storage_ref
+        self._assert_private_root()
         if path.is_symlink() or not path.is_file():
             raise IdentityServiceError("Private identity reference is missing or unsafe")
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise IdentityServiceError(f"Private identity cannot be read: {exc}") from exc
-        if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
-            raise IdentityServiceError("Private identity has an invalid shape")
+        data = self._read_private_values(path)
         self.validate(data)
+        self._assert_private_file(path)
         return PrivateIdentity(data, reference.storage_ref, canonical_json_digest(data))
 
     def reference_for(self, private: PrivateIdentity) -> IdentityReference:

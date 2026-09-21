@@ -2,6 +2,8 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 import pytest
 from click.testing import CliRunner
 
@@ -9,6 +11,7 @@ from macloader.ui.cli import cli
 from macloader.domain.recovery import RecoveryState, RecoveryTarget
 from macloader.recovery.discovery import RecoveryDiscoveryResult
 from macloader.orchestrator import Orchestrator
+from macloader.exceptions import BuildPlanError
 import macloader.workflow.service as workflow_service_module
 from macloader.evidence.usb import UsbEvidenceSession, UsbPortObservation
 
@@ -198,6 +201,78 @@ def test_cli_config_new_and_check_use_shared_workflow_service(
     checked_data = json.loads(checked.output)
     assert checked_data["configuration"]["configuration_id"] == configuration_id
     assert checked_data["plan"]["hardware_snapshot_id"] == data["snapshot"]["snapshot_id"]
+
+
+def test_cli_build_from_configuration_uses_shared_efi_preparation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, t480s_baseline_fixture: Path
+) -> None:
+    monkeypatch.setattr(workflow_service_module, "DEFAULT_WORKSPACE_DIR", tmp_path / "workspace")
+    created = CliRunner().invoke(cli, ["config", "new", "--fixture", str(t480s_baseline_fixture), "--json"])
+    assert created.exit_code == 0, created.output
+    configuration_id = json.loads(created.output)["configuration"]["configuration_id"]
+    captured: dict[str, Any] = {}
+
+    def fake_build(
+        self: workflow_service_module.WorkflowService,
+        configuration: Any,
+        snapshot: Any,
+        output: Path,
+        **kwargs: Any,
+    ) -> Any:
+        captured.update({"configuration": configuration, "snapshot": snapshot, "output": output, **kwargs})
+        return SimpleNamespace(
+            validation=SimpleNamespace(status="STRUCTURAL_ONLY"),
+            output_dir=Path(output),
+            manifest=SimpleNamespace(to_dict=lambda: {"source": "shared-workflow"}),
+        )
+
+    monkeypatch.setattr(workflow_service_module.WorkflowService, "build_efi_preview", fake_build)
+    output = tmp_path / "efi"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "build", "--fixture", str(t480s_baseline_fixture), "--config", configuration_id,
+            "--output", str(output), "--offline",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["configuration"].configuration_id == configuration_id
+    assert captured["output"] == output
+    assert captured["offline"] is True
+
+
+def test_cli_build_requires_persisted_reviewed_configuration(
+    t480s_baseline_fixture: Path, tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(
+        cli,
+        ["build", "--fixture", str(t480s_baseline_fixture), "--output", str(tmp_path / "efi")],
+    )
+    assert result.exit_code != 0
+    assert "persisted reviewed configuration" in result.output
+
+
+def test_cli_build_reports_shared_workflow_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, t480s_baseline_fixture: Path
+) -> None:
+    monkeypatch.setattr(workflow_service_module, "DEFAULT_WORKSPACE_DIR", tmp_path / "workspace")
+    created = CliRunner().invoke(cli, ["config", "new", "--fixture", str(t480s_baseline_fixture), "--json"])
+    configuration_id = json.loads(created.output)["configuration"]["configuration_id"]
+
+    def blocked(*_args: Any, **_kwargs: Any) -> Any:
+        raise BuildPlanError("trusted toolchain is unavailable")
+
+    monkeypatch.setattr(workflow_service_module.WorkflowService, "build_efi_preview", blocked)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "build", "--fixture", str(t480s_baseline_fixture), "--config", configuration_id,
+            "--output", str(tmp_path / "efi"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Build Error" in result.output
+    assert "trusted toolchain is unavailable" in result.output
 
 
 def test_cli_config_set_ack_export_import_migrate_and_evidence(

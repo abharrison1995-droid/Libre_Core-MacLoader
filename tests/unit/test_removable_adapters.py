@@ -104,7 +104,7 @@ def test_windows_backend_status_fails_closed_when_methods_are_missing() -> None:
 
 def test_windows_backend_rejects_invalid_plan_and_safe_noops_for_invalid_readback() -> None:
     backend = FakeWindowsBackend()
-    adapter = WindowsRemovableAdapter(backend=backend, platform="win32")
+    adapter = WindowsRemovableAdapter(backend=backend, platform="win32", synthetic_test_mode=True)
     with pytest.raises(UnsafeRemovableTarget, match="invalid media plan"):
         adapter.write(object(), Path("."))
     assert adapter.readback(object(), Path(".")) is False
@@ -120,6 +120,7 @@ def test_windows_backend_failure_invalidates_and_remounts(
         runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
         backend=backend,
         platform="win32",
+        synthetic_test_mode=True,
     )
     device = adapter.enumerate()[0]
     plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
@@ -136,6 +137,7 @@ def test_windows_backend_readback_and_invalidation_always_remount(
         runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
         backend=backend,
         platform="win32",
+        synthetic_test_mode=True,
     )
     device = adapter.enumerate()[0]
     plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
@@ -168,6 +170,8 @@ def test_windows_adapter_never_writes_without_qualified_backend(tmp_path: Path) 
 
 
 class FakeWindowsBackend:
+    production_qualified = True
+
     def __init__(self) -> None:
         self.events: list[str] = []
 
@@ -212,6 +216,7 @@ def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path, monk
         runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
         backend=backend,
         platform="win32",
+        synthetic_test_mode=True,
     )
     assert adapter.status.qualified is True
     device = adapter.enumerate()[0]
@@ -227,6 +232,7 @@ def test_writer_invalidates_after_post_write_cancellation(valid_source: Path) ->
         runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
         backend=backend,
         platform="win32",
+        synthetic_test_mode=True,
     )
     device = adapter.enumerate()[0]
     writer = adapter.writer()
@@ -291,7 +297,7 @@ def test_confirmation_expires_and_binds_plan(valid_source: Path, tmp_path: Path)
 
 def test_media_plan_manifest_detects_source_mutation(valid_source: Path) -> None:
     device = RemovableDevice("usb-1", "USB", 1024, False, True, False, serial="SERIAL")
-    writer = RemovableMediaWriter()
+    writer = RemovableMediaWriter(require_published_artifacts=False)
     plan = writer.dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
     (valid_source / "EFI" / "OC" / "config.plist").write_text("changed", encoding="utf-8")
     confirmation = DestructiveConfirmation.issue(plan)
@@ -302,7 +308,7 @@ def test_media_plan_manifest_detects_source_mutation(valid_source: Path) -> None
 def test_stale_target_diagnostic_uses_opaque_reference(valid_source: Path) -> None:
     secret_id = "windows:serial:PRIVATE-SERIAL"
     device = RemovableDevice(secret_id, "USB", 1024, False, True, False, serial="PRIVATE-SERIAL")
-    writer = RemovableMediaWriter(enumerator=lambda: [])
+    writer = RemovableMediaWriter(enumerator=lambda: [], require_published_artifacts=False)
     plan = writer.dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
     with pytest.raises(UnsafeRemovableTarget) as caught:
         writer.write(plan, valid_source, DestructiveConfirmation.issue(plan))
@@ -319,6 +325,7 @@ def test_disposable_readback_requires_recovery_and_efi(valid_source: Path, tmp_p
     writer = RemovableMediaWriter(
         destructive_write=adapter.write,
         readback_verifier=adapter.verify_readback,
+        require_published_artifacts=False,
     )
     device = RemovableDevice("usb-2", "USB", 1024, False, True, False, serial="SERIAL")
     plan = writer.dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)

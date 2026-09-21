@@ -174,9 +174,44 @@ class CacheManager:
             "artifact_id": spec.id,
             "version": spec.version,
             "variant": variant.value,
+            "cache_path": str(self.get_artifact_cache_path(spec, variant)),
         }
         with self._locked_file(lock_path, timeout=timeout, cancel=cancel, extra_meta=extra_meta):
             yield
+
+    @contextmanager
+    def artifact_lease(
+        self,
+        spec: DependencySpec,
+        variant: ArtifactVariant,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[Path]:
+        """Keep a verified cache entry protected for the whole build."""
+        with self.artifact_locked(spec, variant, cancel=cancel):
+            path = self.get_artifact_cache_path(spec, variant)
+            if not self.has_valid_artifact(spec, variant):
+                raise ArtifactDownloadError(
+                    f"Cached dependency disappeared or changed before build: {spec.id} ({variant.value})"
+                )
+            yield path
+
+    def _is_active_artifact_lease(self, path: Path) -> bool:
+        """Return whether a live artifact lock protects this exact cache path."""
+        target = str(Path(path).absolute())
+        try:
+            for lock_path in self.cache_dir.glob(".lock.*"):
+                meta = self._read_lock_meta(lock_path)
+                if not meta or meta.get("cache_path") != target:
+                    continue
+                owner_host = meta.get("hostname")
+                owner_pid = meta.get("pid")
+                if owner_host == socket.gethostname() and isinstance(owner_pid, int):
+                    return self.liveness_check(owner_pid)
+                acquired_at = meta.get("acquired_at")
+                return isinstance(acquired_at, (int, float)) and time.time() - acquired_at <= self.remote_lease_seconds
+        except OSError:
+            return True
+        return False
 
     def get_artifact_lock_file(self, spec: DependencySpec, variant: ArtifactVariant) -> Path:
         """Deterministic per-artifact lock file path."""
@@ -404,8 +439,10 @@ class CacheManager:
             logger.warning(
                 f"Cache entry corrupted for {spec.id} ({variant.value}): expected {artifact.sha256}, got {actual_sha}."
             )
-            # Remove corrupted file
-            cache_path.unlink(missing_ok=True)
+            # Validation is intentionally read-only.  Publication uses the
+            # cache lock and may replace this pathname concurrently; deleting
+            # it here could remove a valid replacement that was published
+            # after this verifier opened the old bytes.
             return False
 
         return True
@@ -465,6 +502,8 @@ class CacheManager:
         for path in sorted(files, key=lambda item: item.stat().st_mtime):
             if total <= self.max_cache_bytes:
                 break
+            if self._is_active_artifact_lease(path):
+                continue
             size = path.stat().st_size
             path.unlink(missing_ok=True)
             total -= size
@@ -509,6 +548,8 @@ class CacheManager:
             if self.downloads_dir.is_dir():
                 for f in self.downloads_dir.iterdir():
                     if f.is_file() and not f.is_symlink():
+                        if self._is_active_artifact_lease(f):
+                            continue
                         if keep_active_downloads and self.is_temp_file_active(f):
                             continue
                         f.unlink(missing_ok=True)

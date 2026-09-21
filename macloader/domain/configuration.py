@@ -150,6 +150,9 @@ class UserConfiguration:
     identity_ref: Optional[IdentityReference] = None
     acknowledgements: Tuple[Acknowledgement, ...] = field(default_factory=tuple)
     policy_version: str = ""
+    # Workflow-only CAS metadata. It is not part of the persisted/public
+    # schema; each loaded draft owns the base revision it may replace.
+    loaded_base_revision: Optional[int] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.schema_version != CONFIGURATION_SCHEMA_VERSION:

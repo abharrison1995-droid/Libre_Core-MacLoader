@@ -46,6 +46,7 @@ _APPLE_EFI_ROM_PUBLIC_KEY = int(
 _CHUNKLIST_HEADER = struct.Struct("<4sIBBBxQQQ")
 _CHUNK = struct.Struct("<I32s")
 _MAX_CHUNKS = 2_000_000
+_MAX_CHUNKLIST_BYTES = 32 * 1024 * 1024
 DirectoryHandle = int | Path
 _WINDOWS_PLATFORM = os.name == "nt"
 
@@ -72,6 +73,16 @@ class _RecoveryRedirectHandler(urllib.request.HTTPRedirectHandler):
             or parsed.port not in (None, 443)
         ):
             raise ArtifactDownloadError("Recovery redirect leaves the approved HTTPS source policy")
+        original = urlparse(req.full_url)
+        if original.hostname and parsed.hostname and original.hostname.lower() != parsed.hostname.lower():
+            # Discovery cookies are scoped to the origin that issued them;
+            # never forward the session token to an approved CDN host.
+            if hasattr(req, "unredirected_hdrs"):
+                req.unredirected_hdrs.pop("Cookie", None)
+                req.unredirected_hdrs.pop("cookie", None)
+            if hasattr(req, "headers"):
+                req.headers.pop("Cookie", None)
+                req.headers.pop("cookie", None)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -138,7 +149,16 @@ class RecoveryAcquirer:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             self._reject_symlink_ancestors(destination.parent)
-            if shutil.disk_usage(destination.parent).free < asset.size_bytes:
+            required_bytes = asset.size_bytes
+            if self.resume:
+                resume_part, resume_metadata = self._resume_paths(asset, destination)
+                if (
+                    resume_part.is_file()
+                    and not resume_part.is_symlink()
+                    and self._resume_metadata_matches(resume_metadata, asset)
+                ):
+                    required_bytes = max(0, asset.size_bytes - resume_part.stat().st_size)
+            if shutil.disk_usage(destination.parent).free < required_bytes:
                 raise ArtifactDownloadError("Insufficient free disk space for Recovery asset")
             if self.resume:
                 if self.transport:
@@ -294,6 +314,10 @@ class RecoveryAcquirer:
                     if metadata is not None:
                         metadata.unlink(missing_ok=True)
             raise
+        except KeyboardInterrupt:
+            if part is not None and not self.resume:
+                part.unlink(missing_ok=True)
+            raise
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
             if part is not None and not self.resume:
                 part.unlink(missing_ok=True)
@@ -320,10 +344,19 @@ class RecoveryAcquirer:
 
     @staticmethod
     def _resume_metadata_matches(metadata: Path, asset: RecoveryAsset) -> bool:
+        fd: Optional[int] = None
         try:
-            data = json.loads(metadata.read_text(encoding="utf-8"))
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(metadata, flags)
+            metadata_stat = os.fstat(fd)
+            if not stat.S_ISREG(metadata_stat.st_mode) or metadata_stat.st_size > 16 * 1024:
+                return False
+            data = json.loads(os.read(fd, metadata_stat.st_size).decode("utf-8"))
         except (OSError, ValueError, TypeError):
             return False
+        finally:
+            if fd is not None:
+                os.close(fd)
         return bool(data == {"sha256": asset.sha256.lower(), "size_bytes": asset.size_bytes})
 
     @staticmethod
@@ -453,7 +486,7 @@ class RecoveryAcquirer:
                             )
                         self._publish_owned(staged_image, image_destination, destination_directory_fd)
                         self._publish_owned(staged_chunklist, chunklist_destination, destination_directory_fd)
-                    except Exception:
+                    except (Exception, KeyboardInterrupt):
                         self._unlink_relative(destination_directory_fd, image_destination.name)
                         self._unlink_relative(destination_directory_fd, chunklist_destination.name)
                         if had_image and self._entry_exists(staging_directory_fd, "image.backup"):
@@ -683,6 +716,7 @@ def verify_apple_chunklist(
     chunklist_path: Path,
     expected_image_sha256: str,
     expected_chunklist_sha256: str,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> tuple[int, int]:
     """Verify Apple's signed CNKL file and complete image readback.
 
@@ -696,7 +730,19 @@ def verify_apple_chunklist(
     for value, label in ((expected_image_sha256, "image"), (expected_chunklist_sha256, "chunklist")):
         if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise ArtifactDownloadError(f"Recovery {label} digest is invalid")
-    if hashlib.sha256(chunklist_path.read_bytes()).hexdigest().lower() != expected_chunklist_sha256.lower():
+    try:
+        chunklist_size = chunklist_path.stat().st_size
+    except OSError as exc:
+        raise ArtifactDownloadError("Recovery chunklist cannot be inspected") from exc
+    if chunklist_size > _MAX_CHUNKLIST_BYTES:
+        raise ArtifactDownloadError("Recovery chunklist exceeds the bounded size limit")
+    chunklist_digest = hashlib.sha256()
+    with chunklist_path.open("rb") as raw_chunklist:
+        while chunk := raw_chunklist.read(1024 * 1024):
+            if cancel and cancel():
+                raise ArtifactDownloadError("Recovery verification cancelled")
+            chunklist_digest.update(chunk)
+    if chunklist_digest.hexdigest().lower() != expected_chunklist_sha256.lower():
         raise ChecksumMismatchError("Recovery chunklist checksum mismatch")
 
     with chunklist_path.open("rb") as handle:
@@ -710,43 +756,65 @@ def verify_apple_chunklist(
             raise ArtifactDownloadError("Recovery chunklist has an invalid chunk count or offset")
         if signature_offset != offset + _CHUNK.size * count:
             raise ArtifactDownloadError("Recovery chunklist signature offset is invalid")
-        chunks = []
-        digest = hashlib.sha256()
-        digest.update(header)
-        for _ in range(count):
-            entry = handle.read(_CHUNK.size)
-            if len(entry) != _CHUNK.size:
-                raise ArtifactDownloadError("Recovery chunklist entries are truncated")
-            digest.update(entry)
-            chunks.append(_CHUNK.unpack(entry))
-        signed_digest = digest.digest()
         if signature_method == 1:
-            signature = handle.read(256)
-            if len(signature) != 256:
-                raise ArtifactDownloadError("Recovery chunklist signature is truncated")
-            plaintext = int(f"0x1{'f' * 404}003031300d060960864801650304020105000420{'0' * 64}", 16) | int.from_bytes(signed_digest, "big")
-            if pow(int.from_bytes(signature, "little"), 0x10001, _APPLE_EFI_ROM_PUBLIC_KEY) != plaintext:
-                raise ArtifactDownloadError("Recovery chunklist signature is invalid")
+            expected_total_size = signature_offset + 256
         elif signature_method == 2:
-            # OpenCore recognizes this as a digest-only development format;
-            # MacLoader requires authenticated Apple Recovery for release use.
-            raise ArtifactDownloadError("Recovery chunklist is unsigned")
+            expected_total_size = signature_offset + 32
         else:
             raise ArtifactDownloadError("Recovery chunklist signature method is unsupported")
-        if handle.read(1) != b"":
-            raise ArtifactDownloadError("Recovery chunklist contains trailing data")
+        if chunklist_size != expected_total_size:
+            raise ArtifactDownloadError("Recovery chunklist has unexpected trailing or truncated data")
+        digest = hashlib.sha256()
+        digest.update(header)
+        with tempfile.TemporaryFile() as entries:
+            for _ in range(count):
+                if cancel and cancel():
+                    raise ArtifactDownloadError("Recovery verification cancelled")
+                entry = handle.read(_CHUNK.size)
+                if len(entry) != _CHUNK.size:
+                    raise ArtifactDownloadError("Recovery chunklist entries are truncated")
+                digest.update(entry)
+                entries.write(entry)
+            signed_digest = digest.digest()
+            if signature_method == 1:
+                signature = handle.read(256)
+                if len(signature) != 256:
+                    raise ArtifactDownloadError("Recovery chunklist signature is truncated")
+                plaintext = int(f"0x1{'f' * 404}003031300d060960864801650304020105000420{'0' * 64}", 16) | int.from_bytes(signed_digest, "big")
+                if pow(int.from_bytes(signature, "little"), 0x10001, _APPLE_EFI_ROM_PUBLIC_KEY) != plaintext:
+                    raise ArtifactDownloadError("Recovery chunklist signature is invalid")
+            else:
+                # OpenCore recognizes this as a digest-only development format;
+                # MacLoader requires authenticated Apple Recovery for release use.
+                raise ArtifactDownloadError("Recovery chunklist is unsigned")
+            if handle.read(1) != b"":
+                raise ArtifactDownloadError("Recovery chunklist contains trailing data")
 
-    image_hash = hashlib.sha256()
-    image_size = 0
-    with image_path.open("rb") as image:
-        for index, (size, expected) in enumerate(chunks, start=1):
-            data = image.read(size)
-            if len(data) != size or hashlib.sha256(data).digest() != expected:
-                raise ChecksumMismatchError(f"Recovery image chunk {index} failed verification")
-            image_hash.update(data)
-            image_size += size
-        if image.read(1) != b"":
-            raise ArtifactDownloadError("Recovery image is larger than its signed chunklist")
+            entries.seek(0)
+            image_hash = hashlib.sha256()
+            image_size = 0
+            with image_path.open("rb") as image:
+                for index in range(1, count + 1):
+                    if cancel and cancel():
+                        raise ArtifactDownloadError("Recovery verification cancelled")
+                    entry = entries.read(_CHUNK.size)
+                    size, expected = _CHUNK.unpack(entry)
+                    remaining = size
+                    chunk_digest = hashlib.sha256()
+                    while remaining:
+                        if cancel and cancel():
+                            raise ArtifactDownloadError("Recovery verification cancelled")
+                        data = image.read(min(1024 * 1024, remaining))
+                        if not data:
+                            break
+                        chunk_digest.update(data)
+                        image_hash.update(data)
+                        remaining -= len(data)
+                    if remaining or chunk_digest.digest() != expected:
+                        raise ChecksumMismatchError(f"Recovery image chunk {index} failed verification")
+                    image_size += size
+                if image.read(1) != b"":
+                    raise ArtifactDownloadError("Recovery image is larger than its signed chunklist")
     if image_hash.hexdigest().lower() != expected_image_sha256.lower():
         raise ChecksumMismatchError("Recovery image checksum mismatch")
-    return len(chunks), image_size
+    return count, image_size

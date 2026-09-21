@@ -1,6 +1,8 @@
 """Shared configuration evaluation used by CLI and future Textual views."""
 
 from dataclasses import dataclass, replace
+import json
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from macloader.compatibility.engine import CompatibilityEngine
@@ -15,6 +17,10 @@ from macloader.domain.configuration import (
 from macloader.domain.contracts import canonical_json_digest
 from macloader.domain.evidence import EvidenceCompleteness
 from macloader.domain.hardware import HardwareSnapshot
+from macloader.build.config import effective_profile_digest, load_reviewed_profile
+from macloader.build.acpi import AcpiProcessor
+from macloader.evidence.acpi import AcpiEvidenceBundle
+from macloader.evidence.usb import UsbEvidenceSession
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,25 @@ class ConfigurationService:
             report = self.engine.evaluate(snapshot, target_macos="sequoia")
         plan = self.engine.generate_build_plan(report)
 
+        # The policy profile is a consumed build input, not just descriptive
+        # review metadata.  Keep its exact target scope attached to the plan.
+        try:
+            reviewed_profile = load_reviewed_profile()
+        except Exception as exc:
+            reviewed_profile = None
+            issues.append(self._issue("PROFILE_UNAVAILABLE", "build_profile", str(exc), "Restore the reviewed profile bundle before continuing."))
+        if reviewed_profile is not None and target is not None:
+            if (
+                reviewed_profile.model_id != self.policy.model_id
+                or reviewed_profile.product_id != target.product_id
+                or reviewed_profile.version != target.version
+                or reviewed_profile.build != target.build
+            ):
+                issues.append(self._issue(
+                    "PROFILE_SCOPE_MISMATCH", "build_profile", "The reviewed EFI profile does not exactly match the accepted model and target.",
+                    "Select the reviewed profile for the exact model, version, and build.",
+                ))
+
         self._validate_options(draft, target, issues)
         self._validate_evidence(draft, snapshot, issues)
         resolved_policy_requirements = self._resolved_policy_requirements(draft, target)
@@ -99,6 +124,18 @@ class ConfigurationService:
         blocking = [item for item in issues if item.blocking]
         unresolved = list(remaining_plan_requirements)
         unresolved.extend(item.explanation for item in blocking if item.explanation not in unresolved)
+        plan_evidence_digests = [record.digest for record in draft.evidence]
+        for record in draft.evidence:
+            if record.kind != "acpi":
+                continue
+            source = self._evidence_source(record.private_ref)
+            if source is not None:
+                try:
+                    plan_evidence_digests.append(
+                        AcpiProcessor.capture_evidence_digest(source.parent, record.bios_binding)
+                    )
+                except (OSError, ValueError):
+                    pass
         plan = replace(
             plan,
             target_version=target.version if target else "",
@@ -106,8 +143,14 @@ class ConfigurationService:
             target_release_digest=target.release_record_digest if target else "",
             stable_model_id=model.id if model else "",
             hardware_content_digest=self._snapshot_digest(snapshot),
-            evidence_digests=[record.digest for record in draft.evidence],
-            profile_bindings=list(self.policy.profiles),
+            evidence_digests=plan_evidence_digests,
+            profile_bindings=[*self.policy.profiles, reviewed_profile.profile_id if reviewed_profile else ""],
+            effective_option_selections=[[key, value] for key, value in draft.option_selections],
+            effective_profile_digest=(
+                effective_profile_digest(reviewed_profile, dict(draft.option_selections))
+                if reviewed_profile else ""
+            ),
+            effective_audio_layout=self._audio_layout(draft),
             unresolved_requirements=unresolved,
             accepted_configuration_digest="" if blocking else draft.semantic_digest,
         )
@@ -172,6 +215,33 @@ class ConfigurationService:
                 issues.append(self._issue("OPTION_CONFLICT", f"options.{option_id}", f"Selection '{value}' conflicts with another policy option.", "Remove the conflicting selection."))
 
     def _validate_evidence(self, draft: UserConfiguration, snapshot: HardwareSnapshot, issues: List[ConfigurationIssue]) -> None:
+        for record in draft.evidence:
+            if record.machine_snapshot_id != snapshot.snapshot_id:
+                issues.append(self._issue("EVIDENCE_SNAPSHOT_MISMATCH", f"evidence.{record.kind}", "Evidence belongs to a different hardware snapshot.", "Capture or import evidence from the active snapshot."))
+            if snapshot.bios_version and record.bios_binding != snapshot.bios_version:
+                issues.append(self._issue("EVIDENCE_BIOS_MISMATCH", f"evidence.{record.kind}", "Evidence is bound to a different BIOS version.", "Capture evidence after confirming the active BIOS version."))
+            source = self._evidence_source(record.private_ref)
+            if source is None:
+                issues.append(self._issue("EVIDENCE_SOURCE_MISSING", f"evidence.{record.kind}", "The private evidence source is missing or unsafe; metadata alone is not proof.", "Restore the private evidence file and re-evaluate the draft."))
+                continue
+            try:
+                payload = json.loads(source.read_text(encoding="utf-8"))
+                if record.kind == "usb":
+                    actual = UsbEvidenceSession.from_dict(payload).to_evidence_record()
+                elif record.kind == "acpi":
+                    actual = AcpiEvidenceBundle.from_dict(payload).to_evidence_record()
+                else:
+                    raise ValueError("unsupported evidence kind")
+                if (
+                    actual.digest.lower() != record.digest.lower()
+                    or actual.machine_snapshot_id != snapshot.snapshot_id
+                    or actual.bios_binding != snapshot.bios_version
+                    or actual.bios_binding != record.bios_binding
+                    or actual.private_ref != record.private_ref
+                ):
+                    raise ValueError("evidence digest, source reference, snapshot, or BIOS binding does not match")
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                issues.append(self._issue("EVIDENCE_SOURCE_INVALID", f"evidence.{record.kind}", f"Private evidence could not be verified: {exc}", "Re-capture the evidence with the supported collector."))
         usb_records = [record for record in draft.evidence if record.kind == "usb"]
         if not any(
             record.completeness == EvidenceCompleteness.COMPLETE
@@ -201,6 +271,30 @@ class ConfigurationService:
         data = draft.semantic_dict()
         data["acknowledgements"] = []
         return canonical_json_digest(data)
+
+    @staticmethod
+    def _audio_layout(draft: UserConfiguration) -> Optional[int]:
+        value = draft.selected_options().get("profile.audio", "")
+        if not value.startswith("layout-"):
+            return None
+        try:
+            return int(value.removeprefix("layout-"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _evidence_source(private_ref: str) -> Optional[Path]:
+        candidate = Path(private_ref)
+        if not candidate.is_absolute() and any(part == ".." for part in candidate.parts):
+            return None
+        candidates = [candidate] if candidate.is_absolute() else [candidate, Path("workspace") / candidate]
+        for path in candidates:
+            absolute = path.absolute()
+            if any(ancestor.is_symlink() for ancestor in (absolute, *absolute.parents) if ancestor.exists()):
+                continue
+            if absolute.is_file() and not absolute.is_symlink():
+                return absolute
+        return None
 
     @staticmethod
     def _issue(code: str, field_path: str, explanation: str, remediation: str) -> ConfigurationIssue:

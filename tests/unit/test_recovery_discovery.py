@@ -269,7 +269,11 @@ def test_recovery_lock_round_trips_without_private_session_values(tmp_path: Path
     binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
     lock = service.lock(result, binding)
     path = tmp_path / "recovery.lock.json"
-    service.save_lock(lock, path)
+    service.save_verified_bundle(
+        lock,
+        RecoveryEvidence(lock.digest, digest, digest, True, 1, 1, "test"),
+        tmp_path,
+    )
     loaded = service.load_lock(path)
     assert loaded.product.image_session_ref == "<private>"
     assert loaded.product.target == _target()
@@ -365,6 +369,11 @@ def test_recovery_service_verify_binds_readback_size(tmp_path: Path, monkeypatch
         "e" * 64,
     )
     lock = service.lock(result, binding)
+    service.save_verified_bundle(
+        lock,
+        RecoveryEvidence(lock.digest, "b" * 64, "c" * 64, True, 1, 5, "test"),
+        tmp_path,
+    )
     image = tmp_path / "image"
     chunklist = tmp_path / "chunklist"
     image.write_bytes(b"image")

@@ -135,6 +135,7 @@ def test_copy_elimination_and_single_snapshot_per_dependency(tmp_path: Path) -> 
             output_dir=tmp_path / "output_single_snapshot",
             fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
             toolchain=toolchain,
+            synthetic_test_mode=True,
         )
 
     assert result.validation.status == "VALID"
@@ -167,6 +168,7 @@ def test_bundle_and_plugin_topology_preservation(tmp_path: Path) -> None:
         output_dir=tmp_path / "output_topology",
         fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
         toolchain=toolchain,
+        synthetic_test_mode=True,
     )
 
     kext_dir = result.output_dir / "EFI" / "OC" / "Kexts" / "VirtualSMC.kext"
@@ -201,6 +203,7 @@ def test_inter_dependency_file_collision_detected(tmp_path: Path) -> None:
             output_dir=tmp_path / "output_collision",
             fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
             toolchain=toolchain,
+            synthetic_test_mode=True,
         )
     assert not (tmp_path / "output_collision").exists()
 
@@ -226,6 +229,7 @@ def test_per_artifact_expanded_size_limit_enforced(tmp_path: Path) -> None:
             output_dir=tmp_path / "output_size_limit",
             fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
             toolchain=toolchain,
+            synthetic_test_mode=True,
         )
     assert not (tmp_path / "output_size_limit").exists()
 
@@ -252,6 +256,7 @@ def test_cumulative_build_disk_budget_enforced(tmp_path: Path) -> None:
             output_dir=tmp_path / "output_budget_limit",
             fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
             toolchain=toolchain,
+            synthetic_test_mode=True,
         )
     assert not (tmp_path / "output_budget_limit").exists()
 
@@ -316,6 +321,7 @@ def test_verified_archive_tamper_after_snapshot_is_impossible(tmp_path: Path) ->
             output_dir=tmp_path / "output_tamper",
             fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
             toolchain=toolchain,
+            synthetic_test_mode=True,
         )
 
 
@@ -405,6 +411,7 @@ def test_explicit_plugin_subcomponent_resolution_and_validation(tmp_path: Path) 
         output_dir=tmp_path / "output_plugin_subcomp",
         fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
         toolchain=toolchain,
+        synthetic_test_mode=True,
     )
     assert result.validation.status == "VALID"
 
@@ -453,6 +460,7 @@ def test_root_level_kext_bundle_without_directory_record(tmp_path: Path) -> None
         output_dir=tmp_path / "output_root_kext",
         fake_identity={"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"},
         toolchain=toolchain,
+        synthetic_test_mode=True,
     )
     assert result.validation.status == "VALID"
     assert (result.output_dir / "EFI" / "OC" / "Kexts" / "Lilu.kext" / "Contents" / "Info.plist").is_file()

@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
-from typing import Dict, Iterable, List, Optional, Tuple
+import time
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from macloader.domain.contracts import canonical_json_digest
 from macloader.exceptions import BuildPlanError
@@ -63,7 +66,9 @@ class AcpiProcessor:
     """Process the exact private capture without publishing raw ACPI tables."""
 
     def __init__(self, iasl_path: Path, iasl_sha256: str, work_root: Optional[Path] = None) -> None:
-        self.iasl_path = Path(iasl_path).resolve()
+        # Preserve the lexical path so a symlink cannot be resolved into a
+        # trusted-looking target before the boundary check.
+        self.iasl_path = Path(iasl_path).absolute()
         self.iasl_sha256 = iasl_sha256.lower()
         self.work_root = Path(work_root or Path.cwd() / "workspace" / "p4-acpi").resolve()
 
@@ -73,11 +78,25 @@ class AcpiProcessor:
         output_dir: Path,
         *,
         expected_bios_binding: str,
+        expected_snapshot_id: Optional[str] = None,
         expected_evidence_digest: Optional[str] = None,
         allow_oem_compile_failure: bool = True,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> AcpiBuildResult:
         self._verify_tool()
-        capture = Path(private_capture_root).resolve()
+        capture = Path(private_capture_root).absolute()
+        if capture.is_symlink() or not capture.is_dir():
+            raise BuildPlanError("Private ACPI capture directory is missing or unsafe")
+        metadata_path = capture / "evidence.json"
+        if expected_snapshot_id:
+            if metadata_path.is_symlink() or not metadata_path.is_file():
+                raise BuildPlanError("Machine-bound ACPI evidence metadata is missing")
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BuildPlanError("Machine-bound ACPI evidence metadata is invalid") from exc
+            if not isinstance(metadata, dict) or metadata.get("snapshot_id") != expected_snapshot_id or metadata.get("bios_binding") != expected_bios_binding:
+                raise BuildPlanError("ACPI capture metadata does not match the accepted machine snapshot and BIOS")
         table_dir = capture / "PRIVATE-ACPI"
         if not table_dir.is_dir() or table_dir.is_symlink():
             raise BuildPlanError("Private ACPI capture directory is missing or unsafe")
@@ -104,12 +123,15 @@ class AcpiProcessor:
 
         diagnostics: List[AcpiSourceResult] = []
         for path in table_paths:
+            if cancel and cancel():
+                raise BuildPlanError("ACPI build cancelled")
             stem = path.stem
             prefix = disassembled / stem
             diagnostic_path = raw_logs / f"{stem}.txt"
             result = self._run(
                 ["-d", "-p", str(prefix), str(path)],
                 diagnostic_path,
+                cancel=cancel,
             )
             dsl_path = prefix.with_suffix(".dsl")
             if result[0] != 0 or not dsl_path.is_file():
@@ -120,6 +142,7 @@ class AcpiProcessor:
             compile_result = self._run(
                 ["-tc", "-p", str((raw_compiled / stem)), str(dsl_path)],
                 raw_logs / f"{stem}-compile.txt",
+                cancel=cancel,
             )
             if compile_result[0] != 0 and (stem != "dsdt" or not allow_oem_compile_failure):
                 raise BuildPlanError(f"Pinned iasl rejected reviewed ACPI source {stem}")
@@ -151,12 +174,15 @@ class AcpiProcessor:
         generated_diagnostics: List[AcpiSourceResult] = []
         output_dir.mkdir(parents=True, exist_ok=True)
         for name, source in generated_specs.items():
+            if cancel and cancel():
+                raise BuildPlanError("ACPI build cancelled")
             source_path = generated_sources / f"{name}.dsl"
             source_path.write_text(source, encoding="utf-8", newline="\n")
             prefix = generated_aml / name
             rc, stdout, stderr = self._run(
                 ["-tc", "-p", str(prefix), str(source_path)],
                 raw_logs / f"{name}-compile.txt",
+                cancel=cancel,
             )
             if rc != 0 or not prefix.with_suffix(".aml").is_file():
                 raise BuildPlanError(f"Reviewed generated ACPI source failed compilation: {name}")
@@ -196,6 +222,37 @@ class AcpiProcessor:
         )
         return build_result
 
+    @classmethod
+    def capture_evidence_digest(
+        cls,
+        private_capture_root: Path,
+        expected_bios_binding: str,
+        expected_snapshot_id: Optional[str] = None,
+    ) -> str:
+        """Derive the source identity without executing the compiler."""
+        capture = Path(private_capture_root)
+        if expected_snapshot_id is not None:
+            metadata_path = capture / "evidence.json"
+            if metadata_path.is_symlink() or not metadata_path.is_file():
+                raise BuildPlanError("Machine-bound ACPI evidence metadata is missing")
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BuildPlanError("Machine-bound ACPI evidence metadata is invalid") from exc
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("snapshot_id") != expected_snapshot_id
+                or metadata.get("bios_binding") != expected_bios_binding
+            ):
+                raise BuildPlanError("ACPI capture metadata does not match the accepted machine snapshot and BIOS")
+        table_paths = cls._find_tables(capture / "PRIVATE-ACPI")
+        source_metadata = [cls._validate_table(path) for path in table_paths]
+        return canonical_json_digest({
+            "bios_binding": expected_bios_binding,
+            "tables": source_metadata,
+            "capture_scope": "private-acpi-dsdt-plus-eleven-ssdt",
+        })
+
     def _verify_tool(self) -> None:
         if self.iasl_path.is_symlink() or not self.iasl_path.is_file():
             raise BuildPlanError("Pinned iasl is missing or unsafe")
@@ -207,6 +264,8 @@ class AcpiProcessor:
 
     @staticmethod
     def _find_tables(table_dir: Path) -> Tuple[Path, ...]:
+        if table_dir.is_symlink() or not table_dir.is_dir():
+            raise BuildPlanError("Private ACPI capture directory is missing or unsafe")
         paths = {path.name.lower(): path for path in table_dir.glob("*.dat")}
         missing = [name for name in TABLE_NAMES if name not in paths]
         if missing or len(paths) != len(TABLE_NAMES):
@@ -215,6 +274,8 @@ class AcpiProcessor:
 
     @staticmethod
     def _validate_table(path: Path) -> Dict[str, object]:
+        if path.is_symlink() or not path.is_file():
+            raise BuildPlanError(f"ACPI table is missing or unsafe: {path.stem}")
         data = path.read_bytes()
         if len(data) < ACPI_HEADER_SIZE:
             raise BuildPlanError(f"ACPI table is truncated: {path.stem}")
@@ -242,22 +303,79 @@ class AcpiProcessor:
             diagnostic_digest=canonical_json_digest({"diagnostics": text}),
         )
 
-    def _run(self, args: List[str], diagnostic_path: Path) -> Tuple[int, str, str]:
+    def _run(
+        self,
+        args: List[str],
+        diagnostic_path: Path,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[int, str, str]:
         diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        process: Optional[subprocess.Popen[str]] = None
         try:
-            completed = subprocess.run(
-                [str(self.iasl_path), *args],
-                capture_output=True, text=True, timeout=60, check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            diagnostic_path.write_text("iasl timed out", encoding="utf-8")
-            return 124, "", "iasl timed out"
+            try:
+                process = subprocess.Popen(
+                    [str(self.iasl_path), *args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=os.name != "nt",
+                    creationflags=(
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
+                        else 0
+                    ),
+                )
+                deadline = time.monotonic() + 60
+                while True:
+                    if cancel and cancel():
+                        self._terminate_process(process)
+                        diagnostic_path.write_text("iasl cancelled", encoding="utf-8")
+                        raise BuildPlanError("ACPI build cancelled")
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            self._terminate_process(process)
+                            stdout, stderr = process.communicate()
+                            diagnostic_path.write_text("iasl timed out", encoding="utf-8")
+                            return 124, "", "iasl timed out"
+            except BaseException:
+                self._terminate_process(process)
+                raise
         except OSError as exc:
             raise BuildPlanError(f"Pinned iasl execution failed: {exc}") from exc
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
+        stdout = stdout or ""
+        stderr = stderr or ""
         diagnostic_path.write_text((stdout + "\n" + stderr)[:16384], encoding="utf-8")
-        return completed.returncode, stdout, stderr
+        return process.returncode, stdout, stderr
+
+    @staticmethod
+    def _terminate_process(process: Optional[subprocess.Popen[str]]) -> None:
+        if process is None or process.poll() is not None:
+            return
+        try:
+            pid = getattr(process, "pid", None)
+            if os.name != "nt" and isinstance(pid, int) and pid > 0:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                pid = getattr(process, "pid", None)
+                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(pid)],
+                        capture_output=True, check=False,
+                    )
+                elif os.name != "nt" and isinstance(pid, int) and pid > 0:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
     @staticmethod
     def _generated_sources(bios_binding: str) -> Dict[str, str]:

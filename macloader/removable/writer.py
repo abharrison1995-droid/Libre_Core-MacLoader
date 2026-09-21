@@ -18,6 +18,10 @@ from contextlib import contextmanager
 from typing import Callable, Iterator, List, Optional, Sequence
 
 from macloader.exceptions import MacLoaderError
+from macloader.domain.contracts import BuildManifest, canonical_json_digest
+from macloader.domain.recovery import RecoveryEvidence, RecoveryLock
+from macloader.recovery.acquirer import verify_apple_chunklist
+from macloader.recovery.service import load_recovery_policy
 
 
 class UnsafeRemovableTarget(MacLoaderError):
@@ -74,6 +78,35 @@ class MediaBindings:
     toolchain_digest: str = ""
     evidence_digest: str = ""
 
+    @classmethod
+    def from_published_contracts(
+        cls,
+        manifest: BuildManifest,
+        lock: RecoveryLock,
+        evidence: RecoveryEvidence,
+    ) -> "MediaBindings":
+        """Derive the complete media binding from the published contracts.
+
+        The six fields are not independent caller assertions.  They are a
+        compact reference to one manifest, one Recovery lock, and its verified
+        evidence.  Keeping this derivation next to the value object gives the
+        planner and the final writer the same canonical contract.
+        """
+        manifest_digest = canonical_json_digest(manifest.to_dict())
+        if evidence.lock_digest.lower() != lock.digest.lower():
+            raise ValueError("Recovery evidence is bound to a different lock identity")
+        return cls(
+            efi_manifest_digest=manifest_digest,
+            recovery_lock_digest=lock.digest,
+            validation_digest=canonical_json_digest({
+                "manifest_digest": manifest_digest,
+                "validation_report": manifest.validation_report,
+            }),
+            configuration_digest=lock.binding.configuration_digest,
+            toolchain_digest=manifest.toolchain_digest,
+            evidence_digest=canonical_json_digest(evidence.to_dict()),
+        )
+
     @property
     def complete(self) -> bool:
         return all(
@@ -107,6 +140,7 @@ class WritePlan:
     destroys_data: bool = True
     expected_files: Sequence[MediaFileDigest] = field(default_factory=tuple)
     bindings: MediaBindings = field(default_factory=MediaBindings)
+    source_validated: bool = False
 
     def __post_init__(self) -> None:
         if self.required_bytes < 0:
@@ -141,6 +175,7 @@ class WritePlan:
             "destroys_data": self.destroys_data,
             "expected_files": [item.to_dict() for item in self.expected_files],
             "bindings": self.bindings.to_dict(),
+            "source_validated": self.source_validated,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -404,12 +439,14 @@ class RemovableMediaWriter:
         source_validator: Optional[Callable[[Path], bool]] = None,
         readback_verifier: Optional[Callable[[WritePlan, Path], bool]] = None,
         invalidator: Optional[Callable[[WritePlan, str], None]] = None,
+        require_published_artifacts: bool = True,
     ):
         self.destructive_write = destructive_write
         self.enumerator = enumerator
         self.source_validator = source_validator
         self.readback_verifier = readback_verifier
         self.invalidator = invalidator
+        self.require_published_artifacts = require_published_artifacts
 
     def dry_run(
         self,
@@ -431,6 +468,7 @@ class RemovableMediaWriter:
             required_bytes,
             expected_files=expected_files,
             bindings=bindings or MediaBindings(),
+            source_validated=source_dir is not None,
         )
 
     def write(
@@ -444,6 +482,8 @@ class RemovableMediaWriter:
         """Perform guarded destructive write with re-enumeration and readback checks."""
         if not plan.bindings.complete:
             raise UnsafeRemovableTarget("Media plan is not bound to EFI, Recovery, validation, configuration, toolchain, and evidence digests")
+        if not plan.source_validated:
+            raise UnsafeRemovableTarget("Media plan was not created by the guarded source-validation boundary")
         if not isinstance(confirmation, DestructiveConfirmation):
             raise UnsafeRemovableTarget("A typed expiring destructive confirmation is required")
         if not confirmation.valid_for(plan):
@@ -452,6 +492,19 @@ class RemovableMediaWriter:
             raise UnsafeRemovableTarget("Media write cancelled before source preparation")
         # 1. Source validation
         self._validate_source(source_dir)
+        # Planning normally performs this check, but a WritePlan is a public
+        # value object and can be constructed directly.  Repeat the actual
+        # Recovery boundary immediately before device re-enumeration and never
+        # trust the six digest-shaped fields as proof that Recovery exists.
+        if plan.bindings.complete:
+            recovery_dir = Path(source_dir) / "Recovery"
+            if recovery_dir.is_symlink() or not recovery_dir.is_dir():
+                raise UnsafeRemovableTarget("A qualified media source must contain the current Recovery payload")
+            if not any(path.is_file() and not path.is_symlink() for path in recovery_dir.rglob("*")):
+                raise UnsafeRemovableTarget("A qualified media source has no Recovery payload")
+            self._validate_published_artifacts(
+                Path(source_dir), plan.bindings, require_all=self.require_published_artifacts
+            )
         current_manifest = self._source_manifest(source_dir)
         if current_manifest != plan.expected_files:
             raise UnsafeRemovableTarget("Media source changed after planning; the immutable plan is stale")
@@ -465,6 +518,7 @@ class RemovableMediaWriter:
             destroys_data=plan.destroys_data,
             expected_files=plan.expected_files,
             bindings=plan.bindings,
+            source_validated=plan.source_validated,
         )
         if not fresh_device.serial or not fresh_device.serial.strip():
             raise UnsafeRemovableTarget(
@@ -664,6 +718,163 @@ class RemovableMediaWriter:
                 raise UnsafeRemovableTarget(f"Source validation raised an error: {exc}") from exc
             if not valid:
                 raise UnsafeRemovableTarget("Source directory failed EFI/Recovery validation")
+
+    @staticmethod
+    def _validate_published_artifacts(
+        source_dir: Path, bindings: MediaBindings, *, require_all: bool = False
+    ) -> None:
+        """Reconcile the published manifest and Recovery evidence at write time."""
+        manifest_path = source_dir / "manifest.json"
+        if not manifest_path.exists() and not require_all:
+            return
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise UnsafeRemovableTarget("Qualified media source must contain a regular EFI manifest")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise UnsafeRemovableTarget("EFI manifest is unreadable") from exc
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("validation_report") != "VALID"
+            or canonical_json_digest(manifest) != bindings.efi_manifest_digest
+        ):
+            raise UnsafeRemovableTarget("EFI manifest is invalid or does not match the media binding")
+        try:
+            parsed_manifest = BuildManifest.from_dict(manifest)
+        except ValueError as exc:
+            raise UnsafeRemovableTarget("EFI manifest is not a valid published contract") from exc
+        if parsed_manifest.output_digest != RemovableMediaWriter._efi_payload_digest(source_dir):
+            raise UnsafeRemovableTarget("EFI payload contents do not match the published manifest")
+
+        lock_path = source_dir / "Recovery" / "recovery.lock.json"
+        evidence_path = source_dir / "Recovery" / "recovery.evidence.json"
+        if require_all and (
+            lock_path.is_symlink()
+            or evidence_path.is_symlink()
+            or not lock_path.is_file()
+            or not evidence_path.is_file()
+        ):
+            raise UnsafeRemovableTarget("Recovery lock and evidence must be present as regular files")
+        if not require_all and not lock_path.exists() and not evidence_path.exists():
+            return
+        if lock_path.is_symlink() or evidence_path.is_symlink() or not lock_path.is_file() or not evidence_path.is_file():
+            raise UnsafeRemovableTarget("Recovery lock and evidence must be present as regular files")
+        try:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise UnsafeRemovableTarget("Recovery lock or evidence is unreadable") from exc
+        if not isinstance(lock, dict) or not isinstance(evidence, dict):
+            raise UnsafeRemovableTarget("Recovery lock and evidence must be objects")
+        try:
+            parsed_lock = RecoveryLock.from_dict(lock)
+            parsed_evidence = RecoveryEvidence(**evidence)
+        except (TypeError, ValueError) as exc:
+            raise UnsafeRemovableTarget("Recovery lock or evidence is not a valid published contract") from exc
+        if (
+            parsed_lock.digest != bindings.recovery_lock_digest
+            or parsed_evidence.lock_digest != bindings.recovery_lock_digest
+            or parsed_evidence.signed_chunklist is not True
+        ):
+            raise UnsafeRemovableTarget("Recovery lock/evidence identity or authenticity does not match the media binding")
+        try:
+            expected_bindings = MediaBindings.from_published_contracts(
+                parsed_manifest, parsed_lock, parsed_evidence
+            )
+        except ValueError as exc:
+            raise UnsafeRemovableTarget("Published Recovery evidence is not bound to the current lock") from exc
+        if bindings != expected_bindings:
+            raise UnsafeRemovableTarget(
+                "EFI, Recovery, validation, configuration, toolchain, and evidence bindings disagree"
+            )
+        try:
+            policy = load_recovery_policy()
+        except Exception as exc:
+            raise UnsafeRemovableTarget("Trusted Recovery policy is unavailable at the media boundary") from exc
+        manifest_digest = canonical_json_digest(manifest)
+        if (
+            parsed_lock.source_policy_digest.lower() != policy.digest.lower()
+            or parsed_lock.product.target != policy.target
+            or parsed_lock.binding.target_digest.lower() != policy.target.digest.lower()
+            or parsed_lock.binding.policy_digest.lower() != policy.digest.lower()
+            or parsed_lock.binding.efi_manifest_digest.lower() != manifest_digest.lower()
+            or parsed_lock.binding.toolchain_digest.lower() != parsed_manifest.toolchain_digest.lower()
+        ):
+            raise UnsafeRemovableTarget("Published Recovery lock is not bound to the current policy and EFI manifest")
+        if parsed_lock.state.value != "verified":
+            raise UnsafeRemovableTarget("Recovery lock is not in the verified state")
+        if (
+            parsed_evidence.image_digest.lower() != parsed_lock.product.image_sha256.lower()
+            or parsed_evidence.chunklist_digest.lower() != parsed_lock.product.chunklist_sha256.lower()
+            or parsed_lock.product.image_size_bytes is None
+            or parsed_lock.product.chunklist_size_bytes is None
+        ):
+            raise UnsafeRemovableTarget("Recovery evidence does not match the locked asset identities")
+        build = parsed_lock.product.target.build
+        image_path = source_dir / "Recovery" / f"Recovery-{build}.dmg"
+        chunklist_path = source_dir / "Recovery" / f"Recovery-{build}.chunklist"
+        if (
+            image_path.is_symlink()
+            or chunklist_path.is_symlink()
+            or not image_path.is_file()
+            or not chunklist_path.is_file()
+        ):
+            raise UnsafeRemovableTarget("Published Recovery image and chunklist are missing or unsafe")
+        if (
+            image_path.stat().st_size != parsed_lock.product.image_size_bytes
+            or image_path.stat().st_size != parsed_evidence.image_size_bytes
+            or chunklist_path.stat().st_size != parsed_lock.product.chunklist_size_bytes
+            or _sha256_file(image_path).lower() != parsed_lock.product.image_sha256.lower()
+            or _sha256_file(chunklist_path).lower() != parsed_lock.product.chunklist_sha256.lower()
+        ):
+            raise UnsafeRemovableTarget("Published Recovery payload bytes do not match verified evidence")
+        try:
+            verified_chunks, verified_image_size = verify_apple_chunklist(
+                image_path,
+                chunklist_path,
+                parsed_lock.product.image_sha256,
+                parsed_lock.product.chunklist_sha256,
+            )
+        except Exception as exc:
+            raise UnsafeRemovableTarget("Published Recovery payload failed signed chunklist verification") from exc
+        if (
+            verified_chunks != parsed_evidence.verified_chunks
+            or verified_image_size != parsed_evidence.image_size_bytes
+        ):
+            raise UnsafeRemovableTarget("Published Recovery evidence does not match signed chunklist verification")
+        state_path = source_dir / "Recovery" / "recovery.state.json"
+        if require_all:
+            if state_path.is_symlink() or not state_path.is_file():
+                raise UnsafeRemovableTarget("Authoritative Recovery state is missing")
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise UnsafeRemovableTarget("Authoritative Recovery state is unreadable") from exc
+            if (
+                not isinstance(state, dict)
+                or state.get("schema_version") != "1"
+                or state.get("lock") != lock
+                or state.get("evidence") != evidence
+            ):
+                raise UnsafeRemovableTarget("Recovery compatibility files do not match authoritative state")
+
+    @staticmethod
+    def _efi_payload_digest(source_dir: Path) -> str:
+        """Recompute the EFI build digest, excluding the separately published Recovery payload."""
+        records: list[dict[str, object]] = []
+        for entry in sorted(Path(source_dir).rglob("*")):
+            relative = entry.relative_to(source_dir).as_posix()
+            if relative == "manifest.json" or relative == "Recovery" or relative.startswith("Recovery/"):
+                continue
+            entry_stat = os.lstat(entry)
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise UnsafeRemovableTarget(f"media source contains a symlink: {relative}")
+            if stat.S_ISDIR(entry_stat.st_mode):
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise UnsafeRemovableTarget(f"media source contains a non-regular file: {relative}")
+            records.append({"path": relative, "size": entry_stat.st_size, "sha256": _sha256_file(entry)})
+        return canonical_json_digest({"files": records})
 
     @classmethod
     def _source_manifest(cls, source_dir: Path) -> tuple[MediaFileDigest, ...]:

@@ -18,7 +18,11 @@ from macloader.domain.evidence import EvidenceRecord
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.dependencies import ArtifactVariant, ResolvedDependencySet
-from macloader.domain.recovery import RecoveryBinding, RecoveryLock
+from macloader.domain.contracts import BuildManifest, IdentityReference, ToolchainSelection, canonical_json_digest
+from macloader.domain.recovery import RecoveryBinding, RecoveryEvidence, RecoveryLock
+from macloader.build.acpi import AcpiProcessor
+from macloader.build.config import effective_profile_digest, load_reviewed_profile
+from macloader.build.efi import EfiBuildResult
 from macloader.orchestrator import Orchestrator
 from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
 from macloader.recovery.acquirer import RecoveryBundle
@@ -57,19 +61,38 @@ class WorkflowService:
 
     def create(self, fixture: Optional[Path] = None, sanitize: bool = False) -> tuple[UserConfiguration, HardwareSnapshot]:
         snapshot = self.orchestrator.probe_hardware(fixture_path=fixture, sanitize=sanitize)
-        return self.orchestrator.new_configuration(snapshot), snapshot
+        draft = replace(self.orchestrator.new_configuration(snapshot), loaded_base_revision=0)
+        return draft, snapshot
 
     def evaluate(self, configuration: UserConfiguration, snapshot: HardwareSnapshot) -> WorkflowState:
         return WorkflowState(configuration, self.orchestrator.evaluate_configuration(configuration, snapshot))
 
     def load(self, configuration_id: str) -> UserConfiguration:
-        return self.store.load(configuration_id)
+        configuration = self.store.load(configuration_id)
+        return replace(configuration, loaded_base_revision=configuration.revision)
 
     def save(self, configuration: UserConfiguration) -> Path:
-        return self.store.save(configuration)
+        expected = configuration.loaded_base_revision
+        if expected is None:
+            # A save is a compare-and-swap, not an implicit upsert.  A caller
+            # that did not load this id has no trustworthy base revision.  The
+            # only safe untracked save is a brand-new draft at revision zero.
+            if configuration.revision != 0:
+                raise ValueError(
+                    "configuration must be loaded before saving an existing or non-zero revision"
+                )
+            expected = 0
+        return self.store.save(configuration, expected_revision=expected)
 
     def save_revision(self, configuration: UserConfiguration) -> Path:
-        return self.save(replace(configuration, revision=configuration.revision + 1))
+        expected = configuration.loaded_base_revision
+        if expected is None:
+            raise ValueError(
+                "configuration must be loaded before saving a new revision"
+            )
+        next_revision = expected + 1
+        saved = replace(configuration, revision=next_revision)
+        return self.store.save(saved, expected_revision=expected)
 
     def set_target(self, configuration: UserConfiguration, version: str, build: str) -> UserConfiguration:
         release = self.orchestrator.configuration_service.policy.get_release("sequoia", version, build)
@@ -83,6 +106,16 @@ class WorkflowService:
         return replace(
             configuration,
             option_selections=tuple(selections.items()),
+            acknowledgements=(),
+            revision=configuration.revision + 1,
+        )
+
+    def set_identity_reference(self, configuration: UserConfiguration, storage_ref: str) -> UserConfiguration:
+        if Path(storage_ref).name != storage_ref or not storage_ref.endswith(".json"):
+            raise ValueError("identity reuse requires a local redacted JSON filename")
+        return replace(
+            configuration,
+            identity_ref=IdentityReference("0.1", storage_ref, redacted=True),
             acknowledgements=(),
             revision=configuration.revision + 1,
         )
@@ -127,9 +160,17 @@ class WorkflowService:
         target_macos = configuration.target.version if configuration.target is not None else "sequoia"
         return self.orchestrator.check_support(snapshot, target_macos=target_macos)
 
-    def verify_recovery_cache(self, lock_path: Path, image_path: Path, chunklist_path: Path) -> object:
+    def verify_recovery_cache(
+        self,
+        lock_path: Path,
+        image_path: Path,
+        chunklist_path: Path,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> RecoveryEvidence:
         lock = self.orchestrator.recovery_service.load_lock(Path(lock_path))
-        return self.orchestrator.recovery_service.verify(lock, Path(image_path), Path(chunklist_path))
+        return self.orchestrator.recovery_service.verify(
+            lock, Path(image_path), Path(chunklist_path), cancel=cancel
+        )
 
     @staticmethod
     def removable_status() -> dict[str, object]:
@@ -169,7 +210,11 @@ class WorkflowService:
         if cancel and cancel():
             raise ValueError("Dependency resolution cancelled")
         state = self.evaluate(configuration, snapshot)
-        dependencies = self.orchestrator.resolve_dependencies(state.evaluation.plan, variant=variant)
+        if cancel and cancel():
+            raise ValueError("Dependency resolution cancelled")
+        dependencies = self.orchestrator.resolve_dependencies(
+            state.evaluation.plan, variant=variant, cancel=cancel
+        )
         if cancel and cancel():
             raise ValueError("Dependency resolution cancelled")
         return state, dependencies
@@ -181,17 +226,44 @@ class WorkflowService:
         output: Path,
         offline: bool = True,
         cancel: Optional[Callable[[], bool]] = None,
-    ) -> object:
+        ocvalidate_path: Optional[Path] = None,
+        ocvalidate_sha256: Optional[str] = None,
+    ) -> EfiBuildResult:
         """Build and validate only the generated EFI output; media is never touched."""
-        state, dependencies = self.resolve_dependencies(configuration, snapshot)
+        state, dependencies = self.resolve_dependencies(configuration, snapshot, cancel=cancel)
         if state.evaluation.has_blockers:
             raise ValueError("EFI build blocked by configuration issues")
         if not dependencies.is_complete:
             raise ValueError("EFI build blocked by unresolved dependency requirements")
+        try:
+            reviewed_profile = load_reviewed_profile()
+            acpi_record = next(record for record in configuration.evidence if record.kind == "acpi")
+            evidence_source = self.orchestrator.configuration_service._evidence_source(acpi_record.private_ref)
+            if evidence_source is None:
+                raise ValueError("private ACPI evidence source is missing or unsafe")
+            private_acpi_capture = evidence_source.parent
+            expected_evidence_digest = AcpiProcessor.capture_evidence_digest(
+                private_acpi_capture, acpi_record.bios_binding, snapshot.snapshot_id
+            )
+        except (StopIteration, OSError, ValueError) as exc:
+            raise ValueError(f"EFI build blocked by machine-bound ACPI evidence: {exc}") from exc
         artifacts = self.orchestrator.fetch_dependencies(
             dependencies, offline=offline, plan=state.evaluation.plan, cancel=cancel
         )
-        return self.orchestrator.build_efi(state.evaluation.plan, dependencies, artifacts, Path(output))
+        with self.orchestrator.lease_dependencies(dependencies, cancel=cancel) as leased_artifacts:
+            return self.orchestrator.build_efi(
+                state.evaluation.plan,
+                dependencies,
+                leased_artifacts,
+                Path(output),
+                reviewed_profile=reviewed_profile,
+                private_acpi_capture=private_acpi_capture,
+                expected_acpi_evidence_digest=expected_evidence_digest,
+                identity_reference=configuration.identity_ref,
+                cancel=cancel,
+                ocvalidate_path=ocvalidate_path,
+                ocvalidate_sha256=ocvalidate_sha256,
+            )
 
     def discover_recovery(
         self,
@@ -207,9 +279,86 @@ class WorkflowService:
         destination: Path,
         cancel: Optional[Callable[[], bool]] = None,
         resume: bool = True,
+        verified_artifacts: Optional[Mapping[str, str]] = None,
+        require_verified: bool = False,
     ) -> tuple[RecoveryLock, RecoveryBundle]:
         return self.orchestrator.recovery_service.acquire(
-            result, binding, destination, cancel=cancel, resume=resume
+            result, binding, destination, cancel=cancel, resume=resume,
+            verified_artifacts=verified_artifacts, require_verified=require_verified,
+        )
+
+    def persist_recovery_result(
+        self, lock: RecoveryLock, evidence: RecoveryEvidence, destination: Path
+    ) -> tuple[Path, Path, Path]:
+        return self.orchestrator.recovery_service.save_verified_bundle(lock, evidence, Path(destination))
+
+    def derive_recovery_binding(
+        self,
+        configuration: UserConfiguration,
+        snapshot: HardwareSnapshot,
+        toolchain: Optional[ToolchainSelection],
+        manifest: BuildManifest,
+        efi_output: Optional[Path] = None,
+    ) -> RecoveryBinding:
+        state = self.evaluate(configuration, snapshot)
+        if state.evaluation.has_blockers or state.evaluation.accepted is None:
+            raise ValueError("Recovery binding requires an accepted current configuration")
+        if toolchain is None:
+            toolchain = self.orchestrator.trusted_toolchain()
+        if efi_output is not None:
+            validation = self.orchestrator.builder.validate_tree(
+                Path(efi_output), toolchain=toolchain, expected_manifest=manifest
+            )
+            if validation.status != "VALID":
+                raise ValueError(
+                    "EFI output failed the trusted manifest validation: "
+                    + "; ".join(validation.errors)
+                )
+        dependencies = self.orchestrator.resolve_dependencies(state.evaluation.plan)
+        if not dependencies.is_complete:
+            raise ValueError("Recovery binding requires a complete current dependency resolution")
+        reviewed_profile = load_reviewed_profile()
+        acpi_record = next((record for record in configuration.evidence if record.kind == "acpi"), None)
+        if acpi_record is None:
+            raise ValueError("Recovery binding requires the current verified ACPI evidence")
+        evidence_source = self.orchestrator.configuration_service._evidence_source(acpi_record.private_ref)
+        if evidence_source is None:
+            raise ValueError("Recovery binding requires a safe current ACPI evidence source")
+        expected_acpi_digest = AcpiProcessor.capture_evidence_digest(
+            evidence_source.parent, acpi_record.bios_binding, snapshot.snapshot_id
+        )
+        expected_build_digest = canonical_json_digest({
+            "plan_digest": state.evaluation.plan.canonical_digest(),
+            "dependency_digest": dependencies.canonical_digest(),
+            "toolchain_digest": toolchain.digest,
+            "identity_digest": manifest.identity_digest,
+            "output_digest": manifest.output_digest,
+            "schema_digest": manifest.schema_digest,
+            "profile_digest": effective_profile_digest(
+                reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
+            ),
+            "acpi_digest": manifest.acpi_digest,
+            "evidence_digests": [expected_acpi_digest],
+            "usb_policy_state": manifest.usb_policy_state,
+            "usb_first_install_route": manifest.usb_first_install_route,
+            "schema_version": manifest.schema_version,
+        })
+        return self.orchestrator.recovery_service.derive_binding(
+            configuration,
+            state.evaluation.plan,
+            toolchain,
+            manifest,
+            self.orchestrator.resolver.catalog_digest(),
+            expected_artifact_lock_digest=dependencies.to_artifact_lock().digest,
+            expected_build_digest=expected_build_digest,
+            expected_profile_digest=effective_profile_digest(
+                reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
+            ),
+            expected_evidence_digests=(expected_acpi_digest,),
+            expected_identity_reference=(
+                configuration.identity_ref.storage_ref if configuration.identity_ref is not None else None
+            ),
+            workflow_capability=self.orchestrator._workflow_capability,
         )
 
     @staticmethod

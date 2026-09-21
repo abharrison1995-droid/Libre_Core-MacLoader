@@ -20,6 +20,11 @@ from macloader.removable.writer import RemovableDevice, RemovableMediaWriter, Un
 class WindowsQualifiedBackend(Protocol):
     """Privileged boundary supplied only after Windows media qualification."""
 
+    # Native backends must explicitly attest that they implement the
+    # production-qualified lock/write/flush/readback contract.  Merely
+    # exposing methods is not enough to enable destructive media operations.
+    production_qualified: bool
+
     def lock_and_dismount(self, device: RemovableDevice) -> None:
         ...
 
@@ -93,10 +98,12 @@ class WindowsRemovableAdapter:
         runner: Optional[Callable[[str], str]] = None,
         backend: Optional[WindowsQualifiedBackend] = None,
         platform: Optional[str] = None,
+        synthetic_test_mode: bool = False,
     ) -> None:
         self._runner = runner or self._run_powershell
         self._backend = backend
         self._platform = platform or sys.platform
+        self._synthetic_test_mode = synthetic_test_mode
 
     @property
     def status(self) -> AdapterStatus:
@@ -112,6 +119,11 @@ class WindowsRemovableAdapter:
         required = ("lock_and_dismount", "write", "flush", "readback", "remount", "invalidate")
         if not all(callable(getattr(self._backend, name, None)) for name in required):
             return AdapterStatus("windows", True, False, "Windows backend lacks lock, flush, remount, or readback qualification")
+        if not self._synthetic_test_mode and getattr(self._backend, "production_qualified", False) is not True:
+            return AdapterStatus(
+                "windows", True, False,
+                "Windows backend must explicitly attest production media qualification",
+            )
         return AdapterStatus("windows", True, True, "Windows discovery and injected write backend are enabled")
 
     def enumerate(self) -> list[RemovableDevice]:
@@ -205,6 +217,11 @@ class WindowsRemovableAdapter:
             enumerator=self.enumerate,
             readback_verifier=self.readback,
             invalidator=lambda plan, reason: self.invalidate(plan, reason),
+            # A native backend must explicitly attest that it is the
+            # production-qualified path before the writer requires the
+            # published EFI/Recovery cross-binding checks.  Test backends do
+            # not carry this attestation and remain synthetic only.
+            require_published_artifacts=self.status.qualified and not self._synthetic_test_mode,
         )
 
     @staticmethod

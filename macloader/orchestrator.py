@@ -1,9 +1,9 @@
 """High-level orchestrator coordinating detection, compatibility, BuildPlan, and dependency workflows."""
 
 import logging
-import platform
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Union
+from typing import Callable, Dict, Iterator, List, Mapping, Optional, Union
 
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.database.loader import Database, get_database
@@ -24,7 +24,7 @@ from macloader.domain.dependencies import (
     DependencySpec,
     ResolvedDependencySet,
 )
-from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
+from macloader.domain.contracts import IdentityReference, ToolchainSelection
 from macloader.build.config import ReviewedEfiProfile
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.configuration import UserConfiguration
@@ -32,6 +32,7 @@ from macloader.configuration.service import ConfigurationEvaluation, Configurati
 from macloader.exceptions import ArtifactDownloadError
 from macloader.recovery.service import RecoveryService
 from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
+from macloader.toolchain.loader import ToolchainTrustError, TrustedToolchainLoader
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class Orchestrator:
         self.builder = EfiBuilder(db=self.db)
         self._configuration_service: Optional[ConfigurationService] = None
         self._recovery_service: Optional[RecoveryService] = None
+        self._workflow_capability = object()
 
     @property
     def configuration_service(self) -> ConfigurationService:
@@ -60,7 +62,7 @@ class Orchestrator:
     def recovery_service(self) -> RecoveryService:
         """Shared exact-target Recovery service for CLI and Textual clients."""
         if self._recovery_service is None:
-            self._recovery_service = RecoveryService()
+            self._recovery_service = RecoveryService(workflow_capability=self._workflow_capability)
         return self._recovery_service
 
     def discover_recovery(
@@ -132,9 +134,10 @@ class Orchestrator:
         self,
         plan: BuildPlan,
         variant: ArtifactVariant = ArtifactVariant.RELEASE,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> ResolvedDependencySet:
         """Resolve required dependencies for the given BuildPlan without performing network I/O."""
-        return self.resolver.resolve(plan=plan, variant=variant)
+        return self.resolver.resolve(plan=plan, variant=variant, cancel=cancel)
 
     def fetch_dependencies(
         self,
@@ -195,6 +198,24 @@ class Orchestrator:
 
         return results
 
+    @contextmanager
+    def lease_dependencies(
+        self,
+        dep_set: ResolvedDependencySet,
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[Dict[str, Path]]:
+        """Lease verified dependency files until the consuming build finishes."""
+        leased: Dict[str, Path] = {}
+        with ExitStack() as stack:
+            for dep in sorted(dep_set.resolved_dependencies, key=lambda item: item.dependency_id):
+                spec = self.db.get_dependency_spec(dep.dependency_id)
+                if spec is None:
+                    raise ArtifactDownloadError(f"Dependency {dep.dependency_id} is absent from the current catalog")
+                leased[dep.dependency_id] = stack.enter_context(
+                    self.cache.artifact_lease(spec, dep.variant, cancel=cancel)
+                )
+            yield leased
+
     def verify_cached_dependencies(self, dep_set: ResolvedDependencySet, *, plan: Optional[BuildPlan] = None) -> Dict[str, bool]:
         """Verify the integrity of all cached artifacts belonging to the resolved set."""
         status_map: Dict[str, bool] = {}
@@ -245,29 +266,38 @@ class Orchestrator:
         reviewed_profile: Optional[ReviewedEfiProfile] = None,
         private_acpi_capture: Optional[Union[str, Path]] = None,
         expected_acpi_evidence_digest: Optional[str] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+        identity_reference: Optional[IdentityReference] = None,
     ) -> EfiBuildResult:
         if dep_set.plan_digest != plan.canonical_digest():
             raise ArtifactDownloadError("Dependency lock is bound to a different BuildPlan")
-        if toolchain is None:
-            opencore = self.db.get_dependency_spec("opencore")
-            if opencore is None:
-                raise ArtifactDownloadError("OpenCore toolchain policy is unavailable")
-            toolchain = ToolchainSelection(
-                schema_version=CONTRACT_SCHEMA_VERSION,
-                opencore_version=opencore.version,
-                ocvalidate_version=opencore.version,
-                acpi_compiler=None,
-                identity_tool=None,
-                recovery_tool=None,
-                host_platform=platform.system().lower(),
-                host_architecture=platform.machine().lower(),
-                provenance={"source": "cli-supplied", "qualification": "pending-s03"},
-                ocvalidate_path=str(ocvalidate_path) if ocvalidate_path else None,
-                ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
-            )
+        try:
+            trusted_loader = TrustedToolchainLoader()
+            trusted = trusted_loader.select()
+            if toolchain is not None:
+                trusted_loader.verify_selection(toolchain)
+            toolchain = trusted
+            if ocvalidate_path is not None and Path(ocvalidate_path).resolve() != Path(trusted.ocvalidate_path or "").resolve():
+                raise ToolchainTrustError("Requested ocvalidate is not the trusted catalog selection")
+            if ocvalidate_sha256 is not None and ocvalidate_sha256.lower() != (trusted.ocvalidate_sha256 or "").lower():
+                raise ToolchainTrustError("Requested ocvalidate digest does not match the trusted catalog selection")
+        except ToolchainTrustError as exc:
+            raise ArtifactDownloadError(f"Trusted production toolchain is unavailable or unqualified: {exc}") from exc
         return self.builder.build(
             plan, dep_set, artifact_paths, Path(output_dir), fake_identity=fake_identity, toolchain=toolchain,
             reviewed_profile=reviewed_profile,
             private_acpi_capture=Path(private_acpi_capture) if private_acpi_capture is not None else None,
             expected_acpi_evidence_digest=expected_acpi_evidence_digest,
+            cancel=cancel,
+            identity_reference=identity_reference,
         )
+
+    @staticmethod
+    def trusted_toolchain() -> ToolchainSelection:
+        """Return the locally installed selection only after catalog verification."""
+        try:
+            return TrustedToolchainLoader().select()
+        except ToolchainTrustError as exc:
+            raise ArtifactDownloadError(
+                f"Trusted production toolchain is unavailable or unqualified: {exc}"
+            ) from exc

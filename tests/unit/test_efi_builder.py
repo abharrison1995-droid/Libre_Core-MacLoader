@@ -44,7 +44,7 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
     validator.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
     toolchain = ToolchainSelection(CONTRACT_SCHEMA_VERSION, "1.0.7", "1.0.7", None, None, None, "windows", "x86_64", {"qualification": "qualified"}, str(validator), hashlib.sha256(validator.read_bytes()).hexdigest())
 
-    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+    report = EfiBuilder().validate_tree(root, toolchain=toolchain, synthetic_test_mode=True)
     assert report.status == "INVALID"
     assert any("Configured driver is missing" in error for error in report.errors)
 
@@ -63,7 +63,7 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
         output_digest=builder._tree_digest(root),
     )
     (root / "manifest.json").write_text(json.dumps(expected_manifest.to_dict()), encoding="utf-8")
-    report = builder.validate_tree(root, toolchain=toolchain, expected_manifest=expected_manifest)
+    report = builder.validate_tree(root, toolchain=toolchain, expected_manifest=expected_manifest, synthetic_test_mode=True)
     assert report.status == "INVALID"
     assert report.checks["ocvalidate_exit"] == "2"
 
@@ -87,7 +87,7 @@ def test_qualified_validation_requires_a_trusted_expected_manifest(tmp_path: Pat
         hashlib.sha256(validator.read_bytes()).hexdigest(),
     )
 
-    report = EfiBuilder().validate_tree(root, toolchain=toolchain)
+    report = EfiBuilder().validate_tree(root, toolchain=toolchain, synthetic_test_mode=True)
 
     assert report.status == "INVALID"
     assert any("expected manifest" in error for error in report.errors)
@@ -124,7 +124,7 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
 
     builder = EfiBuilder(db=db, identity_store_dir=tmp_path / "identities")
     fake_identity = {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}
-    result = builder.build(plan, dep_set, archives, tmp_path / "output", fake_identity=fake_identity, toolchain=toolchain)
+    result = builder.build(plan, dep_set, archives, tmp_path / "output", fake_identity=fake_identity, toolchain=toolchain, synthetic_test_mode=True)
     assert result.validation.status == "VALID"
     assert (result.output_dir / "EFI/BOOT/BOOTx64.efi").is_file()
     assert (result.output_dir / "EFI/OC/OpenCore.efi").is_file()
@@ -141,13 +141,13 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     mutated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     mutated_manifest["artifact_lock_digest"] = "f" * 64
     manifest_path.write_text(json.dumps(mutated_manifest), encoding="utf-8")
-    report = builder.validate_tree(result.output_dir, toolchain=toolchain, identity=fake_identity, expected_manifest=result.manifest)
+    report = builder.validate_tree(result.output_dir, toolchain=toolchain, identity=fake_identity, expected_manifest=result.manifest, synthetic_test_mode=True)
     assert report.status == "INVALID"
     assert any("manifest identity" in error for error in report.errors)
 
     mismatched_plan = BuildPlan("Lenovo ThinkPad T480s", "sequoia", "different-snapshot", CompatibilityState.EXPERIMENTAL, is_actionable=True, build_ready=True)
     with pytest.raises(BuildPlanError, match="different BuildPlan"):
-        EfiBuilder(db=db).build(plan=mismatched_plan, dependencies=dep_set, artifact_paths=archives, output_dir=tmp_path / "mismatch", toolchain=toolchain)
+        EfiBuilder(db=db).build(plan=mismatched_plan, dependencies=dep_set, artifact_paths=archives, output_dir=tmp_path / "mismatch", toolchain=toolchain, synthetic_test_mode=True)
 
 
 def test_identity_validation_rejects_incomplete_or_extra_fields() -> None:

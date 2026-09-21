@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import asyncio
 from typing import Callable, Optional
 
 from textual import work
@@ -12,18 +13,31 @@ from textual.widgets import Button, Footer, Header, Input, Label, Static
 from macloader.domain.configuration import UserConfiguration
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.dependencies import ArtifactVariant
-from macloader.domain.recovery import RecoveryBinding, RecoveryState
+from macloader.domain.contracts import BuildManifest
+from macloader.domain.recovery import RecoveryBinding, RecoveryLock, RecoveryState
 from macloader.evidence.acpi import AcpiEvidenceBundle
 from macloader.evidence.usb import UsbEvidenceSession
 from macloader.removable.writer import RemovableDevice
 from macloader.workflow.service import WorkflowService, WorkflowState
 from macloader.recovery.discovery import RecoveryDiscoveryResult
+from macloader.recovery.acquirer import RecoveryBundle
 
 
 class WorkflowApp(App[None]):
     """Non-destructive workflow client; CLI and TUI use identical service calls."""
 
     TITLE = "Libre_Core MacLoader"
+    DEFAULT_CSS = """
+    # Rows are explicitly sized so Textual does not allocate one full-width
+    # child per control and place the primary action outside the viewport.
+    .control-row { width: 100%; height: 3; min-height: 3; }
+    .control-row Input { width: 1fr; min-width: 0; }
+    .control-row Button { width: 16; min-width: 12; }
+    .control-note { width: 1fr; min-width: 18; color: $text-muted; }
+    #primary-actions Button { width: 1fr; min-width: 12; }
+    #workflow-status { max-height: 6; overflow-y: auto; }
+    #workflow-stages { max-height: 4; overflow-y: auto; }
+    """
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
@@ -44,7 +58,12 @@ class WorkflowApp(App[None]):
         self._draft: Optional[UserConfiguration] = None
         self._snapshot: Optional[HardwareSnapshot] = None
         self._cancel_requested = False
+        self._operation_generation = 0
         self._recovery_result: Optional[RecoveryDiscoveryResult] = None
+        self._efi_manifest: Optional[BuildManifest] = None
+        self._efi_output: Optional[Path] = None
+        self._last_state: Optional[WorkflowState] = None
+        self._latest_message = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -52,54 +71,57 @@ class WorkflowApp(App[None]):
             yield Static("Loading shared workflow…", id="workflow-status")
             yield Static("", id="workflow-stages")
             yield Label("Exact Recovery target")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input("15.0", placeholder="version", id="version-input")
                 yield Input("24A335", placeholder="build", id="build-input")
                 yield Button("Apply target", id="apply-target", variant="primary")
             yield Label("Policy option")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="option.id", id="option-id-input")
                 yield Input(placeholder="value", id="option-value-input")
                 yield Button("Set option", id="set-option")
             yield Label("Experimental acknowledgement")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="rule or option id", id="ack-rule-input")
                 yield Input(placeholder="exact warning text", id="ack-warning-input")
                 yield Button("Acknowledge", id="acknowledge")
-            with Horizontal():
+            with Horizontal(id="primary-actions", classes="control-row"):
                 yield Button("Evaluate", id="evaluate", variant="primary")
                 yield Button("Save revision", id="save")
                 yield Button("Cancel", id="cancel")
             yield Label("Configuration import/export and evidence review")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="JSON file path", id="config-path-input")
                 yield Button("Import", id="import-config")
                 yield Button("Migrate", id="migrate-config")
                 yield Button("Export redacted", id="export-config")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="evidence JSON path", id="evidence-path-input")
                 yield Input(placeholder="usb or acpi", id="evidence-kind-input")
                 yield Button("Import evidence", id="import-evidence")
+            with Horizontal(classes="control-row"):
+                yield Input(placeholder="private identity filename to reuse", id="identity-ref-input")
+                yield Button("Use stored identity", id="set-identity")
             yield Label("Plan, dependency, EFI and Recovery stages")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Button("Review hardware support", id="support-review")
                 yield Button("Resolve dependencies", id="resolve-dependencies")
                 yield Input(placeholder="EFI output directory", id="efi-output-input")
                 yield Button("Build/validate EFI", id="build-efi")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Button("Discover exact Recovery", id="discover-recovery")
-                yield Input(placeholder="Recovery binding JSON", id="recovery-binding-input")
+                yield Static("Binding derives from the current verified EFI", classes="control-note")
                 yield Input(placeholder="Recovery cache directory", id="recovery-destination-input")
                 yield Input(placeholder="type exact large-download checkpoint", id="recovery-checkpoint-input")
                 yield Button("Acquire Recovery", id="acquire-recovery")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="Recovery lock JSON", id="recovery-lock-input")
                 yield Input(placeholder="Recovery image", id="recovery-image-input")
                 yield Input(placeholder="Recovery chunklist", id="recovery-chunklist-input")
                 yield Button("Verify Recovery cache", id="verify-recovery")
                 yield Button("USB adapter status", id="usb-status")
             yield Label("Non-destructive media plan")
-            with Horizontal():
+            with Horizontal(classes="control-row"):
                 yield Input(placeholder="stable device identity", id="media-device-id-input")
                 yield Input(placeholder="model", id="media-model-input")
                 yield Input(placeholder="capacity bytes", id="media-capacity-input")
@@ -111,10 +133,12 @@ class WorkflowApp(App[None]):
         self.action_refresh()
 
     def action_refresh(self) -> None:
+        self._cancel_workflow_workers()
         self._cancel_requested = False
+        self._invalidate_efi()
         status = self.query_one("#workflow-status", Static)
         try:
-            if self.config_id:
+            if self.config_id and self._draft is None:
                 self._draft = self.service.load(self.config_id)
                 if self.fixture is None:
                     self._snapshot = None
@@ -124,6 +148,10 @@ class WorkflowApp(App[None]):
                     )
                     self._show_stages(None)
                     return
+                _, self._snapshot = self.service.create(self.fixture)
+            elif self._draft is not None and self.fixture is not None:
+                # Refresh hardware observations without abandoning an active
+                # draft.  Starting a new draft is an explicit user action.
                 _, self._snapshot = self.service.create(self.fixture)
             else:
                 self._draft, self._snapshot = self.service.create(self.fixture)
@@ -137,9 +165,12 @@ class WorkflowApp(App[None]):
         if self._draft is None:
             status.update("Nothing to save; press Refresh to load a draft.")
             return
+        self._cancel_workflow_workers()
+        self._cancel_requested = False
         try:
             self.service.save_revision(self._draft)
             self._draft = self.service.load(self._draft.configuration_id)
+            self.config_id = self._draft.configuration_id
             status.update(
                 f"Saved configuration {self._draft.configuration_id} revision {self._draft.revision}. "
                 "Private storage paths are intentionally not displayed."
@@ -149,13 +180,27 @@ class WorkflowApp(App[None]):
             status.update(f"Save blocked: {type(exc).__name__}: {exc}")
 
     def action_cancel(self) -> None:
-        self._cancel_requested = True
-        for worker in self.workers:
-            if worker.group == "workflow-stage":
-                worker.cancel()
+        self._cancel_workflow_workers()
         self.query_one("#workflow-status", Static).update(
             "Cancelled. No destructive operation is available in this workflow; the draft remains unchanged."
         )
+
+    async def on_unmount(self) -> None:
+        """Invalidate and bounded-wait for workers before teardown."""
+        self._cancel_workflow_workers()
+        active = [worker for worker in self.workers if worker.group == "workflow-stage"]
+        if active:
+            await asyncio.gather(
+                *(asyncio.wait_for(worker.wait(), timeout=1.0) for worker in active),
+                return_exceptions=True,
+            )
+
+    def _cancel_workflow_workers(self) -> None:
+        self._cancel_requested = True
+        self._operation_generation += 1
+        for worker in list(self.workers):
+            if worker.group == "workflow-stage":
+                worker.cancel()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions: dict[str, Callable[[], None]] = {
@@ -169,6 +214,7 @@ class WorkflowApp(App[None]):
             "migrate-config": self._migrate_config,
             "export-config": self._export_config,
             "import-evidence": self._import_evidence,
+            "set-identity": self._set_identity,
             "resolve-dependencies": self._resolve_dependencies,
             "support-review": self._support_review,
             "build-efi": self._build_efi,
@@ -192,6 +238,8 @@ class WorkflowApp(App[None]):
                 self.query_one("#version-input", Input).value.strip(),
                 self.query_one("#build-input", Input).value.strip(),
             )
+            self._invalidate_efi()
+            self._operation_generation += 1
             self._evaluate()
         except Exception as exc:
             self._message(f"Target change blocked: {type(exc).__name__}: {exc}")
@@ -206,6 +254,8 @@ class WorkflowApp(App[None]):
                 self.query_one("#option-id-input", Input).value.strip(),
                 self.query_one("#option-value-input", Input).value.strip(),
             )
+            self._invalidate_efi()
+            self._operation_generation += 1
             self._evaluate()
         except Exception as exc:
             self._message(f"Option change blocked: {type(exc).__name__}: {exc}")
@@ -220,6 +270,8 @@ class WorkflowApp(App[None]):
                 self.query_one("#ack-rule-input", Input).value.strip(),
                 self.query_one("#ack-warning-input", Input).value,
             )
+            self._invalidate_efi()
+            self._operation_generation += 1
             self._evaluate()
         except Exception as exc:
             self._message(f"Acknowledgement blocked: {type(exc).__name__}: {exc}")
@@ -231,12 +283,16 @@ class WorkflowApp(App[None]):
         self._import_config_file(migrate=True)
 
     def _import_config_file(self, migrate: bool) -> None:
+        self._cancel_workflow_workers()
+        self._cancel_requested = False
         try:
             path = Path(self.query_one("#config-path-input", Input).value.strip())
             self._draft, issues = self.service.migrate_file(path) if migrate else self.service.import_as_new(path)
             self.service.save(self._draft)
+            self._draft = self.service.load(self._draft.configuration_id)
             self.config_id = self._draft.configuration_id
             self._snapshot = None
+            self._invalidate_efi()
             action = "Migrated" if migrate else "Imported"
             self._message(
                 f"{action} configuration {self._draft.configuration_id} revision {self._draft.revision}; "
@@ -261,17 +317,22 @@ class WorkflowApp(App[None]):
         if self._draft is None:
             self._message("Evidence import requires a loaded configuration.")
             return
+        self._cancel_workflow_workers()
+        self._cancel_requested = False
         try:
             path = Path(self.query_one("#evidence-path-input", Input).value.strip())
             payload = json.loads(path.read_text(encoding="utf-8"))
             kind = self.query_one("#evidence-kind-input", Input).value.strip().lower()
-            record = (
-                UsbEvidenceSession.from_dict(payload).to_evidence_record()
-                if kind == "usb"
-                else AcpiEvidenceBundle.from_dict(payload).to_evidence_record()
-            )
+            if kind == "usb":
+                record = UsbEvidenceSession.from_dict(payload).to_evidence_record()
+            elif kind == "acpi":
+                record = AcpiEvidenceBundle.from_dict(payload).to_evidence_record()
+            else:
+                raise ValueError("Evidence kind must be exactly usb or acpi")
             self._draft = self.service.add_evidence(self._draft, record)
+            self._invalidate_efi()
             self.service.save(self._draft)
+            self._draft = self.service.load(self._draft.configuration_id)
             self._message(
                 f"Imported sanitized {kind} evidence into configuration {self._draft.configuration_id}; "
                 f"source file: {path.name}"
@@ -290,102 +351,202 @@ class WorkflowApp(App[None]):
         except Exception as exc:
             self._message(f"Hardware support review blocked: {type(exc).__name__}: {exc}")
 
-    def _resolve_dependencies(self) -> None:
-        self._resolve_dependencies_worker()
-
-    @work(thread=True, exclusive=True, group="workflow-stage")
-    def _resolve_dependencies_worker(self) -> None:
-        if self._draft is None or self._snapshot is None:
-            self.call_from_thread(self._message, "Dependency resolution requires an evaluated configuration and explicit fixture.")
+    def _set_identity(self) -> None:
+        if self._draft is None:
+            self._message("Identity reuse requires a loaded configuration.")
             return
         try:
-            state, dependencies = self.service.resolve_dependencies(
-                self._draft, self._snapshot, ArtifactVariant.RELEASE, cancel=lambda: self._cancel_requested
+            self._draft = self.service.set_identity_reference(
+                self._draft, self.query_one("#identity-ref-input", Input).value.strip()
             )
-            self.call_from_thread(self._message,
+            self._invalidate_efi()
+            self._operation_generation += 1
+            self._evaluate()
+        except Exception as exc:
+            self._message(f"Identity reuse blocked: {type(exc).__name__}: {exc}")
+
+    def _resolve_dependencies(self) -> None:
+        if self._draft is None or self._snapshot is None:
+            self._message("Dependency resolution requires an evaluated configuration and explicit fixture.")
+            return
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._resolve_dependencies_worker(self._draft, self._snapshot, self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _resolve_dependencies_worker(self, draft: UserConfiguration, snapshot: HardwareSnapshot, generation: int) -> None:
+        try:
+            state, dependencies = self.service.resolve_dependencies(
+                draft, snapshot, ArtifactVariant.RELEASE, cancel=lambda: self._cancel_requested or generation != self._operation_generation
+            )
+            self.call_from_thread(self._publish_message_if_current, generation,
                 f"Dependency resolution: {len(dependencies.resolved_dependencies)} resolved entries; "
                 f"complete={dependencies.is_complete}; plan={state.evaluation.plan.canonical_digest()}"
             )
         except Exception as exc:
-            self.call_from_thread(self._message, f"Dependency resolution blocked: {type(exc).__name__}: {exc}")
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"Dependency resolution blocked: {type(exc).__name__}: {exc}",
+            )
 
     def _build_efi(self) -> None:
         output = Path(self.query_one("#efi-output-input", Input).value.strip())
-        self._build_efi_worker(output)
+        if self._draft is None or self._snapshot is None:
+            self._message("EFI build requires an evaluated configuration and explicit fixture.")
+            return
+        self._cancel_requested = False
+        self._invalidate_efi()
+        self._operation_generation += 1
+        self._build_efi_worker(output, self._draft, self._snapshot, self._operation_generation)
 
     @work(thread=True, exclusive=True, group="workflow-stage")
-    def _build_efi_worker(self, output: Path) -> None:
-        if self._draft is None or self._snapshot is None:
-            self.call_from_thread(self._message, "EFI build requires an evaluated configuration and explicit fixture.")
-            return
+    def _build_efi_worker(self, output: Path, draft: UserConfiguration, snapshot: HardwareSnapshot, generation: int) -> None:
         try:
             result = self.service.build_efi_preview(
-                self._draft, self._snapshot, output, offline=True, cancel=lambda: self._cancel_requested
+                draft, snapshot, output, offline=True,
+                cancel=lambda: self._cancel_requested or generation != self._operation_generation,
             )
-            validation = getattr(result, "validation", None)
-            self.call_from_thread(self._message,
-                f"EFI build/validation completed in {output.name}; "
-                f"status={getattr(validation, 'status', 'unknown')}"
-            )
+            self.call_from_thread(self._publish_efi_result, generation, result, output)
         except Exception as exc:
-            self.call_from_thread(self._message, f"EFI build/validation blocked: {type(exc).__name__}: {exc}")
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"EFI build/validation blocked: {type(exc).__name__}: {exc}",
+            )
 
     @work(thread=True, exclusive=True, group="workflow-stage")
     def _discover_recovery(self) -> None:
+        self._cancel_requested = False
+        self._operation_generation += 1
+        generation = self._operation_generation
         try:
-            self._recovery_result = self.service.discover_recovery(cancel=lambda: self._cancel_requested)
-            diagnostics = "; ".join(self._recovery_result.diagnostics)
-            self.call_from_thread(self._message, f"Recovery discovery: {self._recovery_result.state.value}. {diagnostics}")
+            result = self.service.discover_recovery(
+                cancel=lambda: self._cancel_requested or generation != self._operation_generation
+            )
+            self.call_from_thread(self._publish_recovery_discovery, generation, result)
         except Exception as exc:
-            self.call_from_thread(self._message, f"Recovery discovery blocked: {type(exc).__name__}: {exc}")
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"Recovery discovery blocked: {type(exc).__name__}: {exc}",
+            )
 
     def _acquire_recovery(self) -> None:
         checkpoint = self.query_one("#recovery-checkpoint-input", Input).value.strip()
-        binding_path = Path(self.query_one("#recovery-binding-input", Input).value.strip())
         destination = Path(self.query_one("#recovery-destination-input", Input).value.strip())
         if checkpoint != "I UNDERSTAND LARGE APPLE RECOVERY DOWNLOAD":
             self._message("Recovery acquisition blocked: type the exact explicit large-download checkpoint.")
             return
-        self._acquire_recovery_worker(checkpoint, binding_path, destination)
+        if self._efi_manifest is None or self._efi_output is None:
+            self._message(
+                "Recovery acquisition blocked: complete the current qualified EFI build first; "
+                "manual binding JSON is not accepted."
+            )
+            return
+        if self._draft is None or self._snapshot is None:
+            self._message("Recovery acquisition blocked: evaluate the current configuration first.")
+            return
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._acquire_recovery_worker(
+            checkpoint, destination, self._draft, self._snapshot, self._efi_manifest,
+            self._efi_output, self._recovery_result, self._operation_generation
+        )
 
     @work(thread=True, exclusive=True, group="workflow-stage")
-    def _acquire_recovery_worker(self, checkpoint: str, binding_path: Path, destination: Path) -> None:
-        if self._recovery_result is None or self._recovery_result.state != RecoveryState.DISCOVERED:
-            self.call_from_thread(self._message, "Recovery acquisition blocked: discover the exact target first; no fallback is allowed.")
+    def _acquire_recovery_worker(
+        self,
+        checkpoint: str,
+        destination: Path,
+        draft: UserConfiguration,
+        snapshot: HardwareSnapshot,
+        manifest: BuildManifest,
+        efi_output: Path,
+        recovery_result: Optional[RecoveryDiscoveryResult],
+        generation: int,
+    ) -> None:
+        if recovery_result is None or recovery_result.state != RecoveryState.DISCOVERED:
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                "Recovery acquisition blocked: discover the exact target first; no fallback is allowed.",
+            )
             return
         try:
-            binding_data = json.loads(binding_path.read_text(encoding="utf-8"))
-            binding = RecoveryBinding.from_dict(binding_data)
+            binding = self.service.derive_recovery_binding(
+                draft, snapshot, None, manifest, efi_output=efi_output
+            )
+            verified_artifacts = {
+                "configuration_digest": binding.configuration_digest,
+                "build_plan_digest": binding.build_plan_digest,
+                "catalog_digest": binding.catalog_digest,
+                "toolchain_digest": binding.toolchain_digest,
+                "efi_manifest_digest": binding.efi_manifest_digest,
+            }
             lock, bundle = self.service.acquire_recovery(
-                self._recovery_result,
+                recovery_result,
                 binding,
                 destination,
-                cancel=lambda: self._cancel_requested,
+                cancel=lambda: self._cancel_requested or generation != self._operation_generation,
                 resume=True,
+                verified_artifacts=verified_artifacts,
+                require_verified=True,
             )
-            self.call_from_thread(self._message,
-                f"Recovery acquired state={lock.state.value}; image={bundle.image_path.name}; "
-                "private cache paths are not displayed."
+            self.call_from_thread(
+                self._publish_recovery_result,
+                generation,
+                lock,
+                bundle,
+                destination,
             )
         except Exception as exc:
-            self.call_from_thread(self._message, f"Recovery acquisition blocked: {type(exc).__name__}: {exc}")
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"Recovery acquisition blocked: {type(exc).__name__}: {exc}",
+            )
 
     def _verify_recovery(self) -> None:
+        lock = Path(self.query_one("#recovery-lock-input", Input).value.strip())
+        image = Path(self.query_one("#recovery-image-input", Input).value.strip())
+        chunklist = Path(self.query_one("#recovery-chunklist-input", Input).value.strip())
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._verify_recovery_worker(lock, image, chunklist, self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _verify_recovery_worker(
+        self, lock: Path, image: Path, chunklist: Path, generation: int
+    ) -> None:
         try:
-            lock = Path(self.query_one("#recovery-lock-input", Input).value.strip())
-            image = Path(self.query_one("#recovery-image-input", Input).value.strip())
-            chunklist = Path(self.query_one("#recovery-chunklist-input", Input).value.strip())
-            evidence = self.service.verify_recovery_cache(lock, image, chunklist)
-            self._message(f"Recovery cache verified: {getattr(evidence, 'verified_chunks', 0)} signed chunks.")
+            evidence = self.service.verify_recovery_cache(
+                lock,
+                image,
+                chunklist,
+                cancel=lambda: self._cancel_requested or generation != self._operation_generation,
+            )
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"Recovery cache verified: {getattr(evidence, 'verified_chunks', 0)} signed chunks.",
+            )
         except Exception as exc:
-            self._message(f"Recovery cache verification blocked: {type(exc).__name__}: {exc}")
+            self.call_from_thread(
+                self._publish_message_if_current,
+                generation,
+                f"Recovery cache verification blocked: {type(exc).__name__}: {exc}",
+            )
 
     def _usb_status(self) -> None:
-        status = self.service.removable_status()
-        self._message(
-            f"USB adapter status: {status['status']}; device discovery is not qualified; "
-            f"writes_enabled={status['writes_enabled']}"
-        )
+        try:
+            status = self.service.removable_status()
+            self._message(
+                f"USB adapter status: {status['status']}; device discovery is not qualified; "
+                f"writes_enabled={status['writes_enabled']}"
+            )
+        except Exception as exc:
+            self._message(f"USB discovery blocked: {type(exc).__name__}: retry discovery or inspect the adapter.")
 
     def _media_plan(self) -> None:
         try:
@@ -405,8 +566,10 @@ class WorkflowApp(App[None]):
 
     def _evaluate(self) -> None:
         if self._cancel_requested:
-            self._message("Cancelled. Press Refresh to begin a new review action.")
-            return
+            # Cancellation belongs to the previous operation, not to the
+            # draft.  A retry starts a fresh generation without discarding it.
+            self._cancel_requested = False
+            self._operation_generation += 1
         if self._draft is None or self._snapshot is None:
             self._message("Evaluation requires an explicit hardware fixture or a new safe probe.")
             return
@@ -416,7 +579,16 @@ class WorkflowApp(App[None]):
         if state is None:
             self._show_stages(None)
             return
+        self._last_state = state
+        self._latest_message = ""
+        self._render_status()
+
+    def _render_status(self) -> None:
         status = self.query_one("#workflow-status", Static)
+        state = self._last_state
+        if state is None:
+            status.update(self._latest_message or "No configuration review has been run yet.")
+            return
         lines = [
             "Configuration review",
             f"configuration: {state.configuration.configuration_id} revision {state.configuration.revision}",
@@ -425,6 +597,8 @@ class WorkflowApp(App[None]):
             f"issues: {len(state.evaluation.issues)}",
         ]
         lines.extend(f"{issue.code}: {issue.explanation}" for issue in state.evaluation.issues)
+        if self._latest_message:
+            lines.extend(("", f"Latest action: {self._latest_message}"))
         status.update("\n".join(lines))
         self._show_stages(state)
 
@@ -447,7 +621,54 @@ class WorkflowApp(App[None]):
         self.query_one("#workflow-stages", Static).update("\n".join(stages))
 
     def _message(self, message: str) -> None:
-        self.query_one("#workflow-status", Static).update(message)
+        self._latest_message = message
+        self._render_status()
+
+    def _invalidate_efi(self) -> None:
+        """A build is valid only for the exact current draft and snapshot."""
+        self._efi_manifest = None
+        self._efi_output = None
+
+    def _publish_message_if_current(self, generation: int, message: str) -> None:
+        """Publish a worker message only on the UI thread and current generation."""
+        if generation == self._operation_generation:
+            self._message(message)
+
+    def _publish_efi_result(self, generation: int, result: object, output: Path) -> None:
+        """Commit an EFI result atomically with the generation check."""
+        if generation != self._operation_generation:
+            return
+        self._efi_manifest = getattr(result, "manifest", None)
+        self._efi_output = output
+        validation = getattr(result, "validation", None)
+        self._message(
+            f"EFI build/validation completed in {output.name}; "
+            f"status={getattr(validation, 'status', 'unknown')}"
+        )
+
+    def _publish_recovery_discovery(
+        self, generation: int, result: RecoveryDiscoveryResult
+    ) -> None:
+        if generation != self._operation_generation:
+            return
+        self._recovery_result = result
+        diagnostics = "; ".join(result.diagnostics)
+        self._message(f"Recovery discovery: {result.state.value}. {diagnostics}")
+
+    def _publish_recovery_result(
+        self,
+        generation: int,
+        lock: RecoveryLock,
+        bundle: RecoveryBundle,
+        destination: Path,
+    ) -> None:
+        if generation != self._operation_generation:
+            return
+        self.service.persist_recovery_result(lock, bundle.evidence, destination)
+        self._message(
+            f"Recovery acquired state={lock.state.value}; image={bundle.image_path.name}; "
+            "private cache paths are not displayed."
+        )
 
 
 def run_tui(fixture: Optional[Path] = None, config_id: Optional[str] = None) -> None:

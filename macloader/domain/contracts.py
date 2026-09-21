@@ -165,3 +165,34 @@ class BuildManifest:
             "identity_reference": self.identity_reference,
             "output_paths": dict(self.output_paths),
         }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "BuildManifest":
+        if not isinstance(data, dict):
+            raise ValueError("Build manifest must be an object")
+        required = {
+            "schema_version", "build_digest", "target_model", "target_macos",
+            "artifact_lock_digest", "validation_report", "output_paths", "toolchain_digest",
+            "identity_digest", "output_digest", "license_digests", "schema_digest", "profile_digest",
+            "acpi_digest", "evidence_digests", "usb_policy_state", "usb_first_install_route",
+            "identity_reference",
+        }
+        if set(data) != required:
+            raise ValueError("Build manifest has missing or unknown fields")
+        if not isinstance(data["output_paths"], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data["output_paths"].items()):
+            raise ValueError("Build manifest output_paths must be a string mapping")
+        if not isinstance(data["license_digests"], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data["license_digests"].items()):
+            raise ValueError("Build manifest license_digests must be a string mapping")
+        if not isinstance(data["evidence_digests"], list) or not all(isinstance(item, str) for item in data["evidence_digests"]):
+            raise ValueError("Build manifest evidence_digests must be a list of strings")
+        return cls(
+            schema_version=str(data["schema_version"]), build_digest=str(data["build_digest"]),
+            target_model=str(data["target_model"]), target_macos=str(data["target_macos"]),
+            artifact_lock_digest=str(data["artifact_lock_digest"]), validation_report=str(data["validation_report"]),
+            output_paths=dict(data["output_paths"]), toolchain_digest=str(data["toolchain_digest"]),
+            identity_digest=str(data["identity_digest"]), output_digest=str(data["output_digest"]),
+            license_digests=dict(data["license_digests"]), schema_digest=str(data["schema_digest"]),
+            profile_digest=str(data["profile_digest"]), acpi_digest=str(data["acpi_digest"]),
+            evidence_digests=tuple(data["evidence_digests"]), usb_policy_state=str(data["usb_policy_state"]),
+            usb_first_install_route=str(data["usb_first_install_route"]), identity_reference=str(data["identity_reference"]),
+        )

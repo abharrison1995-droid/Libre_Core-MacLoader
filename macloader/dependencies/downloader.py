@@ -57,10 +57,9 @@ class Downloader:
         part_path = Path(part_name)
         deadline = time.monotonic() + self.timeout
 
-        if cancel and cancel():
-            raise ArtifactDownloadError(f"Download of {artifact.asset_name} was cancelled")
-
         try:
+            if cancel and cancel():
+                raise ArtifactDownloadError(f"Download of {artifact.asset_name} was cancelled")
             if self.transport:
                 # Custom mock transport (used in tests)
                 self.transport(artifact.source_url, part_path)
@@ -129,12 +128,17 @@ class Downloader:
             logger.info(f"Successfully downloaded and verified: {artifact.asset_name}")
             return destination_path
 
+        except KeyboardInterrupt:
+            # Ctrl-C is an interruption, not a transport failure.  The
+            # unconditional cleanup below still owns the temporary file.
+            raise
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-            part_path.unlink(missing_ok=True)
             raise ArtifactDownloadError(f"Failed to download {artifact.asset_name} from {artifact.source_url}: {e}") from e
         except ChecksumMismatchError:
-            part_path.unlink(missing_ok=True)
             raise
         except Exception as e:
-            part_path.unlink(missing_ok=True)
             raise ArtifactDownloadError(f"Unexpected error downloading {artifact.asset_name}: {e}") from e
+        finally:
+            # A .part file is owned by this operation.  Successful replace()
+            # removes it; every failure or interruption removes it here.
+            part_path.unlink(missing_ok=True)

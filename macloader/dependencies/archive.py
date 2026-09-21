@@ -22,6 +22,7 @@ def validate_zip_archive(
     zip_path: Path,
     max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
     max_expanded_bytes: int = DEFAULT_MAX_ARCHIVE_EXPANDED_BYTES,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """Inspect a zip file and verify it contains no directory traversal or absolute path exploits."""
     if not zip_path.is_file():
@@ -35,6 +36,8 @@ def validate_zip_archive(
             seen = set()
             expanded = 0
             for name in member_names:
+                if cancel and cancel():
+                    raise ArchiveSecurityError("Archive inspection cancelled")
                 normalized_name = name.replace("\\", "/")
                 if not normalized_name or normalized_name.strip("/") in {"", "."}:
                     raise ArchiveSecurityError(f"Invalid member name in archive '{zip_path.name}': {name}")
@@ -82,10 +85,13 @@ def _extract_from_snapshot(
     max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
     max_expanded_bytes: int = DEFAULT_MAX_ARCHIVE_EXPANDED_BYTES,
     cumulative_bytes_tracker: Optional[Callable[[int], None]] = None,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Internal bounded extraction engine operating on a verified snapshot."""
     resolved_target = target_dir.resolve()
-    available = validate_zip_archive(snapshot, max_members=max_members, max_expanded_bytes=max_expanded_bytes)
+    available = validate_zip_archive(
+        snapshot, max_members=max_members, max_expanded_bytes=max_expanded_bytes, cancel=cancel
+    )
     available_set = set(available)
 
     if member_map is not None:
@@ -107,6 +113,8 @@ def _extract_from_snapshot(
     total_written = 0
     with zipfile.ZipFile(snapshot, "r") as zf:
         for member, dest_path in extraction_items:
+            if cancel and cancel():
+                raise ArchiveSecurityError("Archive extraction cancelled")
             dest_resolved = dest_path.resolve()
             if dest_path.is_symlink():
                 raise ArchiveSecurityError(f"Refusing to overwrite symlink during extraction: {dest_path}")
@@ -152,6 +160,8 @@ def _extract_from_snapshot(
             try:
                 with dst, zf.open(info, "r") as src:
                     while chunk := src.read(65536):
+                        if cancel and cancel():
+                            raise ArchiveSecurityError("Archive extraction cancelled")
                         total_written += len(chunk)
                         if total_written > max_expanded_bytes:
                             raise ArchiveSecurityError(
@@ -180,6 +190,7 @@ def safe_extract_zip(
     max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
     max_expanded_bytes: int = DEFAULT_MAX_ARCHIVE_EXPANDED_BYTES,
     cumulative_bytes_tracker: Optional[Callable[[int], None]] = None,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Safely extract members from a zip archive into target_dir preventing path escape.
 
@@ -222,6 +233,7 @@ def safe_extract_zip(
             max_members=max_members,
             max_expanded_bytes=max_expanded_bytes,
             cumulative_bytes_tracker=cumulative_bytes_tracker,
+            cancel=cancel,
         )
 
     # Bind validation and extraction to a private copy so a replacement of the
@@ -240,4 +252,5 @@ def safe_extract_zip(
             max_members=max_members,
             max_expanded_bytes=max_expanded_bytes,
             cumulative_bytes_tracker=cumulative_bytes_tracker,
+            cancel=cancel,
         )

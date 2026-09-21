@@ -1,6 +1,6 @@
 """Immutable Recovery discovery, lock and evidence contracts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import re
 from typing import Any, Dict, Optional, Tuple
@@ -129,6 +129,11 @@ class RecoveryBinding:
     catalog_digest: str
     toolchain_digest: str
     efi_manifest_digest: str
+    # This opaque in-process marker is deliberately omitted from serialized
+    # locks.  A caller cannot turn six digest-shaped strings into a
+    # ``require_verified`` acquisition; the shared RecoveryService must have
+    # issued this binding from its current workflow boundary.
+    _verification_token: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         values = (
@@ -203,7 +208,12 @@ class RecoveryLock:
 
     @property
     def digest(self) -> str:
-        return canonical_json_digest(self.to_dict())
+        # The lock identifies the exact product and bindings. Lifecycle state
+        # is a separately published field and must not change the evidence
+        # reference when LOCKED becomes VERIFIED.
+        identity = self.to_dict()
+        identity.pop("state", None)
+        return canonical_json_digest(identity)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RecoveryLock":

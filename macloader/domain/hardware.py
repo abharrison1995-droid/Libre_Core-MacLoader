@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 import uuid
 
 from macloader.exceptions import HardwareContractError
@@ -428,16 +428,23 @@ class HardwareSnapshot:
                 raise HardwareContractError(f"Field '{key}' must be a list, got {type(val).__name__}")
             return val
 
-        dgpus = [GpuInfo.from_dict(g) for g in _safe_list("dgpus") if isinstance(g, dict)]
-        audio = [AudioInfo.from_dict(a) for a in _safe_list("audio") if isinstance(a, dict)]
-        ethernet = [NetworkInfo.from_dict(e) for e in _safe_list("ethernet") if isinstance(e, dict)]
-        wifi = [NetworkInfo.from_dict(w) for w in _safe_list("wifi") if isinstance(w, dict)]
-        bluetooth = [NetworkInfo.from_dict(b) for b in _safe_list("bluetooth") if isinstance(b, dict)]
-        storage = [StorageInfo.from_dict(s) for s in _safe_list("storage") if isinstance(s, dict)]
-        usb_controllers = [PciDevice.from_dict(u) for u in _safe_list("usb_controllers") if isinstance(u, dict)]
-        usb_devices = [UsbDevice.from_dict(ud) for ud in _safe_list("usb_devices") if isinstance(ud, dict)]
-        input_devices = [InputDeviceInfo.from_dict(i) for i in _safe_list("input_devices") if isinstance(i, dict)]
-        displays = [DisplayInfo.from_dict(d) for d in _safe_list("displays") if isinstance(d, dict)]
+        def _mappings(key: str) -> List[Dict[str, Any]]:
+            values = _safe_list(key)
+            for index, value in enumerate(values):
+                if not isinstance(value, dict):
+                    raise HardwareContractError(f"Field '{key}[{index}]' must be a dictionary, got {type(value).__name__}")
+            return cast(List[Dict[str, Any]], values)
+
+        dgpus = [GpuInfo.from_dict(g) for g in _mappings("dgpus")]
+        audio = [AudioInfo.from_dict(a) for a in _mappings("audio")]
+        ethernet = [NetworkInfo.from_dict(e) for e in _mappings("ethernet")]
+        wifi = [NetworkInfo.from_dict(w) for w in _mappings("wifi")]
+        bluetooth = [NetworkInfo.from_dict(b) for b in _mappings("bluetooth")]
+        storage = [StorageInfo.from_dict(s) for s in _mappings("storage")]
+        usb_controllers = [PciDevice.from_dict(u) for u in _mappings("usb_controllers")]
+        usb_devices = [UsbDevice.from_dict(ud) for ud in _mappings("usb_devices")]
+        input_devices = [InputDeviceInfo.from_dict(i) for i in _mappings("input_devices")]
+        displays = [DisplayInfo.from_dict(d) for d in _mappings("displays")]
 
         return cls(
             snapshot_id=str(data.get("snapshot_id") or uuid.uuid4()),

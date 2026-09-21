@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import copy
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from macloader.database.loader import Database, get_database
 from macloader.dependencies.graph import DependencyGraph
@@ -50,6 +50,7 @@ class DependencyResolver:
         self,
         plan: BuildPlan,
         variant: ArtifactVariant = ArtifactVariant.RELEASE,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> ResolvedDependencySet:
         """Resolve all external dependencies required for the supplied BuildPlan and target macOS."""
         if not self.catalog:
@@ -192,11 +193,13 @@ class DependencyResolver:
 
         # 3. Topologically sort requested dependencies and resolve transitive prerequisites
         direct_ids = list(requested_specs.keys())
-        ordered_ids = self._graph.resolve_ordered_set(direct_ids)
+        ordered_ids = self._graph.resolve_ordered_set(direct_ids, cancel=cancel)
 
         # 4. Construct ResolvedDependency domain objects
         resolved_list: List[ResolvedDependency] = []
         for dep_id in ordered_ids:
+            if cancel and cancel():
+                raise ValueError("Dependency resolution cancelled")
             spec = self.catalog.dependencies[dep_id]
             artifact = spec.get_artifact(variant)
             if not artifact:

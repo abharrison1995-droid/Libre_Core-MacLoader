@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+from typing import Any
 import pytest
 
 from macloader.exceptions import ArtifactDownloadError
@@ -23,10 +24,16 @@ from macloader.removable import (
     DisposableImageAdapter,
     MediaBindings,
     RemovableDevice,
-    RemovableMediaWriter,
+    RemovableMediaWriter as _RemovableMediaWriter,
     UnsafeRemovableTarget,
     WritePlan,
 )
+
+
+def RemovableMediaWriter(*args: Any, **kwargs: Any) -> _RemovableMediaWriter:
+    """Explicit synthetic writer factory; never represents production qualification."""
+    kwargs.setdefault("require_published_artifacts", False)
+    return _RemovableMediaWriter(*args, **kwargs)
 
 
 @pytest.fixture
@@ -81,7 +88,7 @@ def qualified_bindings() -> MediaBindings:
 
 
 def qualified_plan(
-    writer: RemovableMediaWriter,
+    writer: _RemovableMediaWriter,
     device: RemovableDevice,
     source: Path,
     bindings: MediaBindings,

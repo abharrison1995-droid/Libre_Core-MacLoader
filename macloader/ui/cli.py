@@ -1,7 +1,6 @@
 """Command line interface (CLI) for MacLoader using Click and Rich."""
 
 import json
-import platform
 from pathlib import Path
 import sys
 from typing import Optional
@@ -21,18 +20,19 @@ from macloader.compatibility.report import (
 from macloader.config import DEFAULT_MACOS_TARGET, SUPPORTED_MACOS_TARGETS
 from macloader.diagnostics.logging import setup_logging
 from macloader.domain.dependencies import ArtifactVariant
-from macloader.domain.contracts import CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.configuration import UserConfiguration
 from macloader.exceptions import DependencyError, MacLoaderError
 from macloader.orchestrator import Orchestrator
 from macloader.build.efi import EfiBuilder
-from macloader.domain.recovery import RecoveryBinding, RecoveryState
+from macloader.domain.recovery import RecoveryState
+from macloader.domain.contracts import BuildManifest
 from macloader.domain.configuration import UserConfiguration
 from macloader.evidence.usb import UsbEvidenceSession
 from macloader.evidence.acpi import AcpiEvidenceBundle
 from macloader.workflow.service import WorkflowService
 from macloader.ui.tui import run_tui
 from macloader.removable import RemovableDevice, RemovableMediaWriter
+from macloader.toolchain.loader import ToolchainTrustError, TrustedToolchainLoader
 
 console = Console()
 err_console = Console(stderr=True)
@@ -236,8 +236,9 @@ def config_show_cmd(configuration_id: str, json_mode: bool) -> None:
 @click.option("--version", "macos_version", type=str)
 @click.option("--build", "macos_build", type=str)
 @click.option("--option", "options", multiple=True, help="Set a policy option as option.id=value.")
+@click.option("--identity-ref", type=str, help="Select an existing private identity JSON filename for deliberate reuse.")
 @click.option("--json", "json_mode", is_flag=True)
-def config_set_cmd(configuration_id: str, macos_version: Optional[str], macos_build: Optional[str], options: tuple[str, ...], json_mode: bool) -> None:
+def config_set_cmd(configuration_id: str, macos_version: Optional[str], macos_build: Optional[str], options: tuple[str, ...], identity_ref: Optional[str], json_mode: bool) -> None:
     """Apply exact target and policy option changes, invalidating stale acknowledgements."""
     try:
         service = WorkflowService()
@@ -251,6 +252,8 @@ def config_set_cmd(configuration_id: str, macos_version: Optional[str], macos_bu
                 raise click.ClickException("--option must use option.id=value")
             option_id, value = item.split("=", 1)
             draft = service.set_option(draft, option_id, value)
+        if identity_ref:
+            draft = service.set_identity_reference(draft, identity_ref)
         path = service.save(draft)
         payload = {"configuration": draft.to_dict(), "saved": True}
         click.echo(json.dumps(payload, indent=2) if json_mode else f"Saved revision {draft.revision}")
@@ -387,7 +390,12 @@ def usb_group() -> None:
 @click.option("--json", "json_mode", is_flag=True)
 def usb_list_cmd(json_mode: bool) -> None:
     """List only explicitly supported adapters; never writes or dismounts devices."""
-    payload = WorkflowService.removable_status()
+    try:
+        payload = WorkflowService.removable_status()
+    except Exception as exc:
+        raise click.ClickException(
+            f"Device discovery is unavailable: {type(exc).__name__}. Retry or inspect the configured adapter."
+        ) from exc
     if json_mode:
         click.echo(json.dumps(payload, indent=2))
     else:
@@ -495,30 +503,66 @@ def recovery_resolve_cmd(json_mode: bool) -> None:
 
 
 @recovery_group.command("download")
-@click.option("--binding", "binding_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True, help="JSON Recovery binding created by the reviewed workflow.")
+@click.option("--binding", "binding_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Deprecated: handwritten binding files are not accepted.")
+@click.option("--configuration-id", type=str, help="Persisted accepted configuration to bind to Recovery.")
+@click.option("--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Current hardware snapshot fixture used to re-evaluate the configuration.")
+@click.option("--efi-manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Manifest from the current qualified EFI output.")
+@click.option("--efi-output", type=click.Path(exists=True, file_okay=False, path_type=Path), help="EFI output directory corresponding to --efi-manifest.")
 @click.option("--destination", type=click.Path(file_okay=False, path_type=Path), required=True, help="Ignored/private directory for the Recovery cache.")
 @click.option("--allow-large-download", is_flag=True, help="Explicitly authorize the large Apple Recovery acquisition checkpoint.")
 @click.option("--resume/--no-resume", default=True, help="Retain validated partial assets and resume with HTTPS Range after interruption.")
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
-def recovery_download_cmd(binding_path: Path, destination: Path, allow_large_download: bool, resume: bool, json_mode: bool) -> None:
-    """Acquire the exact discovered Recovery bundle into ignored storage."""
+def recovery_download_cmd(binding_path: Optional[Path], configuration_id: Optional[str], fixture: Optional[Path], efi_manifest: Optional[Path], efi_output: Optional[Path], destination: Path, allow_large_download: bool, resume: bool, json_mode: bool) -> None:
+    """Acquire exact Recovery only from a current accepted configuration and EFI manifest."""
     if not allow_large_download:
         raise click.ClickException("Large Apple Recovery acquisition requires an explicit checkpoint approval")
     try:
-        binding_data = json.loads(binding_path.read_text(encoding="utf-8"))
-        if not isinstance(binding_data, dict):
-            raise ValueError("Recovery binding file must contain an object")
-        binding = RecoveryBinding.from_dict(binding_data)
-        orchestrator = Orchestrator()
+        if binding_path is not None:
+            raise click.ClickException(
+                "Manual Recovery binding JSON is not accepted; supply --configuration-id, --fixture, and --efi-manifest."
+            )
+        if configuration_id is None or fixture is None or efi_manifest is None or efi_output is None:
+            raise click.ClickException(
+                "Recovery acquisition requires --configuration-id, --fixture, --efi-manifest, and --efi-output from the shared workflow."
+            )
+        service = WorkflowService()
+        configuration = service.load(configuration_id)
+        snapshot = service.orchestrator.probe_hardware(fixture_path=fixture)
+        manifest_data = json.loads(efi_manifest.read_text(encoding="utf-8"))
+        if not isinstance(manifest_data, dict):
+            raise ValueError("EFI manifest must contain an object")
+        manifest = BuildManifest.from_dict(manifest_data)
+        toolchain = service.orchestrator.trusted_toolchain()
+        validation = service.orchestrator.builder.validate_tree(
+            efi_output, toolchain=toolchain, expected_manifest=manifest
+        )
+        if validation.status != "VALID":
+            raise ValueError("EFI output failed the trusted manifest validation: " + "; ".join(validation.errors))
+        binding = service.derive_recovery_binding(configuration, snapshot, None, manifest, efi_output=efi_output)
+        verified_artifacts = {
+            "configuration_digest": binding.configuration_digest,
+            "build_plan_digest": binding.build_plan_digest,
+            "catalog_digest": binding.catalog_digest,
+            "toolchain_digest": binding.toolchain_digest,
+            "efi_manifest_digest": binding.efi_manifest_digest,
+        }
+        orchestrator = service.orchestrator
         result = orchestrator.discover_recovery()
         if result.state != RecoveryState.DISCOVERED:
             raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
-        lock, bundle = orchestrator.recovery_service.acquire(result, binding, destination, resume=resume)
-        lock_path = destination / "recovery.lock.json"
-        evidence_path = destination / "recovery.evidence.json"
-        orchestrator.recovery_service.save_lock(lock, lock_path)
-        orchestrator.recovery_service.save_evidence(bundle.evidence, evidence_path)
-        payload = {"state": lock.state.value, "lock": lock_path.name, "evidence": evidence_path.name, **bundle.evidence.to_dict()}
+        lock, bundle = orchestrator.recovery_service.acquire(
+            result, binding, destination, resume=resume, verified_artifacts=verified_artifacts, require_verified=True
+        )
+        lock_path, evidence_path, state_path = orchestrator.recovery_service.save_verified_bundle(
+            lock, bundle.evidence, destination
+        )
+        payload = {
+            "state": lock.state.value,
+            "lock": lock_path.name,
+            "evidence": evidence_path.name,
+            "state_record": state_path.name,
+            **bundle.evidence.to_dict(),
+        }
         if json_mode:
             click.echo(json.dumps(payload, indent=2))
         else:
@@ -793,29 +837,25 @@ def deps_cache_cmd(clear: bool, json_mode: bool) -> None:
 @cli.command("validate")
 @click.argument("efi_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+@click.option("--structural-only", is_flag=True, help="Run structural checks only; this is not qualified release validation.")
 @click.option("--ocvalidate", "ocvalidate_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Matching OpenCore ocvalidate executable or script.")
 @click.option("--ocvalidate-sha256", type=str, help="SHA-256 for the selected ocvalidate executable/script.")
-def validate_cmd(efi_dir: Path, json_mode: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str]) -> None:
-    """Validate an existing EFI tree structurally."""
+def validate_cmd(efi_dir: Path, json_mode: bool, structural_only: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str]) -> None:
+    """Validate an EFI tree structurally or with the trusted qualified toolchain."""
     builder = EfiBuilder()
     toolchain = None
-    if ocvalidate_path:
-        opencore = builder.db.get_dependency_spec("opencore")
-        if opencore is None:
-            raise click.ClickException("OpenCore policy is unavailable")
-        toolchain = ToolchainSelection(
-            schema_version=CONTRACT_SCHEMA_VERSION,
-            opencore_version=opencore.version,
-            ocvalidate_version=opencore.version,
-            acpi_compiler=None,
-            identity_tool=None,
-            recovery_tool=None,
-            host_platform=platform.system().lower(),
-            host_architecture=platform.machine().lower(),
-            provenance={"source": "cli-supplied", "qualification": "pending-s03"},
-            ocvalidate_path=str(ocvalidate_path),
-            ocvalidate_sha256=ocvalidate_sha256.lower() if ocvalidate_sha256 else None,
-        )
+    if structural_only and (ocvalidate_path or ocvalidate_sha256):
+        raise click.ClickException("--structural-only cannot be combined with a caller-supplied validator")
+    if not structural_only:
+        try:
+            loader = TrustedToolchainLoader()
+            toolchain = loader.select()
+            if ocvalidate_path and Path(toolchain.ocvalidate_path or "").resolve() != ocvalidate_path.resolve():
+                raise ToolchainTrustError("requested validator is not the trusted catalog selection")
+            if ocvalidate_sha256 and ocvalidate_sha256.lower() != (toolchain.ocvalidate_sha256 or "").lower():
+                raise ToolchainTrustError("requested validator digest does not match the trusted catalog selection")
+        except ToolchainTrustError as exc:
+            raise click.ClickException(f"Qualified validation is unavailable: {exc}") from exc
     report = builder.validate_tree(efi_dir, toolchain=toolchain)
     if json_mode:
         click.echo(json.dumps(report.to_dict(), indent=2))
@@ -823,7 +863,7 @@ def validate_cmd(efi_dir: Path, json_mode: bool, ocvalidate_path: Optional[Path]
         console.print(f"EFI validation: {report.status}")
         for error in report.errors:
             err_console.print(f"[red]{error}[/red]")
-    if report.status != "VALID":
+    if (structural_only and report.status != "STRUCTURAL_ONLY") or (not structural_only and report.status != "VALID"):
         raise click.ClickException("EFI validation failed")
 
 
@@ -839,20 +879,21 @@ def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline:
     """Build a validated EFI tree from the actionable hardware plan."""
     try:
         orchestrator = Orchestrator()
+        if not configuration_id:
+            raise click.ClickException(
+                "EFI build requires a persisted reviewed configuration; run "
+                "`config new`, set the exact target/evidence, then pass `--config ID`."
+            )
         snapshot = orchestrator.probe_hardware(fixture_path=fixture)
-        if configuration_id:
-            workflow = WorkflowService(orchestrator=orchestrator)
-            state = workflow.evaluate(workflow.load(configuration_id), snapshot)
-            if state.evaluation.has_blockers:
-                raise click.ClickException("EFI build blocked by configuration issues; review config check first")
-            plan = state.evaluation.plan
-        else:
-            plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
-        dep_set = orchestrator.resolve_dependencies(plan)
-        if not dep_set.is_complete:
-            raise click.ClickException("EFI build blocked: unresolved requirements remain in the dependency plan")
-        artifact_paths = orchestrator.fetch_dependencies(dep_set, offline=offline, plan=plan)
-        result = orchestrator.build_efi(plan, dep_set, artifact_paths, output, ocvalidate_path=ocvalidate_path, ocvalidate_sha256=ocvalidate_sha256)
+        workflow = WorkflowService(orchestrator=orchestrator)
+        result = workflow.build_efi_preview(
+            workflow.load(configuration_id),
+            snapshot,
+            output,
+            offline=offline,
+            ocvalidate_path=ocvalidate_path,
+            ocvalidate_sha256=ocvalidate_sha256,
+        )
         click.echo(json.dumps({"status": result.validation.status, "output": str(result.output_dir), "manifest": result.manifest.to_dict()}, indent=2))
     except MacLoaderError as e:
         err_console.print(f"[bold red]Build Error:[/bold red] {e}")

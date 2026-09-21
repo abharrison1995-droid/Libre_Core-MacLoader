@@ -1,6 +1,7 @@
 """Build a guarded EFI tree from an actionable plan and verified artifacts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 import json
 import getpass
 import plistlib
@@ -8,11 +9,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Dict, Iterable, List, Optional
+import time
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from macloader.dependencies.archive import (
     DEFAULT_MAX_ARTIFACT_EXPANDED_BYTES,
@@ -35,8 +38,9 @@ from macloader.domain.contracts import (
 from macloader.domain.dependencies import ResolvedDependency, ResolvedDependencySet
 from macloader.exceptions import ArchiveSecurityError, BuildPlanError
 from macloader.build.acpi import AcpiProcessor
-from macloader.build.config import ReviewedEfiProfile, SchemaDrivenConfigGenerator
+from macloader.build.config import ReviewedEfiProfile, SchemaDrivenConfigGenerator, effective_profile_digest
 from macloader.identity.service import IdentityService, IdentityServiceError
+from macloader.toolchain.loader import TrustedToolchainLoader, ToolchainTrustError
 
 
 @dataclass
@@ -73,17 +77,63 @@ class EfiBuilder:
         reviewed_profile: Optional[ReviewedEfiProfile] = None,
         private_acpi_capture: Optional[Path] = None,
         expected_acpi_evidence_digest: Optional[str] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+        identity_reference: Optional[IdentityReference] = None,
+        synthetic_test_mode: bool = False,
     ) -> EfiBuildResult:
+        profile_bound = bool(
+            plan.profile_bindings
+            or plan.accepted_configuration_digest
+            or plan.effective_profile_digest
+            or plan.effective_option_selections
+        )
+        if profile_bound and reviewed_profile is None:
+            raise BuildPlanError(
+                "Machine-bound BuildPlan requires the reviewed EFI profile and private evidence; "
+                "legacy configuration generation is not permitted"
+            )
         if not plan.support_state.is_usable or plan.unresolved_requirements:
             reasons = "; ".join(plan.unresolved_requirements) or "hardware support state is not actionable"
             raise BuildPlanError(f"EFI build is blocked until the plan is actionable and build-ready: {reasons}")
         if toolchain is None:
             raise BuildPlanError("EFI build requires a validated toolchain selection")
-        if reviewed_profile is not None:
+        if not profile_bound and not synthetic_test_mode:
+            raise BuildPlanError(
+                "Unprofiled EFI builds are disabled outside explicit synthetic test mode"
+            )
+        if not synthetic_test_mode or reviewed_profile is not None:
+            try:
+                TrustedToolchainLoader().verify_selection(toolchain)
+            except ToolchainTrustError as exc:
+                raise BuildPlanError(f"P4 EFI generation requires the trusted toolchain selection: {exc}") from exc
             if toolchain.provenance.get("source") != "trusted-catalog":
                 raise BuildPlanError("P4 EFI generation requires a toolchain selected by the trusted catalog")
+        if reviewed_profile is not None:
             if private_acpi_capture is None:
                 raise BuildPlanError("P4 EFI generation requires the private machine-bound ACPI capture")
+            if not expected_acpi_evidence_digest:
+                raise BuildPlanError("P4 EFI generation requires the accepted ACPI evidence digest")
+            if not plan.evidence_digests:
+                raise BuildPlanError("Machine-bound BuildPlan has no accepted evidence digests")
+            if expected_acpi_evidence_digest.lower() not in {
+                item.lower() for item in plan.evidence_digests
+            }:
+                raise BuildPlanError("Accepted ACPI evidence digest is not bound to the BuildPlan")
+            if plan.stable_model_id and reviewed_profile.model_id != plan.stable_model_id:
+                raise BuildPlanError("Reviewed EFI profile model does not match the accepted BuildPlan")
+            if (
+                reviewed_profile.product_id != plan.target_macos
+                or reviewed_profile.version != plan.target_version
+                or reviewed_profile.build != plan.target_build
+            ):
+                raise BuildPlanError("Reviewed EFI profile target does not match the accepted BuildPlan")
+            if plan.profile_bindings and reviewed_profile.profile_id not in plan.profile_bindings:
+                raise BuildPlanError("Reviewed EFI profile is not bound to the accepted BuildPlan")
+            expected_effective_profile_digest = effective_profile_digest(
+                reviewed_profile, dict(plan.effective_option_selections)
+            )
+            if plan.effective_profile_digest.lower() != expected_effective_profile_digest.lower():
+                raise BuildPlanError("Reviewed EFI profile digest does not match the effective BuildPlan profile")
         if not dependencies.is_complete or dependencies.unresolved_requirements:
             reasons = "; ".join(dependencies.unresolved_requirements) or "dependency set is incomplete"
             raise BuildPlanError(f"EFI build is blocked by unresolved dependency or policy requirements: {reasons}")
@@ -144,6 +194,8 @@ class EfiBuilder:
         staging = Path(tempfile.mkdtemp(prefix="macloader-efi-", dir=parent))
         identity_preexisting = True
         try:
+            if cancel and cancel():
+                raise BuildPlanError("EFI build cancelled")
             efi_root = staging / "EFI"
             for relative in ("BOOT", "OC/ACPI", "OC/Drivers", "OC/Kexts", "OC/Tools"):
                 (efi_root / relative).mkdir(parents=True, exist_ok=True)
@@ -165,6 +217,8 @@ class EfiBuilder:
                     )
 
             for dependency in dependencies.resolved_dependencies:
+                if cancel and cancel():
+                    raise BuildPlanError("EFI build cancelled")
                 archive_path = artifact_paths.get(dependency.dependency_id)
                 if archive_path is None or not archive_path.is_file() or archive_path.is_symlink():
                     raise BuildPlanError(f"Verified archive is missing for {dependency.dependency_id}")
@@ -178,6 +232,7 @@ class EfiBuilder:
                     dependency.artifact.size_bytes,
                     staging_root=staging,
                     cumulative_bytes_tracker=_track_build_bytes,
+                    cancel=cancel,
                 )
                 for component in spec_components:
                     normalized_component = component.replace("\\", "/")
@@ -214,6 +269,8 @@ class EfiBuilder:
                 (licenses / f"{dependency.dependency_id}.txt").write_text(license_text, encoding="utf-8")
 
             if reviewed_profile is not None:
+                if cancel and cancel():
+                    raise BuildPlanError("EFI build cancelled")
                 if toolchain.acpi_compiler_path is None or toolchain.acpi_compiler_sha256 is None:
                     raise BuildPlanError("P4 EFI generation requires the trusted iasl path and digest")
                 if private_acpi_capture is None:
@@ -224,10 +281,12 @@ class EfiBuilder:
                 ).build(
                     private_acpi_capture, efi_root / "OC" / "ACPI",
                     expected_bios_binding=reviewed_profile.bios_binding,
+                    expected_snapshot_id=plan.hardware_snapshot_id,
                     expected_evidence_digest=expected_acpi_evidence_digest,
+                    cancel=cancel,
                 )
 
-            identity_path = self._identity_path(plan, dependencies)
+            identity_path = self._identity_path(plan, dependencies, identity_reference)
             stored_identity = self._load_identity(identity_path) if identity_path.is_file() else None
             if fake_identity is not None and stored_identity is not None and fake_identity != stored_identity:
                 raise BuildPlanError("Explicit EFI identity conflicts with the stored identity for this build scope")
@@ -265,19 +324,20 @@ class EfiBuilder:
                     opencore_version=toolchain.opencore_version,
                     acpi_digest=acpi_result.generated_digest if acpi_result is not None else "",
                     evidence_digests=((acpi_result.source_evidence_digest,) if acpi_result is not None else ()),
+                    effective_options=dict(plan.effective_option_selections),
                 )
                 generator.write(config, efi_root / "OC" / "config.plist")
                 schema_digest = generator.schema_digest
-                profile_digest = reviewed_profile.source_digest
+                profile_digest = expected_effective_profile_digest
                 acpi_digest = acpi_result.generated_digest if acpi_result is not None else ""
                 evidence_digests = (acpi_result.source_evidence_digest,) if acpi_result is not None else ()
                 usb_policy_state = reviewed_profile.usb.usb_c_correlation
                 usb_first_install_route = reviewed_profile.usb.first_install_route
-            validation = self.validate_tree(staging, toolchain=None, identity=identity_data)
+            validation = self.validate_tree(staging, toolchain=None, identity=identity_data, cancel=cancel)
             if validation.errors:
                 raise BuildPlanError("Generated EFI failed structural validation: " + "; ".join(validation.errors))
 
-            output_digest = self._tree_digest(staging)
+            output_digest = self._tree_digest(staging, cancel=cancel)
             manifest = BuildManifest(
                 schema_version=CONTRACT_SCHEMA_VERSION,
                 build_digest=canonical_json_digest({
@@ -317,6 +377,8 @@ class EfiBuilder:
                 toolchain=toolchain,
                 identity=identity_data,
                 expected_manifest=manifest,
+                cancel=cancel,
+                synthetic_test_mode=synthetic_test_mode,
             )
             if validation.status != "VALID":
                 raise BuildPlanError("Published EFI failed manifest validation: " + "; ".join(validation.errors))
@@ -328,10 +390,12 @@ class EfiBuilder:
                         raise BuildPlanError(f"Unable to store private EFI identity: {exc}") from exc
                 else:
                     self._write_private_identity(identity_path, identity_data)
+            if cancel and cancel():
+                raise BuildPlanError("EFI build cancelled before publication")
             staging.replace(output_dir)
             identity_ref = IdentityReference(CONTRACT_SCHEMA_VERSION, identity_path.name, redacted=True)
             return EfiBuildResult(output_dir, manifest, validation, identity_ref)
-        except Exception:
+        except BaseException:
             if "identity_path" in locals() and not identity_preexisting:
                 try:
                     identity_path.unlink(missing_ok=True)
@@ -347,6 +411,8 @@ class EfiBuilder:
         timeout_seconds: float = 30.0,
         identity: Optional[Dict[str, str]] = None,
         expected_manifest: Optional[BuildManifest] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+        synthetic_test_mode: bool = False,
     ) -> ValidationReport:
         required = [
             root / "EFI" / "BOOT" / "BOOTx64.efi",
@@ -387,11 +453,37 @@ class EfiBuilder:
         if errors:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, errors, warnings)
         try:
-            output_digest = self._tree_digest(root)
+            output_digest = self._tree_digest(root, cancel=cancel)
         except BuildPlanError as exc:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, [str(exc)], warnings)
         checks["output_digest"] = output_digest
         manifest_path = root / "manifest.json"
+        release_bound = expected_manifest is not None and bool(
+            expected_manifest.profile_digest
+            or expected_manifest.acpi_digest
+            or expected_manifest.evidence_digests
+        )
+        if toolchain is not None and not synthetic_test_mode:
+            try:
+                TrustedToolchainLoader().verify_selection(toolchain)
+            except ToolchainTrustError as exc:
+                return ValidationReport(
+                    CONTRACT_SCHEMA_VERSION,
+                    "INVALID",
+                    toolchain.ocvalidate_version,
+                    checks,
+                    [f"Toolchain is not proven by the trusted catalog: {exc}"],
+                    warnings,
+                )
+            if toolchain.provenance.get("source") != "trusted-catalog":
+                return ValidationReport(
+                    CONTRACT_SCHEMA_VERSION,
+                    "INVALID",
+                    toolchain.ocvalidate_version,
+                    checks,
+                    ["Toolchain is not selected by the trusted catalog"],
+                    warnings,
+                )
         if expected_manifest is not None and (not manifest_path.is_file() or manifest_path.is_symlink()):
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", None, checks, ["Expected build manifest is missing or unsafe"], warnings)
         if (
@@ -455,7 +547,43 @@ class EfiBuilder:
         if validator.suffix.lower() == ".py":
             command = [sys.executable] + command
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+            process: Optional[subprocess.Popen[str]] = None
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=os.name != "nt",
+                    creationflags=(
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
+                        else 0
+                    ),
+                )
+                deadline = time.monotonic() + timeout_seconds
+                while True:
+                    if cancel and cancel():
+                        self._terminate_process(process)
+                        return ValidationReport(
+                            CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version,
+                            checks, ["EFI validation cancelled"], warnings,
+                        )
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.1)
+                        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            self._terminate_process(process)
+                            stdout, stderr = process.communicate()
+                            return ValidationReport(
+                                CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version,
+                                checks, ["ocvalidate timed out"], warnings,
+                            )
+            except BaseException:
+                self._terminate_process(process)
+                raise
         except subprocess.TimeoutExpired:
             return ValidationReport(CONTRACT_SCHEMA_VERSION, "INVALID", toolchain.ocvalidate_version, checks, ["ocvalidate timed out"], warnings)
         except OSError as exc:
@@ -467,14 +595,53 @@ class EfiBuilder:
         return ValidationReport(CONTRACT_SCHEMA_VERSION, "VALID", toolchain.ocvalidate_version, checks, [], warnings)
 
     @staticmethod
-    def _tree_digest(root: Path) -> str:
+    def _terminate_process(process: Optional[subprocess.Popen[str]]) -> None:
+        if process is None or process.poll() is not None:
+            return
+        try:
+            pid = getattr(process, "pid", None)
+            if os.name != "nt" and isinstance(pid, int) and pid > 0:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                pid = getattr(process, "pid", None)
+                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(pid)],
+                        capture_output=True, check=False,
+                    )
+                elif os.name != "nt" and isinstance(pid, int) and pid > 0:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    @staticmethod
+    def _tree_digest(root: Path, cancel: Optional[Callable[[], bool]] = None) -> str:
         records: List[Dict[str, Any]] = []
         for path in sorted(root.rglob("*")):
+            if cancel and cancel():
+                raise BuildPlanError("EFI validation cancelled")
             if path.is_symlink():
                 raise BuildPlanError(f"EFI output contains an unsafe symlink: {path.relative_to(root)}")
             if not path.is_file() or path.name == "manifest.json":
                 continue
-            records.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": compute_file_sha256(path)})
+            if cancel is None:
+                digest = compute_file_sha256(path)
+            else:
+                hasher = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        if cancel():
+                            raise BuildPlanError("EFI validation cancelled")
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+            records.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": digest})
         return canonical_json_digest({"files": records})
 
     @staticmethod
@@ -533,6 +700,7 @@ class EfiBuilder:
         expected_size: int,
         staging_root: Optional[Path] = None,
         cumulative_bytes_tracker: Optional[Callable[[int], None]] = None,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> int:
         root_staging = staging_root or efi_root.parent
         with tempfile.TemporaryDirectory(prefix=f"macloader-{dependency_id}-") as temp_name:
@@ -614,6 +782,7 @@ class EfiBuilder:
                     is_trusted_snapshot=True,
                     max_expanded_bytes=self.max_artifact_expanded_bytes,
                     cumulative_bytes_tracker=cumulative_bytes_tracker,
+                    cancel=cancel,
                 )
             except ArchiveSecurityError as exc:
                 raise BuildPlanError(f"Extraction security error for {dependency_id}: {exc}") from exc
@@ -628,38 +797,39 @@ class EfiBuilder:
             "SystemUUID": secrets.token_hex(16),
         }
 
-    def _identity_path(self, plan: BuildPlan, dependencies: ResolvedDependencySet) -> Path:
+    def _identity_path(
+        self,
+        plan: BuildPlan,
+        dependencies: ResolvedDependencySet,
+        identity_reference: Optional[IdentityReference] = None,
+    ) -> Path:
         base = self.identity_store_dir or (Path.home() / "AppData" / "Local" / "MacLoader" / "identities" if os.name == "nt" else Path.home() / ".local" / "share" / "macloader" / "identities")
+        if identity_reference is not None:
+            if not identity_reference.redacted or Path(identity_reference.storage_ref).name != identity_reference.storage_ref:
+                raise BuildPlanError("EFI identity reference must be a redacted local filename")
+            return base / identity_reference.storage_ref
         key = canonical_json_digest({"plan": plan.canonical_digest(), "dependencies": dependencies.canonical_digest()})
         return base / f"{key}.json"
 
     @staticmethod
     def _load_identity(path: Path) -> Dict[str, str]:
-        if path.is_symlink():
-            raise BuildPlanError("Stored EFI identity path must not be a symlink")
+        service = IdentityService(path.parent)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise BuildPlanError(f"Stored EFI identity cannot be read: {exc}") from exc
-        if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
-            raise BuildPlanError("Stored EFI identity has an invalid shape")
-        return data
+            service._assert_private_root()
+            service._assert_private_file(path)
+        except IdentityServiceError as exc:
+            raise BuildPlanError(str(exc)) from exc
+        try:
+            return service._read_private_values(path)
+        except IdentityServiceError as exc:
+            raise BuildPlanError(str(exc)) from exc
 
     @staticmethod
     def _write_private_identity(path: Path, identity: Dict[str, str]) -> None:
-        if path.is_symlink():
-            raise BuildPlanError("Refusing to overwrite a symlink at the private EFI identity path")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
         try:
-            path.chmod(0o600)
-        except OSError as exc:
+            IdentityService(path.parent).store(identity, storage_ref=path.name, validate_values=False)
+        except IdentityServiceError as exc:
             raise BuildPlanError(f"Unable to protect private EFI identity: {exc}") from exc
-        if os.name == "nt":
-            account = getpass.getuser()
-            result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:(R,W)"], capture_output=True, text=True, check=False)
-            if result.returncode != 0:
-                raise BuildPlanError("Unable to apply private Windows ACL to EFI identity")
 
     @staticmethod
     def _redact_diagnostics(text: str, identity: Optional[Dict[str, str]]) -> str:

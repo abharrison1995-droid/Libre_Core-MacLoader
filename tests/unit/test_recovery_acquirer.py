@@ -233,6 +233,7 @@ def test_recovery_redirect_handler_policy() -> None:
 
     # Allowed Apple host
     req = unittest.mock.MagicMock()
+    req.full_url = "https://osrecovery.apple.com/source.dmg"
     fp = unittest.mock.MagicMock()
     with unittest.mock.patch("urllib.request.HTTPRedirectHandler.redirect_request") as mock_super:
         mock_super.return_value = "ok"
@@ -675,6 +676,40 @@ def test_recovery_bundle_rolls_back_if_second_publication_fails(tmp_path: Path, 
     monkeypatch.setattr("macloader.recovery.acquirer.verify_apple_chunklist", lambda *_args: (1, len(image_payload)))
     monkeypatch.setattr(RecoveryAcquirer, "_publish_owned", staticmethod(fail_second))
     with pytest.raises(OSError, match="publication interruption"):
+        RecoveryAcquirer().download_bundle(
+            image, chunklist, image_destination, chunklist_destination, "c" * 64
+        )
+    assert image_destination.read_bytes() == b"original image"
+    assert chunklist_destination.read_bytes() == b"original chunklist"
+
+
+def test_recovery_bundle_rolls_back_on_ctrl_c_during_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_payload = b"replacement image"
+    chunklist_payload = b"replacement chunklist"
+    image_destination = tmp_path / "Recovery.dmg"
+    chunklist_destination = tmp_path / "Recovery.chunklist"
+    image_destination.write_bytes(b"original image")
+    chunklist_destination.write_bytes(b"original chunklist")
+    image = RecoveryAsset("InstallAssistant", "24A335", "https://example.invalid/image", hashlib.sha256(image_payload).hexdigest(), len(image_payload))
+    chunklist = RecoveryAsset("InstallAssistant", "24A335", "https://example.invalid/chunklist", hashlib.sha256(chunklist_payload).hexdigest(), len(chunklist_payload))
+
+    def fake_download(self: RecoveryAcquirer, asset: RecoveryAsset, destination: Path) -> Path:
+        destination.write_bytes(image_payload if asset is image else chunklist_payload)
+        return destination
+
+    publications = 0
+
+    def fail_second(part: Path, destination: Path, _destination_directory_fd: Optional[int] = None) -> None:
+        nonlocal publications
+        publications += 1
+        if publications == 2:
+            raise KeyboardInterrupt
+        part.replace(destination)
+
+    monkeypatch.setattr(RecoveryAcquirer, "download", fake_download)
+    monkeypatch.setattr("macloader.recovery.acquirer.verify_apple_chunklist", lambda *_args: (1, len(image_payload)))
+    monkeypatch.setattr(RecoveryAcquirer, "_publish_owned", staticmethod(fail_second))
+    with pytest.raises(KeyboardInterrupt):
         RecoveryAcquirer().download_bundle(
             image, chunklist, image_destination, chunklist_destination, "c" * 64
         )

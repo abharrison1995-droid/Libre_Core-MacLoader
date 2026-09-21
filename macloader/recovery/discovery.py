@@ -8,6 +8,7 @@ import secrets
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+import urllib.request as _urllib_request
 
 from macloader.domain.recovery import RecoveryProduct, RecoveryState, RecoveryTarget
 from macloader.exceptions import ArtifactDownloadError
@@ -54,6 +55,32 @@ class _AppleAssetRedirectHandler(HTTPRedirectHandler):
         parsed = urlparse(newurl)
         if parsed.scheme != "https" or parsed.hostname not in {APPLE_RECOVERY_HOST, "updates.cdn-apple.com", "cdn-apple.com"} or parsed.username or parsed.password or parsed.port not in (None, 443):
             raise ArtifactDownloadError("Recovery asset size probe redirect leaves the approved Apple policy")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and (urlparse(req.full_url).hostname or "").lower() != (parsed.hostname or "").lower():
+            # Asset tokens are scoped to the original Apple host.  Never
+            # forward the session cookie across an approved CDN boundary.
+            redirected.headers.pop("Cookie", None)
+            redirected.unredirected_hdrs.pop("Cookie", None)
+        return redirected
+
+
+class _AppleDiscoveryRedirectHandler(HTTPRedirectHandler):
+    """Allow only same-origin HTTPS redirects for the discovery exchange."""
+
+    def __init__(self, host: str) -> None:
+        super().__init__()
+        self.host = host.lower()
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        parsed = urlparse(newurl)
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() != self.host
+            or parsed.username
+            or parsed.password
+            or parsed.port not in (None, 443)
+        ):
+            raise ArtifactDownloadError("Recovery discovery redirect leaves the approved HTTPS origin")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -108,7 +135,21 @@ class AppleRecoveryDiscovery:
             raise ArtifactDownloadError("Recovery discovery endpoint is outside the pinned Apple policy")
         request = Request(url=url, headers=dict(headers), data=data)
         try:
-            with urlopen(request, timeout=30) as response:
+            # Keep the module-level transport seam usable for deterministic
+            # tests while production requests use the restricted redirect
+            # handler.  Final-response checks remain mandatory in both paths.
+            if urlopen is not _urllib_request.urlopen:
+                response_context = urlopen(request, timeout=30)
+            else:
+                response_context = build_opener(_AppleDiscoveryRedirectHandler(self.discovery_host)).open(request, timeout=30)
+            with response_context as response:
+                final = urlparse(getattr(response, "geturl", lambda: url)())
+                if (
+                    final.scheme != self.query_scheme
+                    or (final.hostname or "").lower() != self.discovery_host.lower()
+                    or final.port not in (None, 443)
+                ):
+                    raise ArtifactDownloadError("Recovery discovery response is outside the pinned HTTPS origin")
                 body = response.read(MAX_DISCOVERY_BYTES + 1)
                 if len(body) > MAX_DISCOVERY_BYTES:
                     raise ArtifactDownloadError("Recovery discovery response exceeds the bounded limit")

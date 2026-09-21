@@ -137,22 +137,24 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         serial = self._read_file(dmi_dir / "product_serial")
         uuid_str = self._read_file(dmi_dir / "product_uuid")
 
-        # Fallback to dmidecode if sysfs DMI is empty/unavailable
-        if not vendor and not prod_name:
+        # Fill missing fields independently.  A readable vendor/product must
+        # not suppress the BIOS fallback (or vice versa).
+        if any(value is None for value in (vendor, prod_name, prod_ver, serial, uuid_str)):
             dmi_out = self._run_command(["dmidecode", "-t", "system"])
             if dmi_out:
                 for line in dmi_out.splitlines():
-                    if "Manufacturer:" in line:
+                    if "Manufacturer:" in line and not vendor:
                         vendor = line.split(":", 1)[1].strip()
-                    elif "Product Name:" in line:
+                    elif "Product Name:" in line and not prod_name:
                         prod_name = line.split(":", 1)[1].strip()
-                    elif "Version:" in line:
+                    elif "Version:" in line and not prod_ver:
                         prod_ver = line.split(":", 1)[1].strip()
-                    elif "Serial Number:" in line:
+                    elif "Serial Number:" in line and not serial:
                         serial = line.split(":", 1)[1].strip()
-                    elif "UUID:" in line:
+                    elif "UUID:" in line and not uuid_str:
                         uuid_str = line.split(":", 1)[1].strip()
 
+        if not bios_ver or not bios_date:
             bios_out = self._run_command(["dmidecode", "-t", "bios"])
             if bios_out:
                 for line in bios_out.splitlines():
@@ -422,7 +424,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         storage_list: List[StorageInfo] = []
         for dev in pci_devices:
             # Class 0108 is NVMe, 0106 is SATA AHCI
-            if (dev.device_class and dev.device_class.startswith("0108")) or dev.vendor_id in ("144d", "15b7", "1c5c", "1987", "c0a9"):
+            if dev.device_class and dev.device_class.startswith("0108"):
                 model_name = "NVMe Storage Controller"
                 if dev.vendor_id == "144d" and dev.device_id in ("a808", "a809"):
                     model_name = "Samsung PM981 / PM981a NVMe SSD"
