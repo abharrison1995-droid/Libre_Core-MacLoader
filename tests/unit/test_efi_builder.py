@@ -174,3 +174,13 @@ def test_synthetic_schema_config_uses_sample_schema_and_encoded_rom(tmp_path: Pa
     assert config["Kernel"]["Add"][0]["BundlePath"] == "Kexts/Lilu.kext"
     assert config["PlatformInfo"]["Generic"]["ROM"] == bytes.fromhex(identity["ROM"])
     assert "synthetic" in config["#WARNING - MacLoader"].lower()
+
+
+def test_diagnostic_redaction_handles_non_text_platform_values() -> None:
+    identity = {
+        "SystemSerialNumber": "C02SYNTHETIC1", "ROM": bytes.fromhex("a1b2c3d4e5f6"),
+        "AdviseFeatures": False, "ProcessorType": 0, "MLB": "",
+    }
+    text = "serial C02SYNTHETIC1 rom a1b2c3d4e5f6 ROM A1B2C3D4E5F6 value 0 False"
+    redacted = EfiBuilder._redact_diagnostics(text, identity)
+    assert redacted == "serial <redacted> rom <redacted> ROM <redacted> value 0 False"

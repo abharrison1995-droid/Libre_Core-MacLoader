@@ -7,10 +7,13 @@ import os
 from pathlib import Path
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
+import zlib
 from typing import Any, Callable, Iterable, Optional, Protocol
 
 _fcntl: Any = None
@@ -20,6 +23,7 @@ except ImportError:  # pragma: no cover - exercised by Windows packaging
     _fcntl = None
 
 from macloader.removable.writer import (
+    FAT32_MAX_FILE_BYTES,
     MAX_MEDIA_FILE_BYTES,
     MAX_MEDIA_TOTAL_BYTES,
     RemovableDevice,
@@ -289,8 +293,136 @@ class WindowsRemovableAdapter:
         return completed.stdout
 
 
+# Linux block-device ioctls (asm-generic encodings used on x86_64 and arm64).
+_BLKGETSIZE64 = 0x80081272
+_BLKSSZGET = 0x1268
+_BLKFLSBUF = 0x1261
+_BLKGETDISKSEQ = 0x80081280
+
+SECTOR_BYTES = 512
+ESP_FIRST_LBA = 2048
+GPT_ENTRY_COUNT = 128
+GPT_ENTRY_BYTES = 128
+GPT_ENTRY_SECTORS = GPT_ENTRY_COUNT * GPT_ENTRY_BYTES // SECTOR_BYTES
+ESP_TYPE_GUID = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+ESP_PARTITION_NAME = "MACLOADER"
+FAT32_VOLUME_LABEL = "MACLOADER"
+FAT32_MIN_CLUSTERS = 65525
+
+
+@dataclass(frozen=True)
+class BlockIdentity:
+    """Kernel identity of one attachment of one block device.
+
+    ``diskseq`` is a per-boot monotonically increasing sequence number the
+    kernel assigns to each disk attachment.  It is never reused, so a device
+    that is unplugged and replaced by another (even one that receives the same
+    major:minor number or by-id alias) cannot match a recorded identity.
+    """
+
+    rdev: int
+    diskseq: int
+    size_bytes: int
+    logical_sector_bytes: int
+
+
+@dataclass(frozen=True)
+class PartitionGeometry:
+    parent_rdev: int
+    number: int
+    start_sector: int
+    size_sectors: int
+
+
+@dataclass(frozen=True)
+class _LockedDevice:
+    device_id: str
+    descriptor: int
+    alias: Path
+    identity: BlockIdentity
+
+
+class LinuxBlockProbe:
+    """Thin kernel boundary used by :class:`LinuxBlockDeviceBackend`.
+
+    Every method is side-effect free except :meth:`open_locked` and
+    :meth:`drop_cache`; tests replace the probe to model hotplug races
+    deterministically without touching a host device.
+    """
+
+    by_diskseq_root = Path("/dev/disk/by-diskseq")
+    sysfs_block_root = Path("/sys/dev/block")
+
+    def open_locked(self, path: Path) -> int:
+        if _fcntl is None:
+            raise UnsafeRemovableTarget("Linux exclusive device locking is unavailable on this host")
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except OSError:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def identity_of_fd(self, descriptor: int) -> BlockIdentity:
+        if _fcntl is None:
+            raise UnsafeRemovableTarget("Linux block-device identity checks are unavailable on this host")
+        status = os.fstat(descriptor)
+        if not stat.S_ISBLK(status.st_mode):
+            raise UnsafeRemovableTarget("Selected Linux target is not a physical block device")
+        try:
+            size = struct.unpack("=Q", _fcntl.ioctl(descriptor, _BLKGETSIZE64, bytes(8)))[0]
+            sector = struct.unpack("=i", _fcntl.ioctl(descriptor, _BLKSSZGET, bytes(4)))[0]
+            diskseq = struct.unpack("=Q", _fcntl.ioctl(descriptor, _BLKGETDISKSEQ, bytes(8)))[0]
+        except OSError as exc:
+            raise UnsafeRemovableTarget(
+                "Linux kernel did not report block size and disk sequence identity (Linux 5.15+ is required)"
+            ) from exc
+        if diskseq <= 0:
+            raise UnsafeRemovableTarget("Linux kernel reported no disk sequence identity")
+        return BlockIdentity(status.st_rdev, diskseq, size, sector)
+
+    def identity_of_path(self, path: Path) -> BlockIdentity:
+        # A read-only, non-blocking open neither modifies the device nor waits
+        # on removable-media state.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        try:
+            return self.identity_of_fd(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def partition_geometry(self, rdev: int) -> PartitionGeometry:
+        base = self.sysfs_block_root / f"{os.major(rdev)}:{os.minor(rdev)}"
+        try:
+            number = int((base / "partition").read_text(encoding="ascii").strip())
+            start = int((base / "start").read_text(encoding="ascii").strip())
+            size = int((base / "size").read_text(encoding="ascii").strip())
+            parent_text = (base.resolve(strict=True).parent / "dev").read_text(encoding="ascii").strip()
+            parent_major, parent_minor = (int(part) for part in parent_text.split(":", 1))
+        except (OSError, ValueError) as exc:
+            raise UnsafeRemovableTarget("Linux did not report the prepared partition geometry") from exc
+        return PartitionGeometry(os.makedev(parent_major, parent_minor), number, start, size)
+
+    def is_partition(self, rdev: int) -> bool:
+        return (self.sysfs_block_root / f"{os.major(rdev)}:{os.minor(rdev)}" / "partition").exists()
+
+    def drop_cache(self, descriptor: int) -> None:
+        if _fcntl is not None:
+            _fcntl.ioctl(descriptor, _BLKFLSBUF, 0)
+
+    def mounted_device(self, mount: Path) -> int:
+        return os.stat(mount).st_dev
+
+
 class LinuxBlockDeviceBackend:
     """Root-only GPT/FAT32 writer for stable whole-disk Linux by-id targets.
+
+    The by-id alias is used exactly once, to find and lock the device.  From
+    then on every command receives the kernel's ``/dev/disk/by-diskseq`` path
+    for that attachment, and before and after every command the backend proves
+    that the path, the original alias and the locked descriptor still report the
+    same device number, disk sequence and size.  An alias that is retargeted,
+    or a device that is unplugged and replaced, therefore stops the operation.
 
     The implementation is deliberately not marked production-qualified. A
     sacrificial physical-device campaign must qualify the running kernel,
@@ -300,15 +432,18 @@ class LinuxBlockDeviceBackend:
     production_qualified = False
     _by_id_root = Path("/dev/disk/by-id")
     _mount_parent = Path("/run")
+    _partition_wait_seconds = 5.0
 
     def __init__(
         self,
         enumerate_devices: Callable[[], list[RemovableDevice]],
         runner: Optional[Callable[[list[str], Optional[str]], str]] = None,
+        probe: Optional[LinuxBlockProbe] = None,
     ) -> None:
         self._enumerate_devices = enumerate_devices
         self._runner = runner
-        self._locked: dict[str, tuple[int, Path]] = {}
+        self._probe = probe or LinuxBlockProbe()
+        self._locked: dict[str, _LockedDevice] = {}
         self._mounts: dict[str, tuple[Path, Path]] = {}
 
     def _run(self, args: list[str], input_text: Optional[str] = None) -> str:
@@ -379,67 +514,181 @@ class LinuxBlockDeviceBackend:
         self._require_root()
         if _fcntl is None:
             raise UnsafeRemovableTarget("Linux exclusive device locking is unavailable on this host")
+        if device.device_id in self._locked:
+            raise UnsafeRemovableTarget("Selected Linux USB device is already locked by this session")
         current = self._current(device)
-        path = self._device_path(current)
+        alias = self._device_path(current)
         try:
-            descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
-            _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            descriptor = self._probe.open_locked(alias)
         except OSError as exc:
             raise UnsafeRemovableTarget("Unable to exclusively lock the selected Linux USB device") from exc
-        self._locked[current.device_id] = (descriptor, path)
         try:
-            # A second mount check closes the time-of-check/open race. Never
-            # silently unmount volumes which a desktop service may remount.
+            identity = self._probe.identity_of_fd(descriptor)
+            if (
+                identity.size_bytes != current.capacity_bytes
+                or identity.logical_sector_bytes != SECTOR_BYTES
+                or self._probe.is_partition(identity.rdev)
+            ):
+                raise UnsafeRemovableTarget(
+                    "Locked Linux device is not the planned whole 512-byte-sector disk"
+                )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._locked[current.device_id] = _LockedDevice(current.device_id, descriptor, alias, identity)
+        try:
+            # A second enumeration and identity check closes the
+            # time-of-check/open race. Never silently unmount volumes which a
+            # desktop service may remount.
             self._current(current)
-        except Exception:
+            self._pinned_disk(self._locked[current.device_id])
+        except BaseException:
             self._close_lock(current.device_id)
             raise
 
+    def _locked_device(self, device: RemovableDevice, stage: str) -> _LockedDevice:
+        locked = self._locked.get(device.device_id)
+        if locked is None:
+            raise UnsafeRemovableTarget(f"Linux USB device lock was lost before {stage}")
+        return locked
+
+    def _pinned_disk(self, locked: _LockedDevice) -> Path:
+        """Return the attachment-unique path after proving it is the locked disk."""
+        try:
+            held = self._probe.identity_of_fd(locked.descriptor)
+        except OSError as exc:
+            raise UnsafeRemovableTarget("Locked Linux USB device disappeared") from exc
+        if held != locked.identity:
+            raise UnsafeRemovableTarget("Locked Linux USB device changed identity (hotplug or media change)")
+        pinned = self._probe.by_diskseq_root / str(locked.identity.diskseq)
+        for label, path in (("attachment path", pinned), ("by-id alias", locked.alias)):
+            try:
+                observed = self._probe.identity_of_path(path)
+            except OSError as exc:
+                raise UnsafeRemovableTarget(f"Locked Linux USB {label} is missing") from exc
+            if observed != locked.identity:
+                raise UnsafeRemovableTarget(
+                    f"Locked Linux USB {label} now refers to a different device; refusing to continue"
+                )
+        return pinned
+
+    def _pinned_partition(self, locked: _LockedDevice, start_sector: int, size_sectors: int) -> Path:
+        """Return the created ESP path only if it belongs to the locked disk."""
+        partition = self._probe.by_diskseq_root / f"{locked.identity.diskseq}-part1"
+        deadline = time.monotonic() + self._partition_wait_seconds
+        while True:
+            try:
+                identity = self._probe.identity_of_path(partition)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise UnsafeRemovableTarget(
+                        "Linux did not expose the prepared EFI partition for the locked disk"
+                    ) from None
+                time.sleep(0.1)
+        geometry = self._probe.partition_geometry(identity.rdev)
+        if (
+            identity.diskseq != locked.identity.diskseq
+            or identity.rdev == locked.identity.rdev
+            or geometry.parent_rdev != locked.identity.rdev
+            or geometry.number != 1
+            or geometry.start_sector != start_sector
+            or geometry.size_sectors != size_sectors
+            or identity.size_bytes != size_sectors * SECTOR_BYTES
+        ):
+            raise UnsafeRemovableTarget("Prepared EFI partition does not belong to the locked disk and planned layout")
+        return partition
+
+    def _run_pinned(self, locked: _LockedDevice, args: list[str], input_text: Optional[str] = None) -> None:
+        """Run one media command, proving the locked identity before and after it."""
+        self._pinned_disk(locked)
+        self._run(args, input_text)
+        self._pinned_disk(locked)
+
+    @staticmethod
+    def _preflight_payload(plan: WritePlan, partition_sectors: int) -> None:
+        """Reject FAT32-unrepresentable or oversized payloads before repartitioning."""
+        total = 0
+        for record in plan.expected_files:
+            relative = Path(record.relative_path)
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                raise UnsafeRemovableTarget("Media plan contains an unsafe relative path")
+            if record.size_bytes > FAT32_MAX_FILE_BYTES:
+                raise UnsafeRemovableTarget("A media payload file exceeds the FAT32 per-file limit")
+            if record.size_bytes > MAX_MEDIA_FILE_BYTES:
+                raise UnsafeRemovableTarget("A media payload file exceeds the bounded size limit")
+            total += record.size_bytes
+        if total > MAX_MEDIA_TOTAL_BYTES:
+            raise UnsafeRemovableTarget("Media payload exceeds the bounded total size limit")
+        if not plan.expected_files:
+            raise UnsafeRemovableTarget("Media plan contains no payload files")
+        if total >= partition_sectors * SECTOR_BYTES:
+            raise UnsafeRemovableTarget("Media payload does not fit in the planned EFI partition")
+
     def write(self, plan: WritePlan, source_dir: Path) -> None:
         current = self._current(plan.target, plan.required_bytes)
-        if current.device_id not in self._locked:
-            raise UnsafeRemovableTarget("Linux USB device was not exclusively locked")
-        path = self._device_path(current)
-        sectors = current.capacity_bytes // 512
+        locked = self._locked_device(current, "write")
+        sectors = locked.identity.size_bytes // SECTOR_BYTES
+        partition_sectors = self._partition_sectors(sectors)
+        self._preflight_payload(plan, partition_sectors)
         table = self._partition_script(sectors)
-        self._run(["sfdisk", "--wipe", "always", "--wipe-partitions", "always", str(path)], table)
-        self._run(["blockdev", "--rereadpt", str(path)])
-        partition = self._partition_path(path)
-        self._run(["mkfs.vfat", "-F", "32", "-n", "MACLOADER", str(partition)])
+        disk = self._pinned_disk(locked)
+        self._run_pinned(locked, ["sfdisk", "--wipe", "always", "--wipe-partitions", "always", str(disk)], table)
+        self._run_pinned(locked, ["blockdev", "--rereadpt", str(disk)])
+        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
+        self._run_pinned(locked, ["mkfs.vfat", "-F", "32", "-S", str(SECTOR_BYTES), "-n", FAT32_VOLUME_LABEL, str(partition)])
+        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
         mount = Path(tempfile.mkdtemp(prefix="macloader-usb-", dir=self._mount_parent))
         try:
-            self._run(["mount", "-t", "vfat", "-o", "nosuid,nodev,noexec", str(partition), str(mount)])
+            self._run_pinned(locked, ["mount", "-t", "vfat", "-o", "nosuid,nodev,noexec", str(partition), str(mount)])
             self._mounts[current.device_id] = (mount, partition)
+            self._assert_mounted_partition(locked, mount, partition_sectors)
             self._copy_boot_layout(source_dir, mount, plan)
             self._sync_mount(mount)
+            self._assert_mounted_partition(locked, mount, partition_sectors)
         finally:
             if current.device_id in self._mounts:
                 self._unmount(current.device_id)
             else:
                 mount.rmdir()
 
+    def _assert_mounted_partition(self, locked: _LockedDevice, mount: Path, partition_sectors: int) -> None:
+        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
+        expected = self._probe.identity_of_path(partition).rdev
+        if self._probe.mounted_device(mount) != expected:
+            raise UnsafeRemovableTarget("Mounted volume is not the locked disk's prepared EFI partition")
+
     def flush(self, device: RemovableDevice) -> None:
-        locked = self._locked.get(device.device_id)
-        if locked is None:
-            raise UnsafeRemovableTarget("Linux USB device lock was lost before flush")
-        os.fsync(locked[0])
-        self._run(["blockdev", "--flushbufs", str(locked[1])])
+        locked = self._locked_device(device, "flush")
+        os.fsync(locked.descriptor)
+        disk = self._pinned_disk(locked)
+        self._run_pinned(locked, ["blockdev", "--flushbufs", str(disk)])
 
     def readback(self, plan: WritePlan, source_dir: Path) -> bool:
         current = self._current(plan.target, plan.required_bytes, allow_created_partition=True)
-        locked = self._locked.get(current.device_id)
-        if locked is None:
-            raise UnsafeRemovableTarget("Linux USB device lock was lost before readback")
-        partition = self._partition_path(locked[1])
+        locked = self._locked_device(current, "readback")
+        self._pinned_disk(locked)
+        sectors = locked.identity.size_bytes // SECTOR_BYTES
+        partition_sectors = self._partition_sectors(sectors)
+        # Discard cached whole-disk pages so the layout checks observe media.
+        self._probe.drop_cache(locked.descriptor)
+        try:
+            verify_gpt_layout(locked.descriptor, locked.identity.size_bytes)
+            verify_fat32_volume(locked.descriptor, ESP_FIRST_LBA, partition_sectors)
+        except UnsafeRemovableTarget:
+            return False
+        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
         mount = Path(tempfile.mkdtemp(prefix="macloader-readback-", dir=self._mount_parent))
         try:
-            self._run(["mount", "-t", "vfat", "-o", "ro,nosuid,nodev,noexec", str(partition), str(mount)])
+            self._run_pinned(locked, ["mount", "-t", "vfat", "-o", "ro,nosuid,nodev,noexec", str(partition), str(mount)])
             self._mounts[current.device_id] = (mount, partition)
-            verified = self._verify_boot_layout(source_dir, mount, plan)
-            return verified
+            self._assert_mounted_partition(locked, mount, partition_sectors)
+            return self._verify_boot_layout(source_dir, mount, plan)
         finally:
             if current.device_id in self._mounts:
                 self._unmount(current.device_id)
+            else:
+                mount.rmdir()
 
     def invalidate(self, device: RemovableDevice, reason: str) -> None:
         del reason  # Raw private identifiers and user text are never persisted.
@@ -449,15 +698,25 @@ class LinuxBlockDeviceBackend:
             return
         if device.device_id in self._mounts:
             self._unmount(device.device_id)
-        descriptor, path = locked
-        size = device.capacity_bytes
         try:
-            self._invalidate_descriptor(descriptor, size)
-            self._run(["blockdev", "--flushbufs", str(path)])
+            held = self._probe.identity_of_fd(locked.descriptor)
+        except OSError as exc:
+            self._close_lock(device.device_id)
+            raise UnsafeRemovableTarget("Failed media disappeared before invalidation") from exc
+        if held != locked.identity:
+            # The descriptor no longer refers to the locked attachment. Never
+            # direct invalidation writes at whatever occupies it now; release
+            # the stale descriptor so it cannot be reused by a later call.
+            self._close_lock(device.device_id)
+            raise UnsafeRemovableTarget("Failed media changed identity; refusing to invalidate another device")
+        try:
+            self._invalidate_descriptor(locked.descriptor, locked.identity.size_bytes)
+            disk = self._pinned_disk(locked)
+            self._run_pinned(locked, ["blockdev", "--flushbufs", str(disk)])
         except OSError as exc:
             raise UnsafeRemovableTarget("Failed media could not be invalidated") from exc
         self._close_lock(device.device_id)
-        self._safe_eject(path)
+        self._safe_eject(disk)
 
     @staticmethod
     def _invalidate_descriptor(descriptor: int, size: int) -> None:
@@ -479,34 +738,24 @@ class LinuxBlockDeviceBackend:
             return
         if device.device_id in self._mounts:
             self._unmount(device.device_id)
-        self._run(["blockdev", "--flushbufs", str(locked[1])])
-        path = locked[1]
+        disk = self._pinned_disk(locked)
+        self._run_pinned(locked, ["blockdev", "--flushbufs", str(disk)])
         self._close_lock(device.device_id)
-        self._safe_eject(path)
-
-    @classmethod
-    def _partition_path(cls, disk: Path) -> Path:
-        alias = disk.name + "-part1"
-        partition = cls._by_id_root / alias
-        for _ in range(50):
-            try:
-                resolved = partition.resolve(strict=True)
-                if stat.S_ISBLK(resolved.stat().st_mode) and str(resolved).startswith("/dev/"):
-                    return partition
-            except OSError:
-                pass
-            time.sleep(0.1)
-        raise UnsafeRemovableTarget("Linux did not expose the prepared EFI partition through its stable by-id alias")
+        self._safe_eject(disk)
 
     @staticmethod
-    def _partition_script(sectors: int) -> str:
-        first_lba = 2048
-        partition_sectors = sectors - first_lba - 33
+    def _partition_sectors(sectors: int) -> int:
+        partition_sectors = sectors - ESP_FIRST_LBA - (1 + GPT_ENTRY_SECTORS)
         if partition_sectors <= 0:
             raise UnsafeRemovableTarget("Linux USB device is too small for a GPT EFI layout")
+        return partition_sectors
+
+    @classmethod
+    def _partition_script(cls, sectors: int) -> str:
+        partition_sectors = cls._partition_sectors(sectors)
         return (
-            "label: gpt\nunit: sectors\nfirst-lba: 2048\n\n"
-            f"start={first_lba}, size={partition_sectors}, type=uefi, name=MACLOADER\n"
+            f"label: gpt\nunit: sectors\nfirst-lba: {ESP_FIRST_LBA}\n\n"
+            f"start={ESP_FIRST_LBA}, size={partition_sectors}, type=uefi, name={ESP_PARTITION_NAME}\n"
         )
 
     def _copy_boot_layout(self, source_dir: Path, mount: Path, plan: WritePlan) -> None:
@@ -519,7 +768,7 @@ class LinuxBlockDeviceBackend:
             source_status = os.lstat(source)
             if not stat.S_ISREG(source_status.st_mode) or source.is_symlink() or source_status.st_size != record.size_bytes:
                 raise UnsafeRemovableTarget("Validated media source changed before Linux USB write")
-            if source_status.st_size > MAX_MEDIA_FILE_BYTES:
+            if source_status.st_size > MAX_MEDIA_FILE_BYTES or source_status.st_size > FAT32_MAX_FILE_BYTES:
                 raise UnsafeRemovableTarget("A media payload file exceeds the bounded size limit")
             total += source_status.st_size
             if total > MAX_MEDIA_TOTAL_BYTES:
@@ -546,12 +795,16 @@ class LinuxBlockDeviceBackend:
 
     @classmethod
     def _verify_boot_layout(cls, source_dir: Path, mount: Path, plan: WritePlan) -> bool:
+        """Verify every planned file byte-for-byte and reject any unplanned file."""
+        expected: set[str] = set()
         for record in plan.expected_files:
             relative = Path(record.relative_path)
             if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                 return False
             source = Path(source_dir) / relative
-            target = mount / cls._boot_relative(relative)
+            target_relative = cls._boot_relative(relative)
+            expected.add(target_relative.as_posix())
+            target = mount / target_relative
             try:
                 if target.is_symlink() or not target.is_file() or target.stat().st_size != record.size_bytes:
                     return False
@@ -559,7 +812,18 @@ class LinuxBlockDeviceBackend:
                     return False
             except OSError:
                 return False
-        return bool(plan.expected_files)
+        observed: set[str] = set()
+        try:
+            for entry in mount.rglob("*"):
+                if entry.is_symlink():
+                    return False
+                if entry.is_file():
+                    observed.add(entry.relative_to(mount).as_posix())
+                elif not entry.is_dir():
+                    return False
+        except OSError:
+            return False
+        return bool(plan.expected_files) and observed == expected
 
     @staticmethod
     def _boot_relative(relative: Path) -> Path:
@@ -591,11 +855,141 @@ class LinuxBlockDeviceBackend:
 
     def _close_lock(self, device_id: str) -> None:
         locked = self._locked.pop(device_id, None)
-        if locked is not None and _fcntl is not None:
+        if locked is not None:
             try:
-                _fcntl.flock(locked[0], _fcntl.LOCK_UN)
+                if _fcntl is not None:
+                    _fcntl.flock(locked.descriptor, _fcntl.LOCK_UN)
             finally:
-                os.close(locked[0])
+                os.close(locked.descriptor)
+
+
+def _read_exact(descriptor: int, offset: int, length: int) -> bytes:
+    data = b""
+    while len(data) < length:
+        chunk = os.pread(descriptor, length - len(data), offset + len(data))
+        if not chunk:
+            raise UnsafeRemovableTarget("Media readback ended before the expected layout")
+        data += chunk
+    return data
+
+
+def _gpt_header(descriptor: int, lba: int) -> dict[str, Any]:
+    raw = _read_exact(descriptor, lba * SECTOR_BYTES, SECTOR_BYTES)
+    (signature, revision, header_size, header_crc, reserved, my_lba, alternate_lba,
+     first_usable, last_usable, disk_guid, entries_lba, entry_count, entry_size,
+     entries_crc) = struct.unpack_from("<8sIIIIQQQQ16sQIII", raw)
+    if signature != b"EFI PART" or revision != 0x00010000 or header_size != 92 or reserved != 0:
+        raise UnsafeRemovableTarget("GPT header signature or revision is invalid")
+    zeroed = raw[:16] + b"\x00\x00\x00\x00" + raw[20:header_size]
+    if zlib.crc32(zeroed) & 0xFFFFFFFF != header_crc:
+        raise UnsafeRemovableTarget("GPT header checksum is invalid")
+    if any(raw[header_size:]):
+        raise UnsafeRemovableTarget("GPT header reserved area is not zero")
+    return {
+        "my_lba": my_lba, "alternate_lba": alternate_lba, "first_usable": first_usable,
+        "last_usable": last_usable, "disk_guid": disk_guid, "entries_lba": entries_lba,
+        "entry_count": entry_count, "entry_size": entry_size, "entries_crc": entries_crc,
+    }
+
+
+def verify_gpt_layout(descriptor: int, size_bytes: int) -> PartitionGeometry:
+    """Verify protective MBR, both GPT copies and the single planned ESP entry."""
+    if size_bytes % SECTOR_BYTES:
+        raise UnsafeRemovableTarget("Media size is not a whole number of 512-byte sectors")
+    sectors = size_bytes // SECTOR_BYTES
+    last_lba = sectors - 1
+    partition_sectors = LinuxBlockDeviceBackend._partition_sectors(sectors)
+    mbr = _read_exact(descriptor, 0, SECTOR_BYTES)
+    if mbr[510:512] != b"\x55\xaa" or mbr[446 + 4] != 0xEE:
+        raise UnsafeRemovableTarget("Protective MBR is missing")
+    primary = _gpt_header(descriptor, 1)
+    backup = _gpt_header(descriptor, last_lba)
+    expected_last_usable = last_lba - 1 - GPT_ENTRY_SECTORS
+    for label, header, my_lba, alternate, entries_lba in (
+        ("primary", primary, 1, last_lba, 2),
+        ("backup", backup, last_lba, 1, last_lba - GPT_ENTRY_SECTORS),
+    ):
+        if (
+            header["my_lba"] != my_lba
+            or header["alternate_lba"] != alternate
+            or header["entries_lba"] != entries_lba
+            or header["entry_count"] != GPT_ENTRY_COUNT
+            or header["entry_size"] != GPT_ENTRY_BYTES
+            or header["first_usable"] != ESP_FIRST_LBA
+            or header["last_usable"] != expected_last_usable
+        ):
+            raise UnsafeRemovableTarget(f"{label.capitalize()} GPT header does not match the planned geometry")
+    if primary["disk_guid"] != backup["disk_guid"] or primary["entries_crc"] != backup["entries_crc"]:
+        raise UnsafeRemovableTarget("Primary and backup GPT headers disagree")
+    entry_bytes = GPT_ENTRY_COUNT * GPT_ENTRY_BYTES
+    primary_entries = _read_exact(descriptor, 2 * SECTOR_BYTES, entry_bytes)
+    backup_entries = _read_exact(descriptor, (last_lba - GPT_ENTRY_SECTORS) * SECTOR_BYTES, entry_bytes)
+    if zlib.crc32(primary_entries) & 0xFFFFFFFF != primary["entries_crc"]:
+        raise UnsafeRemovableTarget("Primary GPT partition entries checksum is invalid")
+    if zlib.crc32(backup_entries) & 0xFFFFFFFF != backup["entries_crc"] or backup_entries != primary_entries:
+        raise UnsafeRemovableTarget("Backup GPT partition entries are invalid or differ from the primary")
+    used = [
+        primary_entries[index:index + GPT_ENTRY_BYTES]
+        for index in range(0, entry_bytes, GPT_ENTRY_BYTES)
+        if any(primary_entries[index:index + 16])
+    ]
+    if len(used) != 1:
+        raise UnsafeRemovableTarget("GPT must contain exactly the planned EFI System Partition")
+    type_guid, _unique_guid, first_lba, end_lba, _attributes, raw_name = struct.unpack_from("<16s16sQQQ72s", used[0])
+    name = raw_name.decode("utf-16-le", errors="replace").rstrip("\x00")
+    if uuid.UUID(bytes_le=type_guid) != ESP_TYPE_GUID:
+        raise UnsafeRemovableTarget("GPT partition is not an EFI System Partition")
+    if first_lba != ESP_FIRST_LBA or end_lba - first_lba + 1 != partition_sectors or name != ESP_PARTITION_NAME:
+        raise UnsafeRemovableTarget("EFI System Partition geometry does not match the plan")
+    return PartitionGeometry(0, 1, first_lba, partition_sectors)
+
+
+def verify_fat32_volume(descriptor: int, start_sector: int, size_sectors: int) -> None:
+    """Verify the FAT32 boot sector, its backup and FSInfo for the planned ESP."""
+    base = start_sector * SECTOR_BYTES
+    boot = _read_exact(descriptor, base, SECTOR_BYTES)
+    (bytes_per_sector, sectors_per_cluster, reserved, fat_count, root_entries, total16,
+     _media, fat_size16, _spt, _heads, _hidden, total32, fat_size32, _flags, version,
+     root_cluster, fsinfo_sector, backup_sector) = struct.unpack_from("<HBHBHHBHHHIIIHHIHH", boot, 11)
+    if boot[510:512] != b"\x55\xaa" or boot[0] not in (0xEB, 0xE9):
+        raise UnsafeRemovableTarget("FAT32 boot sector signature is invalid")
+    if (
+        bytes_per_sector != SECTOR_BYTES
+        or sectors_per_cluster == 0
+        or sectors_per_cluster & (sectors_per_cluster - 1)
+        or reserved == 0
+        or fat_count != 2
+        or root_entries != 0
+        or total16 != 0
+        or fat_size16 != 0
+        or fat_size32 == 0
+        or version != 0
+        or root_cluster < 2
+        or total32 != size_sectors
+    ):
+        raise UnsafeRemovableTarget("FAT32 boot parameters do not match the planned EFI partition")
+    if boot[0x42] != 0x29 or boot[0x52:0x5A] != b"FAT32   " or boot[0x47:0x52] != FAT32_VOLUME_LABEL.ljust(11).encode("ascii"):
+        raise UnsafeRemovableTarget("FAT32 volume label or type is not the planned MacLoader volume")
+    data_sectors = total32 - reserved - fat_count * fat_size32
+    if data_sectors <= 0 or data_sectors // sectors_per_cluster < FAT32_MIN_CLUSTERS:
+        raise UnsafeRemovableTarget("FAT32 volume has too few clusters to be a valid FAT32 filesystem")
+    if fsinfo_sector == 0 or fsinfo_sector >= reserved or backup_sector in (0, 0xFFFF) or backup_sector >= reserved:
+        raise UnsafeRemovableTarget("FAT32 FSInfo or backup boot sector location is invalid")
+    if _read_exact(descriptor, base + backup_sector * SECTOR_BYTES, SECTOR_BYTES) != boot:
+        raise UnsafeRemovableTarget("FAT32 backup boot sector differs from the primary")
+    fsinfo = _read_exact(descriptor, base + fsinfo_sector * SECTOR_BYTES, SECTOR_BYTES)
+    if (
+        fsinfo[0:4] != b"RRaA"
+        or fsinfo[484:488] != b"rrAa"
+        or fsinfo[508:512] != b"\x00\x00\x55\xaa"
+    ):
+        raise UnsafeRemovableTarget("FAT32 FSInfo sector is invalid")
+    fat_offset = base + reserved * SECTOR_BYTES
+    first_fat = _read_exact(descriptor, fat_offset, 12)
+    second_fat = _read_exact(descriptor, fat_offset + fat_size32 * SECTOR_BYTES, 12)
+    media_entry = struct.unpack_from("<I", first_fat)[0] & 0x0FFFFFFF
+    if first_fat != second_fat or media_entry & 0xFF != boot[21] or media_entry >> 8 != 0x0FFFFF:
+        raise UnsafeRemovableTarget("FAT32 allocation tables are inconsistent")
 
 
 def _sha256_file(path: Path) -> str:

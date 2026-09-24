@@ -4,7 +4,7 @@
 
 This runbook is for the reference ThinkPad T480s machine type **20L8**, BIOS **N22ET85W 1.62**, with the frozen target **macOS Sequoia 15.0, build 24A335**. Do not change the target without a separate user decision.
 
-The source tree currently has no private machine ACPI capture, selected real SMBIOS identity, exact verified Recovery payload, or physically qualified USB writer. Apple Recovery discovery returned HTTP 405 over HTTPS; the Apple `AP` field supplies a product identifier and does not prove a macOS build. Software and disposable-image results cannot close those gates. **No physical media campaign or first boot is ready to start yet.** The next Recovery artifact needed is an Apple-authoritative authenticated binding to build 24A335 or an Apple-signed Recovery payload independently bound to that build.
+The source tree currently has no private machine ACPI capture, selected real SMBIOS identity, exact verified Recovery payload, or physically qualified USB writer. No Apple-authoritative, authenticated route binds a Recovery product or payload to build 24A335: the pinned discovery protocol returns only a product identifier, its upstream client uses plaintext HTTP, and the HTTPS form returned HTTP 405 when last probed. See the [Recovery decision record](RECOVERY_BUILD_BINDING_DECISION.md). Preflight reports the Recovery gate from the currently recorded discovery evidence. Software and disposable-image results cannot close these gates. **No physical media campaign or first boot is ready to start yet.**
 
 The earlier [reference evidence note](T480S_REFERENCE_EVIDENCE_2026-09-10.md) is historical. Its raw ACPI files and other private captures are absent from this checkout, so its measurements and firmware observations are not current evidence for this installation.
 
@@ -29,14 +29,53 @@ macloader config check CONFIG_ID
 macloader preflight --config CONFIG_ID --json
 ```
 
-Capture the DSDT and all eleven SSDTs on that same laptop/BIOS, transfer the raw directory through a private channel, and import it:
+### Capture ACPI on the T480s itself (Linux, read-only)
+
+The capture must run on the reference laptop itself, never on another preparation host, because firmware tables are specific to the machine and BIOS. It only reads `/sys/firmware/acpi/tables`, and it changes no BIOS setting, disk, or boot entry. Use one of the following:
+
+- **The T480s already runs Linux.** Run the capture from that installed system.
+- **The T480s runs another OS.** Start a standard Linux live session once through **F12**, without installing anything and without mounting or changing the internal disk. Creating that live medium is your own operation outside MacLoader, so treat it as a separate checkpoint. Use a stick you are willing to overwrite. In the live session, install MacLoader with `python -m pip install "git+https://github.com/abharrison1995-droid/Libre_Core-MacLoader"` or from a copied wheel.
+
+The firmware table files are readable only by root. The capture refuses any machine that is not a Lenovo **20L8** reporting a ThinkPad T480s with BIOS **N22ET85W (1.62)**. It also refuses destinations inside a Git checkout and destinations that already exist.
 
 ```bash
-macloader evidence acpi-import CONFIG_ID PRIVATE_ACPI_DIRECTORY
+# On the T480s. DESTINATION must be new, private and outside any repository.
+sudo "$(command -v macloader)" evidence acpi-capture ~/t480s-acpi-private
+ls -l ~/t480s-acpi-private/PRIVATE-ACPI
+```
+
+The command checks DMI vendor, machine type, product version and BIOS before reading any table. It reads the DSDT and every statically installed SSDT in firmware order, excluding runtime-loaded `dynamic/` tables, and validates each table's signature, declared length and checksum. It then writes `dsdt.dat`, `ssdt.dat`, `ssdt1.dat` … `ssdt11.dat`, a `SHA256SUMS` file and `capture-manifest.json`. Directories are created with mode 0700 and files with mode 0600, owned by the user who ran `sudo`. The importer's own table-set checks run before the command succeeds. The output shows counts and file names only.
+
+**The table count is fixed by the reviewed profile.** The importer requires one DSDT and twelve SSDT files (`ssdt.dat` through `ssdt11.dat`). The historical 2026-09-10 note describes eleven SSDTs, and its files are not in this checkout, so the real count has not been re-verified. If the capture reports any other SSDT count, stop. Do not rename, duplicate or drop tables: the reviewed profile must be updated through review first.
+
+### Move the capture privately and import it
+
+If the capture ran in a live session or on a different installation from the one that runs MacLoader, copy the whole `t480s-acpi-private` directory to the preparation host only over a private channel you control: an encrypted removable volume or `scp` between your own machines. Never use chat, tickets, cloud shares or e-mail. On the preparation host, keep it outside the repository and verify it before importing:
+
+```bash
+(cd ~/t480s-acpi-private/PRIVATE-ACPI && sha256sum -c SHA256SUMS)
+macloader evidence acpi-import CONFIG_ID ~/t480s-acpi-private
 macloader preflight --config CONFIG_ID --json
 ```
 
-The importer checks the complete table set, AML headers, declared lengths, and checksums, then stores raw data under owner-only private permissions. Do not publish ACPI contents, SMBIOS values, serials, UUIDs, or private paths in logs, exports, manifests, screenshots, or conversation. Generate a real SMBIOS identity only when the supervised workflow reaches that checkpoint; the exact command requires the deliberate confirmation phrase shown by the CLI. The identity stays in protected local storage.
+`CONFIG_ID` must be the configuration created by `macloader config new` on this same laptop, with its snapshot showing 20L8 / N22ET85W 1.62. The importer checks the snapshot and BIOS binding, the complete table set, AML headers, declared lengths and checksums. It stores the raw tables under owner-only private permissions in the MacLoader workspace. After a successful import, delete the transfer copies from any removable medium. Do not publish ACPI contents, SMBIOS values, serials, UUIDs or private paths in logs, exports, manifests, screenshots or conversation.
+
+A Windows alternative for the same laptop remains available: `tools/capture_t480s_followup.ps1` uses the hash-pinned ACPICA `acpidump.exe` and writes a `PRIVATE-ACPI` directory for the same import command.
+
+### Private identity checkpoint
+
+Generate a real SMBIOS identity only when the supervised workflow reaches that checkpoint. The exact command requires the deliberate confirmation phrase shown by the CLI, and the identity stays in protected local storage.
+
+### Recovery evidence
+
+Recovery acquisition is blocked by an external dependency; see the [decision record](RECOVERY_BUILD_BINDING_DECISION.md). To record the current Apple discovery outcome and see the gate derived from it:
+
+```bash
+macloader recovery resolve   # exits non-zero: no exact 24A335 product can be identified
+macloader recovery status
+```
+
+`preflight` reports `exact_recovery` from that recorded evidence: `missing`, `externally_blocked` with the recorded product or diagnostic, `stale`, or `blocked` for a forged or corrupted record. It never reports `ready` while no authenticated build binding exists.
 
 Do not continue to USB preparation while `exact_recovery`, `private_acpi`, `private_identity`, or `physical_media` is missing, blocked, or unqualified. Linux disposable block-image coverage is software evidence only. A sacrificial physical USB qualification still needs its own fresh checkpoint and isolated failure campaign.
 

@@ -1,0 +1,179 @@
+{
+  "snapshot_id": "fixture-t480s-20l8-bios162-synthetic",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "manufacturer": "LENOVO",
+  "product_name": "20L8SYNTH0",
+  "product_version": "ThinkPad T480s",
+  "machine_type": "20L8",
+  "bios_version": "N22ET85W (1.62 )",
+  "bios_date": "01/01/2000",
+  "serial_number": "[REDACTED-SERIAL]",
+  "uuid": "[REDACTED-UUID]",
+  "cpu": {
+    "model_name": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+    "vendor": "GenuineIntel",
+    "family": "6",
+    "model": "142",
+    "stepping": "10",
+    "cores": 4,
+    "threads": 8,
+    "generation": "Kaby Lake Refresh",
+    "microcode": "0xf4"
+  },
+  "igpu": {
+    "name": "Intel UHD Graphics 620",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "5917",
+      "subsystem_vendor_id": "17aa",
+      "subsystem_device_id": "225c",
+      "pci_slot": "0000:00:02.0",
+      "device_class": "0300",
+      "driver": "i915"
+    },
+    "is_igpu": true,
+    "is_dgpu": false
+  },
+  "dgpus": [],
+  "audio": [
+    {
+      "name": "Realtek ALC257 High Definition Audio",
+      "codec_name": "Realtek ALC257",
+      "codec_vendor_id": "10ec",
+      "codec_device_id": "0257",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "9d71",
+        "subsystem_vendor_id": "17aa",
+        "subsystem_device_id": "225c",
+        "pci_slot": "0000:00:1f.3",
+        "device_class": "0403",
+        "driver": "snd_hda_intel"
+      }
+    }
+  ],
+  "ethernet": [
+    {
+      "name": "Intel I219-LM PCI Express Gigabit Ethernet",
+      "kind": "ethernet",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "15d7",
+        "subsystem_vendor_id": "17aa",
+        "subsystem_device_id": "225c",
+        "pci_slot": "0000:00:1f.6",
+        "device_class": "0200",
+        "driver": "e1000e"
+      },
+      "mac_address": "xx:xx:xx:xx:xx:xx"
+    }
+  ],
+  "wifi": [
+    {
+      "name": "Intel Dual Band Wireless-AC 8265",
+      "kind": "wifi",
+      "pci": {
+        "vendor_id": "8086",
+        "device_id": "24fd",
+        "subsystem_vendor_id": "8086",
+        "subsystem_device_id": "1010",
+        "pci_slot": "0000:3d:00.0",
+        "device_class": "0280",
+        "driver": "iwlwifi"
+      },
+      "mac_address": "xx:xx:xx:xx:xx:xx"
+    }
+  ],
+  "bluetooth": [
+    {
+      "name": "Intel Bluetooth Wireless Controller",
+      "kind": "bluetooth",
+      "usb": {
+        "vendor_id": "8087",
+        "product_id": "0a2b",
+        "bus": "1-7",
+        "vendor_name": "Intel Corp.",
+        "product_name": "Bluetooth wireless interface"
+      },
+      "mac_address": "xx:xx:xx:xx:xx:xx"
+    }
+  ],
+  "storage": [
+    {
+      "model": "Western Digital WD Black NVMe SSD 512GB",
+      "kind": "nvme",
+      "serial": "[REDACTED-STORAGE-SERIAL]",
+      "pci": {
+        "vendor_id": "15b7",
+        "device_id": "5002",
+        "subsystem_vendor_id": "15b7",
+        "subsystem_device_id": "5002",
+        "pci_slot": "0000:02:00.0",
+        "device_class": "0108",
+        "driver": "nvme"
+      }
+    }
+  ],
+  "usb_controllers": [
+    {
+      "vendor_id": "8086",
+      "device_id": "9d2f",
+      "pci_slot": "0000:00:14.0",
+      "device_class": "0c03"
+    }
+  ],
+  "usb_devices": [
+    {
+      "vendor_id": "8087",
+      "product_id": "0a2b",
+      "product_name": "Bluetooth wireless interface"
+    }
+  ],
+  "thunderbolt": {
+    "present": true,
+    "controller_name": "Intel JHL6240 Thunderbolt 3 Controller",
+    "pci": {
+      "vendor_id": "8086",
+      "device_id": "15bf",
+      "pci_slot": "0000:05:00.0"
+    }
+  },
+  "input_devices": [
+    {
+      "name": "SynPS/2 Synaptics TouchPad",
+      "bus": "smbus",
+      "kind": "trackpad"
+    },
+    {
+      "name": "TPPS/2 IBM TrackPoint",
+      "bus": "ps2",
+      "kind": "trackpoint"
+    }
+  ],
+  "displays": [
+    {
+      "name": "Internal Display",
+      "resolution": "1920x1080",
+      "is_internal": true
+    }
+  ],
+  "raw_evidence": {
+    "dmi": {
+      "vendor": "LENOVO",
+      "product_name": "20L8SYNTH0",
+      "product_version": "ThinkPad T480s",
+      "serial": "[REDACTED-SERIAL]",
+      "uuid": "[REDACTED-UUID]"
+    },
+    "os": "linux",
+    "inventory_status": {
+      "audio": true,
+      "ethernet": true,
+      "wifi": true,
+      "bluetooth": true,
+      "storage": true,
+      "input": true
+    },
+    "fixture_note": "SYNTHETIC software-only fixture for the 20L8 / N22ET85W 1.62 workflow; it is not evidence from any physical machine and cannot satisfy physical gates."
+  }
+}

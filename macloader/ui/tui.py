@@ -13,6 +13,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, Static
 from macloader.domain.configuration import UserConfiguration
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.dependencies import ArtifactVariant
+from macloader.domain.evidence import EvidenceRecord
 from macloader.domain.contracts import BuildManifest
 from macloader.domain.recovery import RecoveryBinding, RecoveryLock, RecoveryState
 from macloader.evidence.acpi import AcpiEvidenceBundle
@@ -384,22 +385,43 @@ class WorkflowApp(App[None]):
         self._operation_generation += 1
         self._generate_identity_worker(self._draft, phrase, self._operation_generation)
 
+    def _is_current(self, generation: int) -> bool:
+        return generation == self._operation_generation and not self._cancel_requested
+
     @work(thread=True, exclusive=True, group="workflow-stage")
     def _generate_identity_worker(self, draft: UserConfiguration, phrase: str, generation: int) -> None:
+        # The worker never saves.  Only the UI thread, which owns the
+        # generation counter, may commit the result after re-checking it.
         try:
-            updated, _reference = self.service.generate_private_identity(draft, phrase)
-            self.service.save(updated)
-            self.call_from_thread(self._publish_identity_result, generation, updated.configuration_id)
+            updated, reference = self.service.generate_private_identity(
+                draft, phrase, cancel=lambda: not self._is_current(generation)
+            )
         except Exception as exc:
             self.call_from_thread(
                 self._publish_message_if_current, generation,
                 f"Private identity generation blocked: {type(exc).__name__}: {exc}",
             )
-
-    def _publish_identity_result(self, generation: int, configuration_id: str) -> None:
-        if generation != self._operation_generation:
             return
-        self._draft = self.service.load(configuration_id)
+        self.call_from_thread(self._publish_identity_result, generation, updated, reference)
+
+    def _publish_identity_result(self, generation: int, updated: UserConfiguration, reference: str) -> None:
+        if not self._is_current(generation):
+            # Cancelled or superseded: never bind or keep the new identity.
+            try:
+                self.service.discard_private_identity(reference)
+            except (OSError, ValueError):
+                pass
+            return
+        try:
+            self.service.save(updated)
+            self._draft = self.service.load(updated.configuration_id)
+        except Exception as exc:
+            try:
+                self.service.discard_private_identity(reference)
+            except (OSError, ValueError):
+                pass
+            self._message(f"Private identity generation blocked: {type(exc).__name__}: {exc}")
+            return
         self._invalidate_efi()
         self.query_one("#identity-checkpoint-input", Input).value = ""
         self._message("Private identity generated, protected locally, and bound to this configuration; values were not displayed.")
@@ -418,21 +440,37 @@ class WorkflowApp(App[None]):
         self, draft: UserConfiguration, snapshot: HardwareSnapshot, source: Path, generation: int
     ) -> None:
         try:
-            updated, record = self.service.import_acpi_capture(draft, snapshot, source)
-            self.service.save(updated)
-            self.call_from_thread(self._publish_acpi_result, generation, updated.configuration_id, record.digest)
+            updated, record = self.service.import_acpi_capture(
+                draft, snapshot, source, cancel=lambda: not self._is_current(generation)
+            )
         except Exception as exc:
             self.call_from_thread(
                 self._publish_message_if_current, generation,
                 f"Private ACPI import blocked: {type(exc).__name__}: {exc}",
             )
-
-    def _publish_acpi_result(self, generation: int, configuration_id: str, digest: str) -> None:
-        if generation != self._operation_generation:
             return
-        self._draft = self.service.load(configuration_id)
+        self.call_from_thread(self._publish_acpi_result, generation, updated, record)
+
+    def _publish_acpi_result(self, generation: int, updated: UserConfiguration, record: EvidenceRecord) -> None:
+        if not self._is_current(generation):
+            # Cancelled or superseded: remove the unadopted private capture.
+            try:
+                self.service.discard_acpi_capture(record)
+            except (OSError, ValueError):
+                pass
+            return
+        try:
+            self.service.save(updated)
+            self._draft = self.service.load(updated.configuration_id)
+        except Exception as exc:
+            try:
+                self.service.discard_acpi_capture(record)
+            except (OSError, ValueError):
+                pass
+            self._message(f"Private ACPI import blocked: {type(exc).__name__}: {exc}")
+            return
         self._invalidate_efi()
-        self._message(f"Machine-bound ACPI capture validated and stored privately; evidence digest={digest[:12]}…")
+        self._message(f"Machine-bound ACPI capture validated and stored privately; evidence digest={record.digest[:12]}…")
 
     def _run_preflight(self) -> None:
         self._cancel_requested = False
@@ -445,7 +483,8 @@ class WorkflowApp(App[None]):
     ) -> None:
         report = self.service.preflight(draft, snapshot)
         blocked = [
-            f"{item['id']}: {item['summary']}"
+            f"{item['id']} [{item['state']}]: {item['summary']}"
+            + (f" Next: {item['action']}" if item.get("action") else "")
             for item in report["checks"]
             if isinstance(item, dict) and item["state"] != "ready"
         ]
@@ -504,11 +543,14 @@ class WorkflowApp(App[None]):
                 f"EFI build/validation blocked: {type(exc).__name__}: {exc}",
             )
 
-    @work(thread=True, exclusive=True, group="workflow-stage")
     def _discover_recovery(self) -> None:
+        # The generation is advanced on the UI thread, never inside a worker.
         self._cancel_requested = False
         self._operation_generation += 1
-        generation = self._operation_generation
+        self._discover_recovery_worker(self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _discover_recovery_worker(self, generation: int) -> None:
         try:
             result = self.service.discover_recovery(
                 cancel=lambda: self._cancel_requested or generation != self._operation_generation
@@ -742,7 +784,12 @@ class WorkflowApp(App[None]):
             return
         self._recovery_result = result
         diagnostics = "; ".join(result.diagnostics)
-        self._message(f"Recovery discovery: {result.state.value}. {diagnostics}")
+        try:
+            readiness = self.service.recovery_readiness()
+            gate = f" exact_recovery [{readiness.state}]: {readiness.summary} Next: {readiness.action}"
+        except (OSError, ValueError) as exc:
+            gate = f" exact_recovery could not be assessed ({type(exc).__name__})."
+        self._message(f"Recovery discovery: {result.state.value}. {diagnostics}{gate}")
 
     def _publish_recovery_result(
         self,

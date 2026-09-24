@@ -9,6 +9,16 @@ TESTS_DIR = Path(__file__).parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_recovery_evidence(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep discovery evidence written by tests out of the user's workspace."""
+    import macloader.workflow.service as workflow_service_module
+
+    path: Path = tmp_path_factory.mktemp("recovery-evidence") / "private" / "recovery" / "discovery-evidence.json"
+    monkeypatch.setattr(workflow_service_module, "DEFAULT_RECOVERY_EVIDENCE_PATH", path)
+    return path
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES_DIR

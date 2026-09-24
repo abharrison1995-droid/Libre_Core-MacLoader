@@ -382,108 +382,6 @@ def test_linux_backend_lock_preconditions_and_command_failures_are_redacted(
     assert "secret-device" not in str(failure.value)
 
 
-def test_linux_backend_flush_eject_and_sync_helpers_use_safe_temp_paths(
-    tmp_path: Path,
-) -> None:
-    device = RemovableDevice("linux:by-id:usb-MAKER_SYNC001-0:0", "USB", 8_000_000, False, True, False, serial="SYNC001")
-    image = tmp_path / "disposable-device-file"
-    image.write_bytes(b"test")
-    descriptor = os.open(image, os.O_RDWR)
-    commands: list[str] = []
-
-    def recording_runner(args: list[str], _input: Optional[str] = None) -> str:
-        commands.append(args[0])
-        return ""
-
-    backend = LinuxBlockDeviceBackend(lambda: [device], runner=recording_runner)
-    backend._locked[device.device_id] = (descriptor, image)
-    mount = tmp_path / "mounted-tree"
-    mount.mkdir()
-    (mount / "payload").write_bytes(b"sync")
-
-    backend._sync_mount(mount)
-    backend.flush(device)
-    backend.safe_eject(device)
-
-    assert commands == ["blockdev", "blockdev", "udisksctl"]
-    assert backend._locked == {}
-
-
-def test_linux_backend_mocked_write_orchestrates_bounded_layout_without_host_writes(
-    valid_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    device = RemovableDevice("linux:by-id:usb-MAKER_WRITE001-0:0", "USB", 64_000_000, False, True, False, serial="WRITE001")
-    plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
-    disk_image = tmp_path / "mock-block-device"
-    disk_image.write_bytes(b"disposable")
-    descriptor = os.open(disk_image, os.O_RDWR)
-    mount_parent = tmp_path / "mounts"
-    mount_parent.mkdir()
-    mount_path = mount_parent / "write-mount"
-    commands: list[str] = []
-
-    def recording_runner(args: list[str], _input: Optional[str] = None) -> str:
-        commands.append(args[0])
-        if args[0] == "umount":
-            for child in mount_path.iterdir():
-                shutil.rmtree(child) if child.is_dir() else child.unlink()
-        return ""
-
-    def create_write_mount(**_kwargs: Any) -> str:
-        mount_path.mkdir()
-        return str(mount_path)
-
-    backend = LinuxBlockDeviceBackend(lambda: [device], runner=recording_runner)
-    backend._locked[device.device_id] = (descriptor, disk_image)
-    monkeypatch.setattr(backend, "_current", lambda _expected, _required_bytes=1, **_kwargs: device)
-    monkeypatch.setattr(LinuxBlockDeviceBackend, "_device_path", classmethod(lambda _cls, _device: disk_image))
-    monkeypatch.setattr(LinuxBlockDeviceBackend, "_partition_path", classmethod(lambda _cls, _disk: tmp_path / "partition"))
-    monkeypatch.setattr(backend, "_sync_mount", lambda _mount: commands.append("sync"))
-    monkeypatch.setattr(adapters_module.tempfile, "mkdtemp", create_write_mount)
-
-    backend.write(plan, valid_source)
-    os.close(descriptor)
-
-    assert commands == ["sfdisk", "blockdev", "mkfs.vfat", "mount", "sync", "umount"]
-    assert not mount_path.exists()
-
-
-def test_linux_backend_readback_and_failure_invalidation_use_only_disposable_files(
-    valid_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    device = RemovableDevice("linux:by-id:usb-MAKER_READ001-0:0", "USB", 4_194_304, False, True, False, serial="READ001")
-    plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
-    image = tmp_path / "disposable-block-image"
-    image.write_bytes(b"X" * device.capacity_bytes)
-    descriptor = os.open(image, os.O_RDWR)
-    mount_parent = tmp_path / "mounts"
-    mount_parent.mkdir()
-    mount_path = mount_parent / "read-mount"
-    commands: list[str] = []
-
-    def recording_runner(args: list[str], _input: Optional[str] = None) -> str:
-        commands.append(args[0])
-        return ""
-
-    def create_read_mount(**_kwargs: Any) -> str:
-        mount_path.mkdir()
-        return str(mount_path)
-
-    backend = LinuxBlockDeviceBackend(lambda: [device], runner=recording_runner)
-    backend._locked[device.device_id] = (descriptor, image)
-    monkeypatch.setattr(backend, "_current", lambda _expected, _required_bytes=1, **_kwargs: device)
-    monkeypatch.setattr(LinuxBlockDeviceBackend, "_partition_path", classmethod(lambda _cls, _disk: tmp_path / "partition"))
-    monkeypatch.setattr(backend, "_verify_boot_layout", lambda _source, _mount, _plan: True)
-    monkeypatch.setattr(adapters_module.tempfile, "mkdtemp", create_read_mount)
-
-    assert backend.readback(plan, valid_source) is True
-    backend.invalidate(device, "synthetic readback failure")
-    bytes_after_invalidation = image.read_bytes()
-    assert bytes_after_invalidation[:1024 * 1024] == bytes(1024 * 1024)
-    assert bytes_after_invalidation[-1024 * 1024:] == bytes(1024 * 1024)
-    assert commands == ["mount", "umount", "blockdev", "udisksctl"]
-
-
 def test_linux_boot_layout_moves_verified_recovery_to_opencore_directory(
     valid_source: Path, tmp_path: Path
 ) -> None:
@@ -510,7 +408,9 @@ def test_linux_gpt_fat32_disposable_image_readback_and_failure_invalidation(
     if any(shutil.which(name) is None for name in tools):
         pytest.skip("disposable image integration requires sfdisk, dosfstools and mtools")
     image = tmp_path / "disposable-usb.img"
-    capacity = 128 * 1024 * 1024
+    # An odd sector count keeps the planned ESP an even number of sectors, so
+    # mkfs.vfat's 1 KiB block count covers the whole partition exactly.
+    capacity = 128 * 1024 * 1024 + 512
     with image.open("wb") as handle:
         handle.truncate(capacity)
     backend = LinuxBlockDeviceBackend(lambda: [], runner=_empty_linux_runner)
@@ -525,10 +425,17 @@ def test_linux_gpt_fat32_disposable_image_readback_and_failure_invalidation(
     assert partition["type"] == "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
     offset = int(partition["start"]) * 512
     format_result = subprocess.run(
-        ["mkfs.vfat", "--offset=2048", "-F", "32", "-n", "MACLOADER", str(image), str(int(partition["size"]) // 2)],
+        ["mkfs.vfat", "--offset=2048", "-F", "32", "-S", "512", "-n", "MACLOADER", str(image), str(int(partition["size"]) // 2)],
         capture_output=True, text=True, check=False, timeout=30,
     )
     assert format_result.returncode == 0, format_result.stderr
+    layout_fd = os.open(image, os.O_RDONLY)
+    try:
+        geometry = adapters_module.verify_gpt_layout(layout_fd, capacity)
+        assert (geometry.start_sector, geometry.size_sectors) == (2048, int(partition["size"]))
+        adapters_module.verify_fat32_volume(layout_fd, 2048, int(partition["size"]))
+    finally:
+        os.close(layout_fd)
     plan = RemovableMediaWriter().dry_run(
         RemovableDevice("usb", "Disposable image", capacity, False, True, False, serial="IMAGE001"),
         1, source_dir=valid_source, bindings=QUALIFIED,

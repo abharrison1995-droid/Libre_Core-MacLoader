@@ -843,10 +843,16 @@ class EfiBuilder:
             raise BuildPlanError(f"Unable to protect private EFI identity: {exc}") from exc
 
     @staticmethod
-    def _redact_diagnostics(text: str, identity: Optional[Dict[str, str]]) -> str:
+    def _redact_diagnostics(text: str, identity: Optional[Dict[str, Any]]) -> str:
         redacted = text
         for value in (identity or {}).values():
-            if value:
+            # PlatformInfo also carries ROM bytes, booleans and integers.  Only
+            # identifying text and byte values can appear in tool output;
+            # replacing "0" or "False" would corrupt the diagnostic instead.
+            if isinstance(value, (bytes, bytearray)) and value:
+                for form in (value.hex(), value.hex().upper()):
+                    redacted = redacted.replace(form, "<redacted>")
+            elif isinstance(value, str) and value:
                 redacted = redacted.replace(value, "<redacted>")
         return redacted
 

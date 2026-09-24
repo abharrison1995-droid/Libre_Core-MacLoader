@@ -4,8 +4,8 @@ MacLoader is preparing for a first supervised install on a ThinkPad T480s 20L8 w
 
 ## Current stop gates
 
-- Apple Recovery discovery does not prove that its product ID is build 24A335. The HTTPS endpoint returned 405, and no authenticated exact-build binding or matching Apple-signed payload is available in this checkout.
-- There is no private ACPI capture or selected real SMBIOS identity in the current workspace.
+- No Apple-authoritative, authenticated route binds a Recovery product or payload to build 24A335 (see the [decision record](docs/RECOVERY_BUILD_BINDING_DECISION.md)). `macloader recovery resolve` records current discovery evidence, and preflight derives the gate from it; the gate is never ready.
+- There is no private ACPI capture or selected real SMBIOS identity in the current workspace. Capture ACPI on the T480s with `sudo "$(command -v macloader)" evidence acpi-capture DIRECTORY` (see the runbook).
 - Linux is the first preparation host. Disposable-image tests pass, but no physical USB writer is qualified. Physical writes remain disabled.
 - No BIOS settings, internal disks, or physical USB media have been changed.
 
@@ -31,13 +31,14 @@ macloader config check CONFIG_ID
 macloader preflight --config CONFIG_ID --json
 ```
 
-Import the same machine's validated raw ACPI capture only after it has been captured on the 20L8 / BIOS 1.62 machine:
+Capture the raw ACPI tables read-only on the 20L8 / BIOS 1.62 machine itself, then import them:
 
 ```bash
-macloader evidence acpi-import CONFIG_ID PRIVATE_CAPTURE_DIRECTORY
+sudo "$(command -v macloader)" evidence acpi-capture ~/t480s-acpi-private
+macloader evidence acpi-import CONFIG_ID ~/t480s-acpi-private
 ```
 
-The import verifies the DSDT and eleven SSDTs and keeps raw tables in the owner-only private workspace. Do not paste ACPI tables or SMBIOS values into tickets, exports, manifests, logs, or chat. Generate or reuse a real SMBIOS identity only at its deliberate workflow checkpoint; that action is not part of software smoke testing.
+The capture refuses any other machine or BIOS. The import verifies the DSDT and SSDT set and keeps the raw tables in the owner-only private workspace. Do not paste ACPI tables or SMBIOS values into tickets, exports, manifests, logs, or chat. Generate or reuse a real SMBIOS identity only at its deliberate workflow checkpoint; that action is not part of software smoke testing.
 
 For an interactive workflow:
 

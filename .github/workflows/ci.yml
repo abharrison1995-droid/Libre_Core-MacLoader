@@ -36,6 +36,29 @@ jobs:
       - name: Run type checks
         run: python -m mypy macloader tests --follow-imports=skip
 
+  toolchain-integration:
+    # Provisions the catalog-pinned toolchain into a clean workspace (the
+    # ACPICA iASL is rebuilt from source and must reproduce the pinned digest),
+    # then runs the real EFI builder on synthetic, software-only inputs and
+    # validates the result with the matching pinned ocvalidate.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install build prerequisites for the pinned iASL
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bison flex m4
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Clean-workspace provisioning and real ocvalidate integration
+        env:
+          MACLOADER_NETWORK_TESTS: '1'
+          MACLOADER_WORKSPACE: ${{ runner.temp }}/macloader-workspace
+        run: python -m pytest -q -rs tests/integration/test_toolchain_efi_integration.py
+
   wheel-smoke:
     strategy:
       fail-fast: false

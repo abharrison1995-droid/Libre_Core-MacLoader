@@ -35,6 +35,7 @@ from macloader.evidence.acpi import AcpiEvidenceBundle, AcpiTableRecord
 from macloader.identity.service import IdentityService, IdentityServiceError
 from macloader.orchestrator import Orchestrator
 from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
+from macloader.recovery.evidence import RecoveryDiscoveryEvidence, RecoveryReadiness, assess_recovery_evidence
 from macloader.recovery.acquirer import RecoveryBundle
 from macloader.removable import MediaBindings, RemovableDevice, RemovableMediaWriter, WritePlan, current_adapter
 
@@ -44,6 +45,7 @@ MAX_IMPORT_DEPTH = 32
 MAX_IMPORT_NODES = 10000
 MAX_IMPORT_STRING = 8192
 PRIVATE_IDENTITY_CONFIRMATION = "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INSTALLATION"
+DEFAULT_RECOVERY_EVIDENCE_PATH = DEFAULT_PRIVATE_DIR / "recovery" / "discovery-evidence.json"
 
 
 @dataclass(frozen=True)
@@ -111,8 +113,14 @@ class WorkflowService:
         configuration: UserConfiguration,
         snapshot: HardwareSnapshot,
         source_directory: Path,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> tuple[UserConfiguration, EvidenceRecord]:
-        """Validate and privately import this machine's raw DSDT/SSDT capture."""
+        """Validate and privately import this machine's raw DSDT/SSDT capture.
+
+        ``cancel`` is checked before the private capture is published, so a
+        cancelled import leaves nothing behind.  The returned configuration is
+        not saved; the caller commits it only if the operation is still current.
+        """
         if configuration.hardware_snapshot_id != snapshot.snapshot_id:
             raise ValueError("ACPI import requires the configuration's bound hardware snapshot")
         if snapshot.machine_type != "20L8":
@@ -167,6 +175,8 @@ class WorkflowService:
             )
             metadata_path = staging_path / "evidence.json"
             self._write_private_json(metadata_path, json.dumps(bundle.to_dict(), sort_keys=True, indent=2) + "\n")
+            if cancel and cancel():
+                raise ValueError("ACPI import cancelled before publication; nothing was stored")
             os.replace(staging_path, final_root)
             staging_root = None
             record = bundle.to_evidence_record()
@@ -180,19 +190,56 @@ class WorkflowService:
         self,
         configuration: UserConfiguration,
         confirmation: str,
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> tuple[UserConfiguration, str]:
+        """Generate and privately store a real identity for this configuration.
+
+        ``cancel`` is checked before the tool is provisioned and immediately
+        before the identity is stored.  The returned configuration is not
+        saved; a caller whose operation became stale must discard the stored
+        identity with :meth:`discard_private_identity` instead of saving.
+        """
         if confirmation != PRIVATE_IDENTITY_CONFIRMATION:
             raise IdentityServiceError("Private identity generation requires the exact explicit confirmation phrase")
         if configuration.target is None or configuration.target.product_id != "sequoia":
             raise IdentityServiceError("Private identity requires a selected T480s Sequoia configuration")
+        if cancel and cancel():
+            raise IdentityServiceError("Private identity generation cancelled; nothing was generated")
         from macloader.toolchain.loader import TrustedToolchainLoader
         toolchain = TrustedToolchainLoader().provision()
         if toolchain.identity_tool_path is None:
             raise IdentityServiceError("Trusted macserial is unavailable; provision the pinned toolchain first")
         identities = IdentityService(DEFAULT_IDENTITY_DIR, Path(toolchain.identity_tool_path))
-        private = identities.store(identities.generate(allow_real=True))
+        values = identities.generate(allow_real=True)
+        if cancel and cancel():
+            raise IdentityServiceError("Private identity generation cancelled; nothing was stored")
+        private = identities.store(values)
         updated = self.set_identity_reference(configuration, private.storage_ref)
         return updated, private.storage_ref
+
+    @staticmethod
+    def discard_private_identity(storage_ref: str) -> None:
+        """Delete a just-generated identity that a stale operation must not adopt."""
+        if not re.fullmatch(r"[0-9a-f]{32}\.json", storage_ref):
+            raise ValueError("only a generated private identity reference can be discarded")
+        path = Path(DEFAULT_IDENTITY_DIR) / storage_ref
+        if path.is_symlink():
+            raise ValueError("private identity path must not be a symlink")
+        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def discard_acpi_capture(record: EvidenceRecord) -> None:
+        """Delete a just-imported private capture that a stale operation must not adopt."""
+        root = Path(record.private_ref).parent
+        acpi_root = Path(DEFAULT_ACPI_DIR).absolute()
+        if (
+            Path(record.private_ref).name != "evidence.json"
+            or root.absolute().parent != acpi_root
+            or not re.fullmatch(r"[0-9a-f]{32}", root.name)
+            or root.is_symlink()
+        ):
+            raise ValueError("only a private ACPI capture imported by this workspace can be discarded")
+        shutil.rmtree(root, ignore_errors=True)
 
     def reuse_private_identity(
         self,
@@ -228,9 +275,12 @@ class WorkflowService:
             )
         if snapshot is None:
             add("machine_snapshot", "missing", "No matching local hardware snapshot is available.", "Resume with the private saved snapshot or provide the matching fixture.")
-        elif configuration is None or snapshot.snapshot_id != configuration.hardware_snapshot_id:
+        elif configuration is None:
+            add("machine_snapshot", "missing", "A hardware snapshot was observed, but no saved configuration binds it.",
+                "Run `macloader config new` on this machine, then rerun `macloader preflight --config CONFIG_ID`.")
+        elif snapshot.snapshot_id != configuration.hardware_snapshot_id:
             add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
-        else:
+        if snapshot is not None and (configuration is None or snapshot.snapshot_id == configuration.hardware_snapshot_id):
             supported_machine = snapshot.machine_type == "20L8"
             bios_matches = normalize_bios_binding(snapshot.bios_version or "") == "N22ET85W-1.62"
             add("reference_machine", "ready" if supported_machine and bios_matches else "blocked",
@@ -258,7 +308,8 @@ class WorkflowService:
                     acpi_ready = False
             add("private_acpi", "ready" if acpi_ready else "missing",
                 "Machine-bound private ACPI capture is present." if acpi_ready else "Machine-bound private ACPI capture is missing or invalid.",
-                "Import the same machine's complete DSDT plus eleven SSDTs with `macloader evidence acpi-import ID DIRECTORY`." if not acpi_ready else "")
+                "On this T480s, capture read-only with `sudo \"$(command -v macloader)\" evidence acpi-capture DIRECTORY`, "
+                "then import it with `macloader evidence acpi-import ID DIRECTORY`." if not acpi_ready else "")
 
             usb_records = [record for record in configuration.evidence if record.kind == "usb"]
             usb_ready = any(record.completeness.value == "complete" and record.physical_port_evidence for record in usb_records)
@@ -301,6 +352,10 @@ class WorkflowService:
             except Exception as exc:
                 add("dependencies", "blocked", "Dependency resolution could not complete.", f"Resolve the configuration blockers and retry ({type(exc).__name__}).")
         else:
+            unchecked_action = (
+                "Select the configuration bound to this machine with `macloader preflight --config CONFIG_ID` "
+                "to check this prerequisite."
+            )
             for check_id, summary in (
                 ("private_acpi", "Machine-bound private ACPI evidence has not been checked."),
                 ("usb_evidence", "Physical USB port evidence has not been checked."),
@@ -308,11 +363,10 @@ class WorkflowService:
                 ("toolchain", "Catalog-pinned host tools have not been checked."),
                 ("dependencies", "Dependency readiness has not been checked."),
             ):
-                add(check_id, "missing", summary)
+                add(check_id, "missing", summary, unchecked_action)
 
-        add("exact_recovery", "externally_blocked",
-            "Apple's Recovery endpoint returned HTTPS 405; AP supplies a product identifier, not build metadata, so 24A335 availability is unproven.",
-            "An Apple-approved authenticated HTTPS method that binds the Recovery product to build 24A335, or an Apple-signed matching Recovery payload, is required.")
+        recovery = self.recovery_readiness()
+        add("exact_recovery", recovery.state, recovery.summary, recovery.action)
         try:
             adapter = self.removable_status()
             media_ready = adapter["status"] == "qualified"
@@ -635,7 +689,45 @@ class WorkflowService:
         transport: Optional[Callable[[str, Mapping[str, str], bytes], DiscoveryResponse]] = None,
         cancel: Optional[Callable[[], bool]] = None,
     ) -> RecoveryDiscoveryResult:
-        return self.orchestrator.discover_recovery(transport=transport, cancel=cancel)
+        """Query Apple once and record the redacted outcome as current evidence.
+
+        A cancelled or superseded query records nothing, so it cannot replace
+        newer evidence with an observation the operator abandoned.
+        """
+        policy = self.orchestrator.recovery_service.policy
+        try:
+            if transport is None and cancel is None:
+                result = self.orchestrator.discover_recovery()
+            else:
+                result = self.orchestrator.discover_recovery(transport=transport, cancel=cancel)
+        except (MacLoaderError, OSError) as exc:
+            if not (cancel and cancel()) and "cancelled" not in str(exc).lower():
+                self._record_recovery_evidence(
+                    RecoveryDiscoveryEvidence.from_error(exc, policy.digest, policy.target.digest)
+                )
+            raise
+        if not (cancel and cancel()):
+            self._record_recovery_evidence(RecoveryDiscoveryEvidence.from_result(result, policy.digest))
+        return result
+
+    def _record_recovery_evidence(self, evidence: RecoveryDiscoveryEvidence) -> None:
+        path = Path(DEFAULT_RECOVERY_EVIDENCE_PATH)
+        self._write_private_json(path, json.dumps(evidence.to_dict(), sort_keys=True, indent=2) + "\n")
+
+    def recovery_readiness(self) -> RecoveryReadiness:
+        """Assess the exact-Recovery gate from the currently recorded evidence."""
+        policy = self.orchestrator.recovery_service.policy
+        path = Path(DEFAULT_RECOVERY_EVIDENCE_PATH)
+        data: Any = None
+        load_error: Optional[str] = None
+        if path.exists() or path.is_symlink():
+            try:
+                data = self._read_private_json(path, "Recovery discovery evidence")
+            except ValueError as exc:
+                load_error = str(exc)
+        return assess_recovery_evidence(
+            data, policy_digest=policy.digest, target_digest=policy.target.digest, load_error=load_error
+        )
 
     def acquire_recovery(
         self,

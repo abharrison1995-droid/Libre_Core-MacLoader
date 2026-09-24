@@ -7,6 +7,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from macloader import __version__
 from macloader.compatibility.report import (
@@ -379,13 +380,40 @@ def evidence_import_cmd(configuration_id: str, input_path: Path, kind: str, json
         raise click.ClickException(str(exc)) from exc
 
 
+@evidence_group.command("acpi-capture")
+@click.argument("destination", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--json", "json_mode", is_flag=True)
+def evidence_acpi_capture_cmd(destination: Path, json_mode: bool) -> None:
+    """Read-only capture of this T480s's firmware DSDT/SSDTs (Linux, run with sudo).
+
+    DESTINATION must be a new private directory outside any Git checkout.
+    Nothing on the machine is modified; tables are only read from sysfs.
+    """
+    from macloader.evidence.acpi_capture import AcpiCaptureError, capture_acpi_tables, sudo_owner
+
+    try:
+        result = capture_acpi_tables(destination, owner=sudo_owner())
+    except (AcpiCaptureError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    summary = result.summary()
+    if json_mode:
+        click.echo(json.dumps(summary, indent=2))
+    else:
+        click.echo(
+            f"Captured {summary['dsdt_count']} DSDT and {summary['ssdt_count']} SSDTs from "
+            f"{summary['machine_type']} / {summary['bios_binding']} into {result.capture_root.name}/PRIVATE-ACPI "
+            "(owner-only). Keep this directory private."
+        )
+        click.echo(f"Next: {summary['next_step']}")
+
+
 @evidence_group.command("acpi-import")
 @click.argument("configuration_id")
 @click.argument("capture_directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="The exact fixture snapshot bound to this configuration.")
 @click.option("--json", "json_mode", is_flag=True)
 def evidence_acpi_import_cmd(configuration_id: str, capture_directory: Path, fixture: Optional[Path], json_mode: bool) -> None:
-    """Validate and privately import this T480s machine's DSDT and eleven SSDTs."""
+    """Validate and privately import this T480s machine's DSDT and SSDT set."""
     try:
         service = WorkflowService()
         configuration = service.load(configuration_id)
@@ -515,9 +543,10 @@ def preflight_cmd(configuration_id: Optional[str], fixture: Optional[Path], json
         console.print(f"Installation preflight: {report['status']}")
         for check in report["checks"]:
             assert isinstance(check, dict)
-            console.print(f"[{check['state']}] {check['id']}: {check['summary']}")
+            # States such as "[missing]" would otherwise be parsed as Rich markup.
+            console.print(escape(f"[{check['state']}] {check['id']}: {check['summary']}"))
             if check["action"]:
-                console.print(f"  Next: {check['action']}")
+                console.print(escape(f"  Next: {check['action']}"))
 
 
 @cli.command("tui")
@@ -634,20 +663,45 @@ def recovery_list_cmd(json_mode: bool) -> None:
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 def recovery_resolve_cmd(json_mode: bool) -> None:
     """Query Apple for the exact frozen target; a default/latest response is not accepted."""
+    service = WorkflowService()
     try:
-        result = Orchestrator().discover_recovery()
-        payload = result.to_dict()
+        try:
+            result = service.discover_recovery()
+        finally:
+            # Both a response and a transport failure are recorded as current
+            # evidence; show what the shared preflight now derives from it.
+            readiness = service.recovery_readiness()
+        payload = {**result.to_dict(), "readiness": readiness.__dict__}
         if json_mode:
             click.echo(json.dumps(payload, indent=2))
         else:
             console.print(f"Recovery discovery: {result.state.value}")
             for diagnostic in result.diagnostics:
                 console.print(f"- {diagnostic}")
+            console.print(f"Preflight exact_recovery: {readiness.state}: {readiness.summary}")
+            console.print(f"Next action: {readiness.action}")
         if result.state != RecoveryState.DISCOVERED:
             raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
     except (MacLoaderError, OSError, ValueError) as exc:
         err_console.print(f"[bold red]Recovery Discovery Error:[/bold red] {exc}")
         raise click.ClickException(str(exc)) from exc
+
+
+@recovery_group.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+def recovery_status_cmd(json_mode: bool) -> None:
+    """Show the exact-Recovery gate derived from recorded evidence (no network access)."""
+    try:
+        readiness = WorkflowService().recovery_readiness()
+    except (MacLoaderError, OSError, ValueError) as exc:
+        err_console.print(f"[bold red]Recovery Status Error:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
+    if json_mode:
+        click.echo(json.dumps(readiness.__dict__, indent=2))
+    else:
+        console.print(f"exact_recovery: {readiness.state}")
+        console.print(readiness.summary)
+        console.print(f"Next action: {readiness.action}")
 
 
 @recovery_group.command("download")

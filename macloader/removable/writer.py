@@ -243,6 +243,11 @@ class DestructiveConfirmation:
 MAX_MEDIA_FILES = 10_000
 MAX_MEDIA_FILE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_MEDIA_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
+# Every media plan lays out a GPT EFI System Partition formatted as FAT32.
+# FAT32 directory entries store a 32-bit file size, so a larger payload file
+# cannot be represented and must be rejected while planning, before any
+# repartitioning could start.
+FAT32_MAX_FILE_BYTES = 0xFFFFFFFF
 COPY_CHUNK_BYTES = 1024 * 1024
 _WINDOWS_PLATFORM = os.name == "nt"
 
@@ -893,6 +898,10 @@ class RemovableMediaWriter:
                 raise UnsafeRemovableTarget(f"media source contains a non-regular file: {relative}")
             if entry_stat.st_size > MAX_MEDIA_FILE_BYTES:
                 raise UnsafeRemovableTarget(f"media source file exceeds the bounded size limit: {relative}")
+            if entry_stat.st_size > FAT32_MAX_FILE_BYTES:
+                raise UnsafeRemovableTarget(
+                    f"media source file exceeds the FAT32 per-file limit of {FAT32_MAX_FILE_BYTES} bytes: {relative}"
+                )
             total_bytes += entry_stat.st_size
             if len(files) >= MAX_MEDIA_FILES or total_bytes > MAX_MEDIA_TOTAL_BYTES:
                 raise UnsafeRemovableTarget("media source exceeds the bounded file or byte limit")

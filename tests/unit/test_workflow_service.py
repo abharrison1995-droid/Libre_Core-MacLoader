@@ -136,7 +136,10 @@ def test_preflight_verifies_synthetic_machine_evidence_and_private_identity(
     assert checks["private_identity"]["state"] == "ready"
     assert checks["toolchain"]["state"] == "ready"
     assert checks["dependencies"]["state"] == "ready"
-    assert checks["exact_recovery"]["state"] == "externally_blocked"
+    # No discovery evidence is recorded in this isolated workspace; the gate
+    # is derived from current evidence, not a fixed historical message.
+    assert checks["exact_recovery"]["state"] == "missing"
+    assert "macloader recovery resolve" in checks["exact_recovery"]["action"]
     assert checks["physical_media"]["state"] == "unqualified"
 
 
