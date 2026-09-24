@@ -68,7 +68,7 @@ class AcpiCaptureResult:
             "dsdt_count": sum(item.file_name.startswith("dsdt") for item in self.tables),
             "ssdt_count": sum(item.file_name.startswith("ssdt") for item in self.tables),
             "files": [item.file_name for item in self.tables],
-            "next_step": "macloader evidence acpi-import CONFIG_ID " + self.capture_root.name,
+            "next_step": f"macloader evidence acpi-import CONFIG_ID {self.capture_root}",
         }
 
 
@@ -232,7 +232,9 @@ def capture_acpi_tables(
         for path in AcpiProcessor._find_tables(table_dir):
             AcpiProcessor._validate_table(path)
         if owner is not None:
-            for path in (destination, table_dir, destination / "capture-manifest.json", *table_dir.iterdir()):
+            # Hand children over first and the top directory last, so the
+            # invoking user cannot swap a path component while root works.
+            for path in (*table_dir.iterdir(), destination / "capture-manifest.json", table_dir, destination):
                 os.chown(path, owner[0], owner[1], follow_symlinks=False)
     except BaseException:
         for child in sorted(destination.rglob("*"), reverse=True):

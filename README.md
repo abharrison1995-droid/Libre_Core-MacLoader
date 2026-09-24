@@ -19,7 +19,7 @@ macloader toolchain status
 macloader preflight --fixture tests/fixtures/t480s/t480s_20l8_bios162_synthetic.json --json
 ```
 
-That fixture is a **synthetic, software-only** 20L8 / N22ET85W 1.62 snapshot for trying the workflow. It is not evidence from any machine. The other checked-in T480s fixtures describe a 20L7 with BIOS 1.53 and are used only for regression tests.
+That fixture is a **synthetic, software-only** 20L8 / N22ET85W 1.62 snapshot for trying the workflow. It is not evidence from any machine: it is marked synthetic, preflight reports `reference_machine` as blocked for it, and ACPI import and EFI builds refuse it. The other checked-in T480s fixtures describe a 20L7 with BIOS 1.53 and are used only for regression tests.
 
 The default workspace is a per-user cache directory. Set `MACLOADER_WORKSPACE` before starting MacLoader to use another workspace. Configuration snapshots, raw ACPI evidence, identities, cached dependencies, tools, Recovery files, and generated EFI are stored outside the Git checkout. Keep private data and generated output out of commits.
 

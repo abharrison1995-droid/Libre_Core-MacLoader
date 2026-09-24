@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -294,6 +295,7 @@ class WindowsRemovableAdapter:
 
 
 # Linux block-device ioctls (asm-generic encodings used on x86_64 and arm64).
+_BLKRRPART = 0x125F
 _BLKGETSIZE64 = 0x80081272
 _BLKSSZGET = 0x1268
 _BLKFLSBUF = 0x1261
@@ -308,6 +310,12 @@ ESP_TYPE_GUID = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 ESP_PARTITION_NAME = "MACLOADER"
 FAT32_VOLUME_LABEL = "MACLOADER"
 FAT32_MIN_CLUSTERS = 65525
+# Planning margin for FAT tables, directory clusters and cluster slack, plus a
+# floor that keeps mkfs.fat able to build a valid FAT32 (>= 65525 clusters).
+MIN_ESP_BYTES = 64 * 1024 * 1024
+FAT32_OVERHEAD_BYTES = 16 * 1024 * 1024
+FAT32_PER_FILE_SLACK_BYTES = 64 * 1024
+_FAT_FORBIDDEN = set('"*/:<>?\\|')
 
 
 @dataclass(frozen=True)
@@ -334,24 +342,30 @@ class PartitionGeometry:
     size_sectors: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class _LockedDevice:
     device_id: str
     descriptor: int
     alias: Path
     identity: BlockIdentity
+    node_dir: Path
+    disk_node: Path
+    partition_descriptor: Optional[int] = None
+    partition_node: Optional[Path] = None
+    destructive_started: bool = False
 
 
 class LinuxBlockProbe:
     """Thin kernel boundary used by :class:`LinuxBlockDeviceBackend`.
 
-    Every method is side-effect free except :meth:`open_locked` and
-    :meth:`drop_cache`; tests replace the probe to model hotplug races
-    deterministically without touching a host device.
+    Tests replace the probe to model hotplug races deterministically without
+    touching a host device.
     """
 
-    by_diskseq_root = Path("/dev/disk/by-diskseq")
     sysfs_block_root = Path("/sys/dev/block")
+    # Private device nodes need a filesystem that permits them; /run and /tmp
+    # are normally mounted nodev.  devtmpfs is not.
+    node_parent = Path("/dev")
 
     def open_locked(self, path: Path) -> int:
         if _fcntl is None:
@@ -363,6 +377,11 @@ class LinuxBlockProbe:
             os.close(descriptor)
             raise
         return descriptor
+
+    def open_readonly(self, path: Path) -> int:
+        # A read-only, non-blocking open neither modifies the device nor waits
+        # on removable-media state.
+        return os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
 
     def identity_of_fd(self, descriptor: int) -> BlockIdentity:
         if _fcntl is None:
@@ -383,13 +402,39 @@ class LinuxBlockProbe:
         return BlockIdentity(status.st_rdev, diskseq, size, sector)
 
     def identity_of_path(self, path: Path) -> BlockIdentity:
-        # A read-only, non-blocking open neither modifies the device nor waits
-        # on removable-media state.
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        descriptor = self.open_readonly(path)
         try:
             return self.identity_of_fd(descriptor)
         finally:
             os.close(descriptor)
+
+    def make_node(self, directory: Path, name: str, rdev: int) -> Path:
+        """Create a private block node for exactly ``rdev`` in a root-only directory."""
+        path = directory / name
+        os.mknod(path, stat.S_IFBLK | 0o600, rdev)
+        return path
+
+    def reread_partitions(self, descriptor: int) -> None:
+        if _fcntl is None:
+            raise UnsafeRemovableTarget("Linux partition re-read is unavailable on this host")
+        _fcntl.ioctl(descriptor, _BLKRRPART, 0)
+
+    def find_partition(self, disk_rdev: int, number: int) -> Optional[int]:
+        """Return the kernel device number of partition ``number`` of the disk."""
+        base = self.sysfs_block_root / f"{os.major(disk_rdev)}:{os.minor(disk_rdev)}"
+        try:
+            children = list(base.resolve(strict=True).iterdir())
+        except OSError:
+            return None
+        for child in children:
+            try:
+                if int((child / "partition").read_text(encoding="ascii").strip()) != number:
+                    continue
+                major, minor = (int(part) for part in (child / "dev").read_text(encoding="ascii").strip().split(":", 1))
+            except (OSError, ValueError):
+                continue
+            return os.makedev(major, minor)
+        return None
 
     def partition_geometry(self, rdev: int) -> PartitionGeometry:
         base = self.sysfs_block_root / f"{os.major(rdev)}:{os.minor(rdev)}"
@@ -413,16 +458,27 @@ class LinuxBlockProbe:
     def mounted_device(self, mount: Path) -> int:
         return os.stat(mount).st_dev
 
+    def is_mount(self, mount: Path) -> bool:
+        return os.path.ismount(mount)
+
 
 class LinuxBlockDeviceBackend:
     """Root-only GPT/FAT32 writer for stable whole-disk Linux by-id targets.
 
     The by-id alias is used exactly once, to find and lock the device.  From
-    then on every command receives the kernel's ``/dev/disk/by-diskseq`` path
-    for that attachment, and before and after every command the backend proves
-    that the path, the original alias and the locked descriptor still report the
-    same device number, disk sequence and size.  An alias that is retargeted,
-    or a device that is unplugged and replaced, therefore stops the operation.
+    then on no command receives an alias or udev symlink.  The backend creates
+    private block nodes for the verified device numbers of the locked disk and
+    its created partition in a root-only directory, and keeps descriptors for
+    both open.  An open descriptor holds the kernel disk, so its device number
+    cannot be handed to a newly attached device while the operation runs.
+    Before and after every command the backend proves that the locked
+    descriptor, the private node and the original alias still report the same
+    device number, disk sequence and size.  A retargeted alias or a replaced
+    device therefore stops the operation.
+
+    The partition table is re-read through the locked descriptor and the new
+    partition is found through sysfs, so the operation does not wait on udev,
+    which postpones events for a disk whose exclusive lock is held.
 
     The implementation is deliberately not marked production-qualified. A
     sacrificial physical-device campaign must qualify the running kernel,
@@ -522,6 +578,7 @@ class LinuxBlockDeviceBackend:
             descriptor = self._probe.open_locked(alias)
         except OSError as exc:
             raise UnsafeRemovableTarget("Unable to exclusively lock the selected Linux USB device") from exc
+        node_dir: Optional[Path] = None
         try:
             identity = self._probe.identity_of_fd(descriptor)
             if (
@@ -532,10 +589,15 @@ class LinuxBlockDeviceBackend:
                 raise UnsafeRemovableTarget(
                     "Locked Linux device is not the planned whole 512-byte-sector disk"
                 )
+            node_dir = Path(tempfile.mkdtemp(prefix=".macloader-", dir=self._probe.node_parent))
+            os.chmod(node_dir, 0o700)
+            disk_node = self._probe.make_node(node_dir, "disk", identity.rdev)
         except BaseException:
             os.close(descriptor)
+            if node_dir is not None:
+                shutil.rmtree(node_dir, ignore_errors=True)
             raise
-        self._locked[current.device_id] = _LockedDevice(current.device_id, descriptor, alias, identity)
+        self._locked[current.device_id] = _LockedDevice(current.device_id, descriptor, alias, identity, node_dir, disk_node)
         try:
             # A second enumeration and identity check closes the
             # time-of-check/open race. Never silently unmount volumes which a
@@ -552,16 +614,17 @@ class LinuxBlockDeviceBackend:
             raise UnsafeRemovableTarget(f"Linux USB device lock was lost before {stage}")
         return locked
 
-    def _pinned_disk(self, locked: _LockedDevice) -> Path:
-        """Return the attachment-unique path after proving it is the locked disk."""
+    def _held_identity(self, locked: _LockedDevice) -> BlockIdentity:
         try:
-            held = self._probe.identity_of_fd(locked.descriptor)
+            return self._probe.identity_of_fd(locked.descriptor)
         except OSError as exc:
             raise UnsafeRemovableTarget("Locked Linux USB device disappeared") from exc
-        if held != locked.identity:
+
+    def _pinned_disk(self, locked: _LockedDevice) -> Path:
+        """Return the private disk node after proving it is the locked disk."""
+        if self._held_identity(locked) != locked.identity:
             raise UnsafeRemovableTarget("Locked Linux USB device changed identity (hotplug or media change)")
-        pinned = self._probe.by_diskseq_root / str(locked.identity.diskseq)
-        for label, path in (("attachment path", pinned), ("by-id alias", locked.alias)):
+        for label, path in (("private device node", locked.disk_node), ("by-id alias", locked.alias)):
             try:
                 observed = self._probe.identity_of_path(path)
             except OSError as exc:
@@ -570,49 +633,83 @@ class LinuxBlockDeviceBackend:
                 raise UnsafeRemovableTarget(
                     f"Locked Linux USB {label} now refers to a different device; refusing to continue"
                 )
-        return pinned
+        return locked.disk_node
 
-    def _pinned_partition(self, locked: _LockedDevice, start_sector: int, size_sectors: int) -> Path:
-        """Return the created ESP path only if it belongs to the locked disk."""
-        partition = self._probe.by_diskseq_root / f"{locked.identity.diskseq}-part1"
+    def _attach_partition(self, locked: _LockedDevice, size_sectors: int) -> Path:
+        """Find, open and pin partition 1 of the locked disk through the kernel."""
+        self._release_partition(locked)
         deadline = time.monotonic() + self._partition_wait_seconds
-        while True:
-            try:
-                identity = self._probe.identity_of_path(partition)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise UnsafeRemovableTarget(
-                        "Linux did not expose the prepared EFI partition for the locked disk"
-                    ) from None
-                time.sleep(0.1)
-        geometry = self._probe.partition_geometry(identity.rdev)
+        rdev = self._probe.find_partition(locked.identity.rdev, 1)
+        while rdev is None:
+            if time.monotonic() >= deadline:
+                raise UnsafeRemovableTarget("Linux did not expose the prepared EFI partition for the locked disk")
+            time.sleep(0.1)
+            rdev = self._probe.find_partition(locked.identity.rdev, 1)
+        node = self._probe.make_node(locked.node_dir, "part1", rdev)
+        locked.partition_node = node
+        try:
+            locked.partition_descriptor = self._probe.open_readonly(node)
+        except OSError as exc:
+            raise UnsafeRemovableTarget("Prepared EFI partition could not be opened") from exc
+        self._pinned_partition(locked, size_sectors)
+        return node
+
+    def _pinned_partition(self, locked: _LockedDevice, size_sectors: int) -> Path:
+        """Prove the held partition belongs to the locked disk and planned layout."""
+        if locked.partition_descriptor is None or locked.partition_node is None:
+            raise UnsafeRemovableTarget("Prepared EFI partition is not attached")
+        try:
+            held = self._probe.identity_of_fd(locked.partition_descriptor)
+            observed = self._probe.identity_of_path(locked.partition_node)
+        except OSError as exc:
+            raise UnsafeRemovableTarget("Prepared EFI partition disappeared") from exc
+        geometry = self._probe.partition_geometry(held.rdev)
         if (
-            identity.diskseq != locked.identity.diskseq
-            or identity.rdev == locked.identity.rdev
+            held != observed
+            or held.diskseq != locked.identity.diskseq
+            or held.rdev == locked.identity.rdev
             or geometry.parent_rdev != locked.identity.rdev
             or geometry.number != 1
-            or geometry.start_sector != start_sector
+            or geometry.start_sector != ESP_FIRST_LBA
             or geometry.size_sectors != size_sectors
-            or identity.size_bytes != size_sectors * SECTOR_BYTES
+            or held.size_bytes != size_sectors * SECTOR_BYTES
         ):
             raise UnsafeRemovableTarget("Prepared EFI partition does not belong to the locked disk and planned layout")
-        return partition
+        return locked.partition_node
 
-    def _run_pinned(self, locked: _LockedDevice, args: list[str], input_text: Optional[str] = None) -> None:
+    def _run_pinned(
+        self, locked: _LockedDevice, args: list[str], input_text: Optional[str] = None,
+        partition_sectors: Optional[int] = None,
+    ) -> None:
         """Run one media command, proving the locked identity before and after it."""
         self._pinned_disk(locked)
+        if partition_sectors is not None:
+            self._pinned_partition(locked, partition_sectors)
         self._run(args, input_text)
         self._pinned_disk(locked)
+        if partition_sectors is not None:
+            self._pinned_partition(locked, partition_sectors)
 
     @staticmethod
     def _preflight_payload(plan: WritePlan, partition_sectors: int) -> None:
-        """Reject FAT32-unrepresentable or oversized payloads before repartitioning."""
+        """Reject payloads the FAT32 ESP cannot hold before any lock or command."""
         total = 0
+        names: set[str] = set()
         for record in plan.expected_files:
             relative = Path(record.relative_path)
             if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                 raise UnsafeRemovableTarget("Media plan contains an unsafe relative path")
+            target = LinuxBlockDeviceBackend._boot_relative(relative)
+            for part in target.parts:
+                if (
+                    any(character in _FAT_FORBIDDEN or ord(character) < 0x20 for character in part)
+                    or part.endswith((" ", "."))
+                ):
+                    raise UnsafeRemovableTarget("A media payload name cannot be stored on FAT32")
+            key = target.as_posix().casefold()
+            if key in names:
+                raise UnsafeRemovableTarget("Media payload names collide on case-insensitive FAT32")
+            names.add(key)
             if record.size_bytes > FAT32_MAX_FILE_BYTES:
                 raise UnsafeRemovableTarget("A media payload file exceeds the FAT32 per-file limit")
             if record.size_bytes > MAX_MEDIA_FILE_BYTES:
@@ -622,8 +719,16 @@ class LinuxBlockDeviceBackend:
             raise UnsafeRemovableTarget("Media payload exceeds the bounded total size limit")
         if not plan.expected_files:
             raise UnsafeRemovableTarget("Media plan contains no payload files")
-        if total >= partition_sectors * SECTOR_BYTES:
+        partition_bytes = partition_sectors * SECTOR_BYTES
+        if partition_bytes < MIN_ESP_BYTES:
+            raise UnsafeRemovableTarget("Linux USB device is too small for a valid FAT32 EFI partition")
+        needed = total + FAT32_OVERHEAD_BYTES + FAT32_PER_FILE_SLACK_BYTES * len(plan.expected_files)
+        if needed > partition_bytes:
             raise UnsafeRemovableTarget("Media payload does not fit in the planned EFI partition")
+
+    def preflight(self, plan: WritePlan) -> None:
+        """Validate the plan against the target size without touching the device."""
+        self._preflight_payload(plan, self._partition_sectors(plan.target.capacity_bytes // SECTOR_BYTES))
 
     def write(self, plan: WritePlan, source_dir: Path) -> None:
         current = self._current(plan.target, plan.required_bytes)
@@ -633,28 +738,65 @@ class LinuxBlockDeviceBackend:
         self._preflight_payload(plan, partition_sectors)
         table = self._partition_script(sectors)
         disk = self._pinned_disk(locked)
-        self._run_pinned(locked, ["sfdisk", "--wipe", "always", "--wipe-partitions", "always", str(disk)], table)
-        self._run_pinned(locked, ["blockdev", "--rereadpt", str(disk)])
-        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
-        self._run_pinned(locked, ["mkfs.vfat", "-F", "32", "-S", str(SECTOR_BYTES), "-n", FAT32_VOLUME_LABEL, str(partition)])
-        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
-        mount = Path(tempfile.mkdtemp(prefix="macloader-usb-", dir=self._mount_parent))
+        locked.destructive_started = True
+        self._run_pinned(locked, ["sfdisk", "--no-reread", "--wipe", "always", "--wipe-partitions", "always", str(disk)], table)
+        self._release_partition(locked)
         try:
-            self._run_pinned(locked, ["mount", "-t", "vfat", "-o", "nosuid,nodev,noexec", str(partition), str(mount)])
-            self._mounts[current.device_id] = (mount, partition)
-            self._assert_mounted_partition(locked, mount, partition_sectors)
+            self._probe.reread_partitions(locked.descriptor)
+        except OSError as exc:
+            raise UnsafeRemovableTarget("Linux could not re-read the prepared partition table") from exc
+        partition = self._attach_partition(locked, partition_sectors)
+        self._run_pinned(
+            locked, ["mkfs.vfat", "-F", "32", "-S", str(SECTOR_BYTES), "-n", FAT32_VOLUME_LABEL, str(partition)],
+            partition_sectors=partition_sectors,
+        )
+        def populate(mount: Path) -> None:
             self._copy_boot_layout(source_dir, mount, plan)
             self._sync_mount(mount)
+
+        self._mount_and_run(
+            locked, current.device_id, partition_sectors, "macloader-usb-", "nosuid,nodev,noexec", populate,
+        )
+
+    def _mount_and_run(
+        self, locked: _LockedDevice, device_id: str, partition_sectors: int, prefix: str,
+        options: str, action: Callable[[Path], object],
+    ) -> object:
+        partition = self._pinned_partition(locked, partition_sectors)
+        mount = Path(tempfile.mkdtemp(prefix=prefix, dir=self._mount_parent))
+        primary: Optional[BaseException] = None
+        try:
+            try:
+                self._run(["mount", "-t", "vfat", "-o", options, str(partition), str(mount)])
+            finally:
+                # Record the mount before any further check so that every
+                # failure path unmounts it; never rmdir a mounted directory.
+                if self._probe.is_mount(mount):
+                    self._mounts[device_id] = (mount, partition)
+            self._pinned_disk(locked)
             self._assert_mounted_partition(locked, mount, partition_sectors)
+            result = action(mount)
+            self._assert_mounted_partition(locked, mount, partition_sectors)
+            return result
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            if current.device_id in self._mounts:
-                self._unmount(current.device_id)
-            else:
-                mount.rmdir()
+            try:
+                if device_id in self._mounts:
+                    self._unmount(device_id)
+                else:
+                    mount.rmdir()
+            except (OSError, UnsafeRemovableTarget):
+                # Do not let cleanup replace the real failure; invalidation
+                # retries the unmount and still wipes through the descriptor.
+                if primary is None:
+                    raise
 
     def _assert_mounted_partition(self, locked: _LockedDevice, mount: Path, partition_sectors: int) -> None:
-        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
-        expected = self._probe.identity_of_path(partition).rdev
+        self._pinned_partition(locked, partition_sectors)
+        assert locked.partition_descriptor is not None
+        expected = self._probe.identity_of_fd(locked.partition_descriptor).rdev
         if self._probe.mounted_device(mount) != expected:
             raise UnsafeRemovableTarget("Mounted volume is not the locked disk's prepared EFI partition")
 
@@ -670,25 +812,21 @@ class LinuxBlockDeviceBackend:
         self._pinned_disk(locked)
         sectors = locked.identity.size_bytes // SECTOR_BYTES
         partition_sectors = self._partition_sectors(sectors)
-        # Discard cached whole-disk pages so the layout checks observe media.
+        # Discard cached pages so the layout checks observe media.
         self._probe.drop_cache(locked.descriptor)
         try:
             verify_gpt_layout(locked.descriptor, locked.identity.size_bytes)
             verify_fat32_volume(locked.descriptor, ESP_FIRST_LBA, partition_sectors)
         except UnsafeRemovableTarget:
             return False
-        partition = self._pinned_partition(locked, ESP_FIRST_LBA, partition_sectors)
-        mount = Path(tempfile.mkdtemp(prefix="macloader-readback-", dir=self._mount_parent))
-        try:
-            self._run_pinned(locked, ["mount", "-t", "vfat", "-o", "ro,nosuid,nodev,noexec", str(partition), str(mount)])
-            self._mounts[current.device_id] = (mount, partition)
-            self._assert_mounted_partition(locked, mount, partition_sectors)
-            return self._verify_boot_layout(source_dir, mount, plan)
-        finally:
-            if current.device_id in self._mounts:
-                self._unmount(current.device_id)
-            else:
-                mount.rmdir()
+        if locked.partition_descriptor is None:
+            self._attach_partition(locked, partition_sectors)
+        assert locked.partition_descriptor is not None
+        self._probe.drop_cache(locked.partition_descriptor)
+        return bool(self._mount_and_run(
+            locked, current.device_id, partition_sectors, "macloader-readback-", "ro,nosuid,nodev,noexec",
+            lambda mount: self._verify_boot_layout(source_dir, mount, plan),
+        ))
 
     def invalidate(self, device: RemovableDevice, reason: str) -> None:
         del reason  # Raw private identifiers and user text are never persisted.
@@ -696,27 +834,36 @@ class LinuxBlockDeviceBackend:
         if locked is None:
             # Failure before lock acquisition has not touched the device.
             return
-        if device.device_id in self._mounts:
-            self._unmount(device.device_id)
         try:
-            held = self._probe.identity_of_fd(locked.descriptor)
-        except OSError as exc:
+            if device.device_id in self._mounts:
+                try:
+                    self._unmount(device.device_id)
+                except (OSError, UnsafeRemovableTarget):
+                    # A busy mount must not prevent invalidation. Detach it
+                    # lazily; the raw wipe below still goes to the locked disk.
+                    mount, _partition = self._mounts.pop(device.device_id)
+                    try:
+                        self._run(["umount", "--lazy", "--", str(mount)])
+                    except UnsafeRemovableTarget:
+                        pass
+            if not locked.destructive_started:
+                # No destructive command ran; the media is unchanged.
+                return
+            try:
+                held = self._probe.identity_of_fd(locked.descriptor)
+            except OSError as exc:
+                raise UnsafeRemovableTarget("Failed media disappeared before invalidation") from exc
+            if held != locked.identity:
+                # The descriptor no longer refers to the locked attachment.
+                # Never direct invalidation writes at whatever occupies it now.
+                raise UnsafeRemovableTarget("Failed media changed identity; refusing to invalidate another device")
+            try:
+                self._invalidate_descriptor(locked.descriptor, locked.identity.size_bytes)
+            except OSError as exc:
+                raise UnsafeRemovableTarget("Failed media could not be invalidated") from exc
+            self._eject_while_locked(locked)
+        finally:
             self._close_lock(device.device_id)
-            raise UnsafeRemovableTarget("Failed media disappeared before invalidation") from exc
-        if held != locked.identity:
-            # The descriptor no longer refers to the locked attachment. Never
-            # direct invalidation writes at whatever occupies it now; release
-            # the stale descriptor so it cannot be reused by a later call.
-            self._close_lock(device.device_id)
-            raise UnsafeRemovableTarget("Failed media changed identity; refusing to invalidate another device")
-        try:
-            self._invalidate_descriptor(locked.descriptor, locked.identity.size_bytes)
-            disk = self._pinned_disk(locked)
-            self._run_pinned(locked, ["blockdev", "--flushbufs", str(disk)])
-        except OSError as exc:
-            raise UnsafeRemovableTarget("Failed media could not be invalidated") from exc
-        self._close_lock(device.device_id)
-        self._safe_eject(disk)
 
     @staticmethod
     def _invalidate_descriptor(descriptor: int, size: int) -> None:
@@ -736,12 +883,20 @@ class LinuxBlockDeviceBackend:
         locked = self._locked.get(device.device_id)
         if locked is None:
             return
-        if device.device_id in self._mounts:
-            self._unmount(device.device_id)
+        try:
+            if device.device_id in self._mounts:
+                self._unmount(device.device_id)
+            self._eject_while_locked(locked)
+        finally:
+            self._close_lock(device.device_id)
+
+    def _eject_while_locked(self, locked: _LockedDevice) -> None:
+        """Flush and power off through the private node while the lock pins it."""
+        self._release_partition(locked)
         disk = self._pinned_disk(locked)
         self._run_pinned(locked, ["blockdev", "--flushbufs", str(disk)])
-        self._close_lock(device.device_id)
-        self._safe_eject(disk)
+        self._pinned_disk(locked)
+        self._run(["udisksctl", "power-off", "--no-user-interaction", "-b", str(disk)])
 
     @staticmethod
     def _partition_sectors(sectors: int) -> int:
@@ -850,17 +1005,28 @@ class LinuxBlockDeviceBackend:
         mount.rmdir()
         self._mounts.pop(device_id, None)
 
-    def _safe_eject(self, disk: Path) -> None:
-        self._run(["udisksctl", "power-off", "--no-user-interaction", "-b", str(disk)])
+    @staticmethod
+    def _release_partition(locked: _LockedDevice) -> None:
+        if locked.partition_descriptor is not None:
+            os.close(locked.partition_descriptor)
+            locked.partition_descriptor = None
+        if locked.partition_node is not None:
+            locked.partition_node.unlink(missing_ok=True)
+            locked.partition_node = None
 
     def _close_lock(self, device_id: str) -> None:
         locked = self._locked.pop(device_id, None)
-        if locked is not None:
+        if locked is None:
+            return
+        try:
+            self._release_partition(locked)
+        finally:
             try:
                 if _fcntl is not None:
                     _fcntl.flock(locked.descriptor, _fcntl.LOCK_UN)
             finally:
                 os.close(locked.descriptor)
+                shutil.rmtree(locked.node_dir, ignore_errors=True)
 
 
 def _read_exact(descriptor: int, offset: int, length: int) -> bytes:
@@ -949,7 +1115,7 @@ def verify_fat32_volume(descriptor: int, start_sector: int, size_sectors: int) -
     base = start_sector * SECTOR_BYTES
     boot = _read_exact(descriptor, base, SECTOR_BYTES)
     (bytes_per_sector, sectors_per_cluster, reserved, fat_count, root_entries, total16,
-     _media, fat_size16, _spt, _heads, _hidden, total32, fat_size32, _flags, version,
+     _media, fat_size16, sectors_per_track, _heads, _hidden, total32, fat_size32, _flags, version,
      root_cluster, fsinfo_sector, backup_sector) = struct.unpack_from("<HBHBHHBHHHIIIHHIHH", boot, 11)
     if boot[510:512] != b"\x55\xaa" or boot[0] not in (0xEB, 0xE9):
         raise UnsafeRemovableTarget("FAT32 boot sector signature is invalid")
@@ -965,7 +1131,9 @@ def verify_fat32_volume(descriptor: int, start_sector: int, size_sectors: int) -
         or fat_size32 == 0
         or version != 0
         or root_cluster < 2
-        or total32 != size_sectors
+        or not 0 < sectors_per_track <= 255
+        # mkfs.fat rounds the filesystem down to a whole number of tracks.
+        or not size_sectors - sectors_per_track < total32 <= size_sectors
     ):
         raise UnsafeRemovableTarget("FAT32 boot parameters do not match the planned EFI partition")
     if boot[0x42] != 0x29 or boot[0x52:0x5A] != b"FAT32   " or boot[0x47:0x52] != FAT32_VOLUME_LABEL.ljust(11).encode("ascii"):
@@ -1133,6 +1301,8 @@ class LinuxRemovableAdapter:
             raise UnsafeRemovableTarget("Linux destructive backend is not physically qualified")
         if not isinstance(plan, WritePlan):
             raise UnsafeRemovableTarget("Linux backend received an invalid media plan")
+        # Reject unrepresentable payloads before the device is even locked.
+        self._backend.preflight(plan)
         self._backend.lock_and_dismount(plan.target)
         self._backend.write(plan, source_dir)
         self._backend.flush(plan.target)

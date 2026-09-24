@@ -48,6 +48,12 @@ PRIVATE_IDENTITY_CONFIRMATION = "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INS
 DEFAULT_RECOVERY_EVIDENCE_PATH = DEFAULT_PRIVATE_DIR / "recovery" / "discovery-evidence.json"
 
 
+def is_synthetic_snapshot(snapshot: HardwareSnapshot) -> bool:
+    """True for checked-in software-only fixtures that must never satisfy physical gates."""
+    raw = snapshot.raw_evidence if isinstance(snapshot.raw_evidence, dict) else {}
+    return raw.get("synthetic") is True
+
+
 @dataclass(frozen=True)
 class WorkflowState:
     """The semantic result rendered by both CLI and TUI."""
@@ -114,6 +120,8 @@ class WorkflowService:
         snapshot: HardwareSnapshot,
         source_directory: Path,
         cancel: Optional[Callable[[], bool]] = None,
+        *,
+        allow_synthetic_snapshot: bool = False,
     ) -> tuple[UserConfiguration, EvidenceRecord]:
         """Validate and privately import this machine's raw DSDT/SSDT capture.
 
@@ -123,6 +131,10 @@ class WorkflowService:
         """
         if configuration.hardware_snapshot_id != snapshot.snapshot_id:
             raise ValueError("ACPI import requires the configuration's bound hardware snapshot")
+        if is_synthetic_snapshot(snapshot) and not allow_synthetic_snapshot:
+            raise ValueError(
+                "ACPI import refuses a synthetic software-only snapshot; create the configuration on the real T480s"
+            )
         if snapshot.machine_type != "20L8":
             raise ValueError("machine-bound ACPI import is currently reviewed only for ThinkPad T480s 20L8")
         profile = load_reviewed_profile()
@@ -280,7 +292,11 @@ class WorkflowService:
                 "Run `macloader config new` on this machine, then rerun `macloader preflight --config CONFIG_ID`.")
         elif snapshot.snapshot_id != configuration.hardware_snapshot_id:
             add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
-        if snapshot is not None and (configuration is None or snapshot.snapshot_id == configuration.hardware_snapshot_id):
+        if snapshot is not None and is_synthetic_snapshot(snapshot):
+            add("reference_machine", "blocked",
+                "The observed snapshot is a synthetic software-only fixture, not the reference machine.",
+                "Run `macloader config new` on the real ThinkPad T480s 20L8 with BIOS N22ET85W 1.62.")
+        elif snapshot is not None and (configuration is None or snapshot.snapshot_id == configuration.hardware_snapshot_id):
             supported_machine = snapshot.machine_type == "20L8"
             bios_matches = normalize_bios_binding(snapshot.bios_version or "") == "N22ET85W-1.62"
             add("reference_machine", "ready" if supported_machine and bios_matches else "blocked",
@@ -636,6 +652,8 @@ class WorkflowService:
         ocvalidate_sha256: Optional[str] = None,
     ) -> EfiBuildResult:
         """Build and validate only the generated EFI output; media is never touched."""
+        if is_synthetic_snapshot(snapshot):
+            raise ValueError("EFI build refuses a synthetic software-only snapshot; use the real T480s snapshot")
         state, dependencies = self.resolve_dependencies(configuration, snapshot, cancel=cancel)
         if state.evaluation.has_blockers:
             details = "; ".join(

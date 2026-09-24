@@ -414,13 +414,19 @@ class WorkflowApp(App[None]):
             return
         try:
             self.service.save(updated)
-            self._draft = self.service.load(updated.configuration_id)
         except Exception as exc:
+            # Only an unsaved result is discarded; once saved, the stored
+            # configuration references it.
             try:
                 self.service.discard_private_identity(reference)
             except (OSError, ValueError):
                 pass
             self._message(f"Private identity generation blocked: {type(exc).__name__}: {exc}")
+            return
+        try:
+            self._draft = self.service.load(updated.configuration_id)
+        except Exception as exc:
+            self._message(f"Saved, but reloading the configuration failed: {type(exc).__name__}: {exc}")
             return
         self._invalidate_efi()
         self.query_one("#identity-checkpoint-input", Input).value = ""
@@ -461,13 +467,19 @@ class WorkflowApp(App[None]):
             return
         try:
             self.service.save(updated)
-            self._draft = self.service.load(updated.configuration_id)
         except Exception as exc:
+            # Only an unsaved result is discarded; once saved, the stored
+            # configuration references it.
             try:
                 self.service.discard_acpi_capture(record)
             except (OSError, ValueError):
                 pass
             self._message(f"Private ACPI import blocked: {type(exc).__name__}: {exc}")
+            return
+        try:
+            self._draft = self.service.load(updated.configuration_id)
+        except Exception as exc:
+            self._message(f"Saved, but reloading the configuration failed: {type(exc).__name__}: {exc}")
             return
         self._invalidate_efi()
         self._message(f"Machine-bound ACPI capture validated and stored privately; evidence digest={record.digest[:12]}…")

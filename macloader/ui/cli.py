@@ -1,6 +1,7 @@
 """Command line interface (CLI) for MacLoader using Click and Rich."""
 
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Optional
@@ -391,8 +392,15 @@ def evidence_acpi_capture_cmd(destination: Path, json_mode: bool) -> None:
     """
     from macloader.evidence.acpi_capture import AcpiCaptureError, capture_acpi_tables, sudo_owner
 
+    owner = sudo_owner()
+    if owner is None and hasattr(os, "geteuid") and os.geteuid() == 0:
+        click.echo(
+            "Warning: running as root without sudo; the capture will be root-owned. "
+            "Run it through sudo from your own account so the import can read it.",
+            err=True,
+        )
     try:
-        result = capture_acpi_tables(destination, owner=sudo_owner())
+        result = capture_acpi_tables(destination, owner=owner)
     except (AcpiCaptureError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
     summary = result.summary()

@@ -9,7 +9,9 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import shutil
+import stat
 import struct
+import subprocess
 from typing import Callable, Optional
 import uuid
 import zlib
@@ -33,7 +35,7 @@ from macloader.removable.writer import FAT32_MAX_FILE_BYTES, MediaFileDigest, Re
 
 
 QUALIFIED = MediaBindings("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64, "f" * 64)
-CAPACITY = 64 * 1024 * 1024 + 512
+CAPACITY = 80 * 1024 * 1024 + 512
 SECTORS = CAPACITY // 512
 PARTITION_SECTORS = SECTORS - ESP_FIRST_LBA - 1 - GPT_ENTRY_SECTORS
 DISK_RDEV = os.makedev(8, 16)
@@ -118,36 +120,71 @@ def _patch(image: Path, offset: int, data: bytes) -> None:
 
 
 class FakeKernel(LinuxBlockProbe):
+    """In-memory model of the locked disk, its private nodes and partition."""
+
     def __init__(self, tmp_path: Path, image: Path, by_id_root: Path) -> None:
-        self.by_diskseq_root = tmp_path / "by-diskseq"
+        self.node_parent = tmp_path / "devnodes"
+        self.node_parent.mkdir()
         self.image = image
         self.disk = BlockIdentity(DISK_RDEV, 7, CAPACITY, 512)
         self.held = self.disk
         self.alias = by_id_root / ALIAS
-        self.paths: dict[str, BlockIdentity] = {
-            str(self.alias): self.disk,
-            str(self.by_diskseq_root / "7"): self.disk,
-        }
+        self.aliases: dict[str, BlockIdentity] = {str(self.alias): self.disk}
+        # What a node for a given dev_t currently opens (the kernel's view).
+        self.by_rdev: dict[int, BlockIdentity] = {DISK_RDEV: self.disk}
+        self.nodes: dict[str, int] = {}
+        self.fd_kind: dict[int, str] = {}
+        self.part_held: Optional[BlockIdentity] = None
         self.geometry: dict[int, PartitionGeometry] = {}
         self.mounts: dict[str, int] = {}
         self.cache_drops = 0
+        self.rereads = 0
         self.lock_error: Optional[OSError] = None
+        self.partition_args: Optional[dict[str, int]] = {}
 
     def open_locked(self, path: Path) -> int:
         if self.lock_error is not None:
             raise self.lock_error
-        if str(path) not in self.paths:
+        if str(path) not in self.aliases:
             raise FileNotFoundError(path)
-        return os.open(self.image, os.O_RDWR)
+        descriptor = os.open(self.image, os.O_RDWR)
+        self.fd_kind[descriptor] = "disk"
+        return descriptor
+
+    def open_readonly(self, path: Path) -> int:
+        identity = self.identity_of_path(path)
+        descriptor = os.open(self.image, os.O_RDONLY)
+        self.fd_kind[descriptor] = "disk" if identity.rdev == DISK_RDEV else "part"
+        return descriptor
 
     def identity_of_fd(self, descriptor: int) -> BlockIdentity:
+        if self.fd_kind.get(descriptor) == "part":
+            assert self.part_held is not None
+            return self.part_held
         return self.held
 
     def identity_of_path(self, path: Path) -> BlockIdentity:
-        try:
-            return self.paths[str(path)]
-        except KeyError:
-            raise FileNotFoundError(path) from None
+        if str(path) in self.aliases:
+            return self.aliases[str(path)]
+        if str(path) in self.nodes and Path(path).exists():
+            identity = self.by_rdev.get(self.nodes[str(path)])
+            if identity is not None:
+                return identity
+        raise FileNotFoundError(path)
+
+    def make_node(self, directory: Path, name: str, rdev: int) -> Path:
+        path = directory / name
+        path.write_bytes(b"")
+        self.nodes[str(path)] = rdev
+        return path
+
+    def reread_partitions(self, descriptor: int) -> None:
+        self.rereads += 1
+        if self.partition_args is not None:
+            self.create_partition(**self.partition_args)
+
+    def find_partition(self, disk_rdev: int, number: int) -> Optional[int]:
+        return PART_RDEV if PART_RDEV in self.geometry and number == 1 else None
 
     def partition_geometry(self, rdev: int) -> PartitionGeometry:
         return self.geometry[rdev]
@@ -161,15 +198,23 @@ class FakeKernel(LinuxBlockProbe):
     def mounted_device(self, mount: Path) -> int:
         return self.mounts[str(mount)]
 
-    def create_partition(self, start: int = ESP_FIRST_LBA, size: int = PARTITION_SECTORS, parent: int = DISK_RDEV) -> None:
+    def is_mount(self, mount: Path) -> bool:
+        return str(mount) in self.mounts
+
+    def create_partition(
+        self, start: int = ESP_FIRST_LBA, size: int = PARTITION_SECTORS, parent: int = DISK_RDEV,
+        diskseq: Optional[int] = None,
+    ) -> None:
         self.geometry[PART_RDEV] = PartitionGeometry(parent, 1, start, size)
-        self.paths[str(self.by_diskseq_root / "7-part1")] = BlockIdentity(PART_RDEV, self.disk.diskseq, size * 512, 512)
+        self.part_held = BlockIdentity(PART_RDEV, diskseq or self.disk.diskseq, size * 512, 512)
+        self.by_rdev[PART_RDEV] = self.part_held
 
     def hotplug_replace(self) -> None:
         """Model unplug + replug: same alias and dev_t, new attachment sequence."""
         replacement = replace(self.disk, diskseq=self.disk.diskseq + 1)
         self.held = replacement
-        self.paths = {str(self.alias): replacement, str(self.by_diskseq_root / "8"): replacement}
+        self.aliases = {str(self.alias): replacement}
+        self.by_rdev[DISK_RDEV] = replacement
 
 
 class Harness:
@@ -188,6 +233,7 @@ class Harness:
         self.mount_parent.mkdir()
         self.commands: list[list[str]] = []
         self.hooks: dict[str, Callable[[list[str]], None]] = {}
+        self.fail: set[str] = set()
         self.device = RemovableDevice(f"linux:by-id:{ALIAS}", "USB", CAPACITY, False, True, False, serial="PIN001")
         self.backend = LinuxBlockDeviceBackend(lambda: [self.device], runner=self.run, probe=self.kernel)
         self.backend._mount_parent = self.mount_parent
@@ -202,10 +248,10 @@ class Harness:
         hook = self.hooks.get(args[0])
         if hook is not None:
             hook(args)
+        if " ".join(args[:2]) in self.fail or args[0] in self.fail:
+            raise UnsafeRemovableTarget(f"Linux media operation failed ({args[0]})")
         if args[0] == "sfdisk":
             write_gpt(self.image)
-        elif args[0] == "blockdev" and args[1] == "--rereadpt":
-            self.kernel.create_partition()
         elif args[0] == "mkfs.vfat":
             write_fat32(self.image)
             shutil.rmtree(self.volume)
@@ -213,17 +259,24 @@ class Harness:
         elif args[0] == "mount":
             mount = Path(args[-1])
             shutil.copytree(self.volume, mount, dirs_exist_ok=True)
-            self.kernel.mounts[str(mount)] = self.kernel.paths[args[-2]].rdev
+            self.kernel.mounts[str(mount)] = self.kernel.identity_of_path(Path(args[-2])).rdev
         elif args[0] == "umount":
             mount = Path(args[-1])
             shutil.rmtree(self.volume)
             shutil.copytree(mount, self.volume)
             for child in mount.iterdir():
                 shutil.rmtree(child) if child.is_dir() else child.unlink()
+            self.kernel.mounts.pop(str(mount), None)
         return ""
 
+    def names(self) -> list[str]:
+        return [command[0] for command in self.commands]
+
     def device_args(self) -> list[str]:
-        return [arg for command in self.commands for arg in command if arg.startswith(str(self.tmp_path))]
+        return [
+            arg for command in self.commands for arg in command
+            if arg.startswith(str(self.tmp_path)) and not arg.startswith(str(self.mount_parent))
+        ]
 
 
 @pytest.fixture
@@ -246,23 +299,27 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: Path) -> Ha
 # --- pinned lifecycle --------------------------------------------------------------
 
 
-def test_every_media_command_uses_the_locked_attachment_path(harness: Harness) -> None:
+def test_every_media_command_uses_private_nodes_of_the_locked_disk(harness: Harness) -> None:
     backend = harness.backend
     backend.lock_and_dismount(harness.device)
+    node_dir = backend._locked[harness.device.device_id].node_dir
+    assert stat.S_IMODE(node_dir.stat().st_mode) == 0o700
     backend.write(harness.plan, harness.source)
     backend.flush(harness.device)
     assert backend.readback(harness.plan, harness.source) is True
     backend.safe_eject(harness.device)
 
-    assert [command[0] for command in harness.commands] == [
-        "sfdisk", "blockdev", "mkfs.vfat", "mount", "umount", "blockdev", "mount", "umount", "blockdev", "udisksctl",
+    assert harness.names() == [
+        "sfdisk", "mkfs.vfat", "mount", "umount", "blockdev", "mount", "umount", "blockdev", "udisksctl",
     ]
-    pinned_root = str(harness.kernel.by_diskseq_root)
-    device_args = [arg for arg in harness.device_args() if not arg.startswith(str(harness.mount_parent))]
-    assert device_args and all(arg.startswith(pinned_root) for arg in device_args)
-    assert not any(ALIAS in arg for command in harness.commands for arg in command)
-    assert harness.kernel.cache_drops == 1
+    assert harness.kernel.rereads == 1, "partition table re-read goes through the locked descriptor"
+    device_args = harness.device_args()
+    assert device_args and all(arg.startswith(str(node_dir)) for arg in device_args)
+    assert not any(ALIAS in arg or "by-diskseq" in arg for command in harness.commands for arg in command)
+    assert "--no-reread" in harness.commands[0]
+    assert harness.kernel.cache_drops == 2
     assert backend._locked == {} and backend._mounts == {}
+    assert not node_dir.exists(), "private nodes are removed with the lock"
     assert (harness.volume / "com.apple.recovery.boot" / "BaseSystem.dmg").read_bytes() == b"recovery"
 
 
@@ -283,14 +340,16 @@ def test_lock_rejects_identity_that_is_not_the_planned_whole_disk(harness: Harne
     with pytest.raises(UnsafeRemovableTarget, match="Unable to exclusively lock"):
         harness.backend.lock_and_dismount(harness.device)
     assert harness.backend._locked == {} and harness.commands == []
+    assert list(kernel.node_parent.iterdir()) == []
 
 
 def test_lock_rejects_alias_retargeted_between_open_and_verification(harness: Harness) -> None:
     kernel = harness.kernel
-    kernel.paths[str(kernel.alias)] = BlockIdentity(OTHER_RDEV, 3, CAPACITY, 512)
+    kernel.aliases[str(kernel.alias)] = BlockIdentity(OTHER_RDEV, 3, CAPACITY, 512)
     with pytest.raises(UnsafeRemovableTarget, match="by-id alias now refers to a different device"):
         harness.backend.lock_and_dismount(harness.device)
     assert harness.backend._locked == {}
+    assert list(kernel.node_parent.iterdir()) == []
 
 
 def test_double_lock_and_unlocked_operations_are_refused(harness: Harness) -> None:
@@ -312,16 +371,16 @@ def test_double_lock_and_unlocked_operations_are_refused(harness: Harness) -> No
 
 def test_alias_retarget_after_lock_stops_before_repartitioning(harness: Harness) -> None:
     harness.backend.lock_and_dismount(harness.device)
-    harness.kernel.paths[str(harness.kernel.alias)] = BlockIdentity(OTHER_RDEV, 11, CAPACITY, 512)
+    harness.kernel.aliases[str(harness.kernel.alias)] = BlockIdentity(OTHER_RDEV, 11, CAPACITY, 512)
     with pytest.raises(UnsafeRemovableTarget, match="by-id alias now refers to a different device"):
         harness.backend.write(harness.plan, harness.source)
     assert harness.commands == []
 
 
-def test_attachment_path_retarget_stops_before_repartitioning(harness: Harness) -> None:
+def test_private_node_that_opens_another_device_stops_before_repartitioning(harness: Harness) -> None:
     harness.backend.lock_and_dismount(harness.device)
-    harness.kernel.paths[str(harness.kernel.by_diskseq_root / "7")] = BlockIdentity(OTHER_RDEV, 7, CAPACITY, 512)
-    with pytest.raises(UnsafeRemovableTarget, match="attachment path now refers to a different device"):
+    harness.kernel.by_rdev[DISK_RDEV] = BlockIdentity(DISK_RDEV, 99, CAPACITY, 512)
+    with pytest.raises(UnsafeRemovableTarget, match="private device node now refers to a different device"):
         harness.backend.write(harness.plan, harness.source)
     assert harness.commands == []
 
@@ -331,22 +390,24 @@ def test_hotplug_replacement_during_partitioning_stops_before_format_and_blocks_
 ) -> None:
     backend = harness.backend
     backend.lock_and_dismount(harness.device)
+    node_dir = backend._locked[harness.device.device_id].node_dir
     harness.hooks["sfdisk"] = lambda _args: harness.kernel.hotplug_replace()
     with pytest.raises(UnsafeRemovableTarget, match="changed identity"):
         backend.write(harness.plan, harness.source)
-    assert [command[0] for command in harness.commands] == ["sfdisk"]
+    assert harness.names() == ["sfdisk"]
     before = harness.image.read_bytes()[:512 * 34]
     with pytest.raises(UnsafeRemovableTarget, match="refusing to invalidate another device"):
         backend.invalidate(harness.device, "hotplug")
     assert harness.image.read_bytes()[:512 * 34] == before
-    assert backend._locked == {}
+    assert backend._locked == {} and not node_dir.exists()
+    assert "udisksctl" not in harness.names()
 
 
-def test_vanished_attachment_path_is_rejected(harness: Harness) -> None:
+def test_vanished_private_node_is_rejected(harness: Harness) -> None:
     backend = harness.backend
     backend.lock_and_dismount(harness.device)
-    del harness.kernel.paths[str(harness.kernel.by_diskseq_root / "7")]
-    with pytest.raises(UnsafeRemovableTarget, match="attachment path is missing"):
+    backend._locked[harness.device.device_id].disk_node.unlink()
+    with pytest.raises(UnsafeRemovableTarget, match="private device node is missing"):
         backend.flush(harness.device)
 
 
@@ -356,66 +417,103 @@ def test_vanished_attachment_path_is_rejected(harness: Harness) -> None:
         ({"parent": OTHER_RDEV}, "does not belong to the locked disk"),
         ({"start": ESP_FIRST_LBA + 8}, "planned layout"),
         ({"size": PARTITION_SECTORS - 8}, "planned layout"),
+        ({"diskseq": 99}, "does not belong to the locked disk"),
     ],
 )
 def test_created_partition_must_belong_to_locked_disk_and_plan(
     harness: Harness, geometry: dict[str, int], message: str
 ) -> None:
     harness.backend.lock_and_dismount(harness.device)
-    harness.hooks["blockdev"] = lambda _args: None
-    original = harness.kernel.create_partition
-
-    def create_wrong(*_args: object, **_kwargs: object) -> None:
-        original(**geometry)
-
-    harness.kernel.create_partition = create_wrong  # type: ignore[method-assign]
+    harness.kernel.partition_args = geometry
     with pytest.raises(UnsafeRemovableTarget, match=message):
         harness.backend.write(harness.plan, harness.source)
-    assert "mkfs.vfat" not in [command[0] for command in harness.commands]
+    assert "mkfs.vfat" not in harness.names()
 
 
-def test_partition_from_another_attachment_is_rejected(harness: Harness) -> None:
+def test_missing_created_partition_does_not_wait_on_udev(harness: Harness) -> None:
     harness.backend.lock_and_dismount(harness.device)
-
-    def foreign_partition(_args: list[str]) -> None:
-        harness.kernel.geometry[PART_RDEV] = PartitionGeometry(DISK_RDEV, 1, ESP_FIRST_LBA, PARTITION_SECTORS)
-        harness.kernel.paths[str(harness.kernel.by_diskseq_root / "7-part1")] = BlockIdentity(
-            PART_RDEV, 99, PARTITION_SECTORS * 512, 512
-        )
-
-    harness.hooks["blockdev"] = foreign_partition
-    harness.kernel.create_partition = lambda *_a, **_k: None  # type: ignore[method-assign]
-    with pytest.raises(UnsafeRemovableTarget, match="does not belong to the locked disk"):
-        harness.backend.write(harness.plan, harness.source)
-
-
-def test_missing_created_partition_is_rejected(harness: Harness) -> None:
-    harness.backend.lock_and_dismount(harness.device)
-    harness.kernel.create_partition = lambda *_a, **_k: None  # type: ignore[method-assign]
+    harness.kernel.partition_args = None
     with pytest.raises(UnsafeRemovableTarget, match="did not expose the prepared EFI partition"):
         harness.backend.write(harness.plan, harness.source)
-    assert [command[0] for command in harness.commands] == ["sfdisk", "blockdev"]
+    assert harness.names() == ["sfdisk"]
 
 
-def test_mount_of_a_different_volume_is_rejected_before_copy(harness: Harness) -> None:
+def test_partition_node_retarget_between_format_and_mount_is_rejected(harness: Harness) -> None:
     harness.backend.lock_and_dismount(harness.device)
+    harness.hooks["mkfs.vfat"] = lambda _args: harness.kernel.by_rdev.update(
+        {PART_RDEV: BlockIdentity(PART_RDEV, 42, PARTITION_SECTORS * 512, 512)}
+    )
+    with pytest.raises(UnsafeRemovableTarget, match="does not belong to the locked disk"):
+        harness.backend.write(harness.plan, harness.source)
+    assert "mount" not in harness.names()
 
-    def wrong_mount(args: list[str]) -> None:
-        harness.kernel.mounts[args[-1]] = OTHER_RDEV
 
+def test_mount_of_a_different_volume_is_unmounted_and_rejected_before_copy(harness: Harness) -> None:
+    harness.backend.lock_and_dismount(harness.device)
     original_run = harness.run
 
     def run(args: list[str], input_text: Optional[str] = None) -> str:
         result = original_run(args, input_text)
         if args[0] == "mount":
-            wrong_mount(args)
+            harness.kernel.mounts[args[-1]] = OTHER_RDEV
         return result
 
     harness.backend._runner = run
     with pytest.raises(UnsafeRemovableTarget, match="not the locked disk's prepared EFI partition"):
         harness.backend.write(harness.plan, harness.source)
     assert not any(harness.volume.rglob("*"))
-    assert harness.backend._mounts == {}
+    assert harness.names()[-1] == "umount", "a mount that failed its check is still unmounted"
+    assert harness.backend._mounts == {} and harness.kernel.mounts == {}
+    assert not any(harness.mount_parent.iterdir())
+
+
+def test_busy_unmount_does_not_mask_the_error_or_prevent_invalidation(harness: Harness) -> None:
+    backend = harness.backend
+    backend.lock_and_dismount(harness.device)
+    original_copy = backend._copy_boot_layout
+
+    def failing_copy(source_dir: Path, mount: Path, plan: WritePlan) -> None:
+        original_copy(source_dir, mount, plan)
+        harness.fail.add("umount")
+        raise OSError("disk full")
+
+    backend._copy_boot_layout = failing_copy  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="disk full"):
+        backend.write(harness.plan, harness.source)
+    assert device_is_mounted(harness)
+    backend.invalidate(harness.device, "copy failed")
+    assert ["umount", "--lazy"] in [command[:2] for command in harness.commands]
+    data = harness.image.read_bytes()
+    assert data[:1024 * 1024] == bytes(1024 * 1024) and data[-1024 * 1024:] == bytes(1024 * 1024)
+    assert harness.names()[-2:] == ["blockdev", "udisksctl"]
+    assert backend._locked == {} and backend._mounts == {}
+
+
+def device_is_mounted(harness: Harness) -> bool:
+    return harness.device.device_id in harness.backend._mounts
+
+
+def test_invalidation_skips_the_wipe_when_nothing_destructive_ran(harness: Harness) -> None:
+    harness.backend.lock_and_dismount(harness.device)
+    marker = b"untouched"
+    _patch(harness.image, 0, marker)
+    harness.backend.invalidate(harness.device, "failed before sfdisk")
+    assert harness.image.read_bytes()[:len(marker)] == marker
+    assert harness.commands == [] and harness.backend._locked == {}
+
+
+def test_eject_happens_while_the_lock_still_pins_the_device(harness: Harness) -> None:
+    backend = harness.backend
+    backend.lock_and_dismount(harness.device)
+    observed: list[bool] = []
+    harness.hooks["udisksctl"] = lambda _args: observed.append(harness.device.device_id in backend._locked)
+    backend.safe_eject(harness.device)
+    assert observed == [True]
+    backend.lock_and_dismount(harness.device)
+    harness.kernel.aliases[str(harness.kernel.alias)] = BlockIdentity(OTHER_RDEV, 5, CAPACITY, 512)
+    with pytest.raises(UnsafeRemovableTarget):
+        backend.safe_eject(harness.device)
+    assert observed == [True] and backend._locked == {}
 
 
 # --- FAT32 and capacity limits before repartitioning -------------------------------
@@ -452,6 +550,61 @@ def test_backend_rechecks_fat32_and_capacity_before_any_command(harness: Harness
     with pytest.raises(UnsafeRemovableTarget, match="no payload files"):
         harness.backend.write(empty, harness.source)
     assert harness.commands == []
+
+
+def test_backend_preflight_rejects_fat_unsafe_names_and_tiny_media(harness: Harness) -> None:
+    def plan_with(*records: MediaFileDigest, capacity: int = CAPACITY) -> WritePlan:
+        target = replace(harness.device, capacity_bytes=capacity)
+        return WritePlan(target, 1, expected_files=records, bindings=QUALIFIED, source_validated=True)
+
+    backend = harness.backend
+    with pytest.raises(UnsafeRemovableTarget, match="collide on case-insensitive FAT32"):
+        backend.preflight(plan_with(MediaFileDigest("EFI/a.efi", 1, "0" * 64), MediaFileDigest("EFI/A.EFI", 1, "0" * 64)))
+    for bad in ("EFI/a:b.efi", "EFI/trailing.", "EFI/tab\tname"):
+        with pytest.raises(UnsafeRemovableTarget, match="cannot be stored on FAT32"):
+            backend.preflight(plan_with(MediaFileDigest(bad, 1, "0" * 64)))
+    with pytest.raises(UnsafeRemovableTarget, match="too small for a valid FAT32"):
+        backend.preflight(plan_with(MediaFileDigest("EFI/a.efi", 1, "0" * 64), capacity=32 * 1024 * 1024))
+    backend.preflight(harness.plan)
+    assert harness.commands == []
+
+
+def test_adapter_runs_backend_preflight_before_locking(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    from macloader.removable import LinuxRemovableAdapter
+
+    monkeypatch.setattr(LinuxBlockDeviceBackend, "production_qualified", True)
+    adapter = LinuxRemovableAdapter(advertised=True, enumerator=lambda: [harness.device], backend=harness.backend, platform="linux")
+    locked: list[bool] = []
+    monkeypatch.setattr(harness.backend, "lock_and_dismount", lambda _device: locked.append(True))
+    oversized = WritePlan(
+        harness.device, 1, expected_files=(MediaFileDigest("EFI/big.bin", CAPACITY, "0" * 64),),
+        bindings=QUALIFIED, source_validated=True,
+    )
+    with pytest.raises(UnsafeRemovableTarget, match="does not fit"):
+        adapter.write(oversized, harness.source)
+    assert locked == []
+
+
+@pytest.mark.skipif(shutil.which("mkfs.vfat") is None, reason="needs dosfstools")
+@pytest.mark.parametrize("disk_mib", [80, 300, 1024])
+def test_fat32_verifier_accepts_real_mkfs_track_rounding(tmp_path: Path, disk_mib: int) -> None:
+    """mkfs.fat rounds the volume down to whole tracks on real partitions."""
+    partition_sectors = LinuxBlockDeviceBackend._partition_sectors(disk_mib * 1024 * 1024 // 512)
+    volume = tmp_path / "partition.img"
+    with volume.open("wb") as handle:
+        handle.truncate(partition_sectors * 512)
+    formatted = subprocess.run(
+        ["mkfs.vfat", "-F", "32", "-S", "512", "-n", "MACLOADER", str(volume)],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert formatted.returncode == 0, formatted.stderr
+    descriptor = os.open(volume, os.O_RDONLY)
+    try:
+        total = struct.unpack_from("<I", os.pread(descriptor, 512, 0), 32)[0]
+        assert total <= partition_sectors
+        verify_fat32_volume(descriptor, 0, partition_sectors)
+    finally:
+        os.close(descriptor)
 
 
 # --- readback corruption -----------------------------------------------------------
@@ -539,7 +692,7 @@ def test_invalidation_clears_both_gpt_copies_through_the_locked_descriptor(harne
     assert data[:1024 * 1024] == bytes(1024 * 1024)
     assert data[-1024 * 1024:] == bytes(1024 * 1024)
     assert [command[0] for command in harness.commands] == ["blockdev", "udisksctl"]
-    assert all(arg.startswith(str(harness.kernel.by_diskseq_root)) for arg in harness.device_args())
+    assert all(arg.startswith(str(harness.kernel.node_parent)) for arg in harness.device_args())
     assert harness.backend._locked == {}
     with pytest.raises(UnsafeRemovableTarget):
         fd = os.open(harness.image, os.O_RDONLY)

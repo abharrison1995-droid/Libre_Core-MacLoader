@@ -1,6 +1,7 @@
 """Cancelled or superseded TUI operations must not publish or persist results."""
 
 import asyncio
+import os
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -42,6 +43,8 @@ class GatedService(WorkflowService):
     def import_acpi_capture(
         self, configuration: UserConfiguration, snapshot: HardwareSnapshot, source_directory: Path,
         cancel: Optional[Callable[[], bool]] = None,
+        *,
+        allow_synthetic_snapshot: bool = False,
     ) -> tuple[UserConfiguration, EvidenceRecord]:
         self._wait(cancel)
         record = EvidenceRecord(
@@ -161,6 +164,7 @@ def test_recovery_discovery_generation_advances_on_the_ui_thread(
 # --- service-level commit points ---------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses the Linux sysfs capture route")
 def test_cancelled_acpi_import_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixtures_dir: Path
 ) -> None:
@@ -176,10 +180,10 @@ def test_cancelled_acpi_import_publishes_nothing(
     service = WorkflowService(store=ConfigurationStore(tmp_path / "configs"))
     configuration, snapshot = service.create(fixtures_dir / "t480s" / "t480s_20l8_bios162_synthetic.json")
     with pytest.raises(ValueError, match="cancelled before publication"):
-        service.import_acpi_capture(configuration, snapshot, capture, cancel=lambda: True)
+        service.import_acpi_capture(configuration, snapshot, capture, cancel=lambda: True, allow_synthetic_snapshot=True)
     assert list(acpi_root.iterdir()) == []
 
-    _updated, record = service.import_acpi_capture(configuration, snapshot, capture)
+    _updated, record = service.import_acpi_capture(configuration, snapshot, capture, allow_synthetic_snapshot=True)
     imported = Path(record.private_ref).parent
     assert imported.is_dir()
     service.discard_acpi_capture(record)

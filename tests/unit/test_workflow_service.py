@@ -307,7 +307,7 @@ def test_machine_bound_acpi_import_is_private_and_public_export_redacts_paths(
     public_text = public_path.read_text(encoding="utf-8")
 
     assert record.completeness.value == "complete"
-    assert len(metadata["tables"]) == 13
+    assert len(metadata["tables"]) == 12
     assert "PRIVATE-ACPI" not in public_text
     assert str(tmp_path / "private") not in public_text
     if os.name != "nt":

@@ -34,19 +34,30 @@ macloader preflight --config CONFIG_ID --json
 The capture must run on the reference laptop itself, never on another preparation host, because firmware tables are specific to the machine and BIOS. It only reads `/sys/firmware/acpi/tables`, and it changes no BIOS setting, disk, or boot entry. Use one of the following:
 
 - **The T480s already runs Linux.** Run the capture from that installed system.
-- **The T480s runs another OS.** Start a standard Linux live session once through **F12**, without installing anything and without mounting or changing the internal disk. Creating that live medium is your own operation outside MacLoader, so treat it as a separate checkpoint. Use a stick you are willing to overwrite. In the live session, install MacLoader with `python -m pip install "git+https://github.com/abharrison1995-droid/Libre_Core-MacLoader"` or from a copied wheel.
+- **The T480s runs another OS.** Start a standard Linux live session once through **F12**, without installing anything and without mounting or changing the internal disk. Creating that live medium is your own operation outside MacLoader, so treat it as a separate checkpoint. Use a stick you are willing to overwrite. MacLoader needs Python 3.11 or newer, so choose a live image that ships it, such as Ubuntu 24.04 or a current Fedora; Ubuntu 22.04 ships 3.10.
+
+Install MacLoader into a virtual environment. Live images block system-wide `pip`, and `pip --user` is not visible to `sudo`. Build or download the wheel on the preparation host (`python -m build --wheel`) and copy it over; this avoids needing `git` in the live session:
+
+```bash
+python3 --version                      # must report 3.11 or newer
+python3 -m venv ~/macloader-venv       # Ubuntu may first need: sudo apt install python3-venv
+~/macloader-venv/bin/pip install ./libre_core_macloader-*.whl
+```
 
 The firmware table files are readable only by root. The capture refuses any machine that is not a Lenovo **20L8** reporting a ThinkPad T480s with BIOS **N22ET85W (1.62)**. It also refuses destinations inside a Git checkout and destinations that already exist.
 
 ```bash
 # On the T480s. DESTINATION must be new, private and outside any repository.
-sudo "$(command -v macloader)" evidence acpi-capture ~/t480s-acpi-private
+# Use the venv's absolute path; sudo does not see a user-local install.
+sudo ~/macloader-venv/bin/macloader evidence acpi-capture ~/t480s-acpi-private
 ls -l ~/t480s-acpi-private/PRIVATE-ACPI
 ```
 
-The command checks DMI vendor, machine type, product version and BIOS before reading any table. It reads the DSDT and every statically installed SSDT in firmware order, excluding runtime-loaded `dynamic/` tables, and validates each table's signature, declared length and checksum. It then writes `dsdt.dat`, `ssdt.dat`, `ssdt1.dat` … `ssdt11.dat`, a `SHA256SUMS` file and `capture-manifest.json`. Directories are created with mode 0700 and files with mode 0600, owned by the user who ran `sudo`. The importer's own table-set checks run before the command succeeds. The output shows counts and file names only.
+If MacLoader is installed system-wide or in an active venv, `sudo "$(command -v macloader)" evidence acpi-capture ...` is equivalent. Run it through `sudo` from your own account, not from a root shell, so the output is handed back to you. If your home directory path contains a symlink (for example Fedora Silverblue's `/home`), pass the real path, because the capture refuses symlinked destinations.
 
-**The table count is fixed by the reviewed profile.** The importer requires one DSDT and twelve SSDT files (`ssdt.dat` through `ssdt11.dat`). The historical 2026-09-10 note describes eleven SSDTs, and its files are not in this checkout, so the real count has not been re-verified. If the capture reports any other SSDT count, stop. Do not rename, duplicate or drop tables: the reviewed profile must be updated through review first.
+The command checks DMI vendor, machine type, product version and BIOS before reading any table. It reads the DSDT and every statically installed SSDT in firmware order, excluding runtime-loaded `dynamic/` tables, and validates each table's signature, declared length and checksum. It then writes `dsdt.dat`, `ssdt.dat`, `ssdt1.dat` … `ssdt10.dat`, a `SHA256SUMS` file and `capture-manifest.json`. Directories are created with mode 0700 and files with mode 0600, owned by the user who ran `sudo`. The importer's own table-set checks run before the command succeeds. The output shows counts and file names only.
+
+**The table count is fixed by the reviewed profile.** The importer requires one DSDT and eleven static SSDTs (`ssdt.dat` through `ssdt10.dat`), matching the historical 2026-09-10 capture of this laptop. Those files are not in this checkout, so the count has not been re-verified on the current machine. If the capture reports any other SSDT count, stop. Do not rename, duplicate or drop tables: the reviewed profile must be updated through review first.
 
 ### Move the capture privately and import it
 

@@ -22,7 +22,11 @@ from macloader.exceptions import BuildPlanError
 
 ACPI_HEADER_SIZE = 36
 MAX_ACPI_TABLE_BYTES = 64 * 1024 * 1024
-TABLE_NAMES = ("dsdt.dat", "ssdt.dat", *tuple(f"ssdt{i}.dat" for i in range(1, 12)))
+# The reviewed 2026-09-10 capture of the T480s 20L8 / N22ET85W 1.62 contained
+# one DSDT and eleven static SSDTs.  Names follow ACPICA acpidump's binary
+# convention: the first instance has no number (ssdt.dat), later ones do.
+REVIEWED_SSDT_COUNT = 11
+TABLE_NAMES = ("dsdt.dat", "ssdt.dat", *tuple(f"ssdt{i}.dat" for i in range(1, REVIEWED_SSDT_COUNT)))
 
 
 def normalize_bios_binding(value: str) -> str:

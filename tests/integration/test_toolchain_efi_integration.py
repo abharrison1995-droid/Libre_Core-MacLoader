@@ -14,6 +14,7 @@ or ``MACLOADER_NETWORK_TESTS=1`` allows provisioning into a fresh, empty
 workspace from the pinned GitHub release archives.  Otherwise they skip.
 """
 
+import copy
 from dataclasses import replace
 import hashlib
 import io
@@ -257,7 +258,9 @@ def test_real_efi_builder_with_synthetic_inputs_passes_matching_ocvalidate(
     assert "SYNTHETIC" in str(snapshot.raw_evidence.get("fixture_note", ""))
     configuration = service.set_target(configuration, "15.0", "24A335")
     capture = _synthetic_acpi_capture(tmp_path / "synthetic-acpi", Path(toolchain.acpi_compiler_path))
-    configuration, acpi_record = service.import_acpi_capture(configuration, snapshot, capture)
+    configuration, acpi_record = service.import_acpi_capture(
+        configuration, snapshot, capture, allow_synthetic_snapshot=True
+    )
     usb_source = tmp_path / "synthetic-usb-session.json"
     usb = UsbEvidenceSession(
         snapshot.snapshot_id, "N22ET85W-1.62", str(usb_source), "synthetic-software-only",
@@ -274,7 +277,9 @@ def test_real_efi_builder_with_synthetic_inputs_passes_matching_ocvalidate(
     assert any(issue.code == "PHYSICAL_ACCEPTANCE_PENDING" for issue in evaluation.issues)
 
     plan = evaluation.plan
-    db = service.orchestrator.db
+    # The synthetic archive digests are pinned in a private copy of the
+    # catalog so the process-wide database singleton is never changed.
+    db = copy.deepcopy(service.orchestrator.db)
     archives = _synthetic_archives(db, plan, tmp_path / "synthetic-archives")
     dependencies = DependencyResolver(db).resolve(plan, ArtifactVariant.RELEASE)
     capture_root = Path(acpi_record.private_ref).parent

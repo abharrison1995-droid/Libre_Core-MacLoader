@@ -50,7 +50,8 @@ def test_acpi_capture_requires_exact_table_set(tmp_path: Path) -> None:
     table_dir.mkdir()
     for name in TABLE_NAMES:
         (table_dir / name).write_bytes(_table("DSDT" if name == "dsdt.dat" else "SSDT"))
-    assert len(AcpiProcessor._find_tables(table_dir)) == 13
+    assert len(AcpiProcessor._find_tables(table_dir)) == 12
+    assert TABLE_NAMES[-1] == "ssdt10.dat"
     (table_dir / "extra.dat").write_bytes(_table("SSDT"))
     with pytest.raises(BuildPlanError, match="exactly one DSDT"):
         AcpiProcessor._find_tables(table_dir)

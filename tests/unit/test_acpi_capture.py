@@ -25,7 +25,8 @@ from macloader.workflow.service import WorkflowService
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Linux sysfs capture route")
 
-SSDT_COUNT = len(TABLE_NAMES) - 1
+SSDT_COUNT = 11  # pinned to the reviewed real capture, not derived from the importer
+assert len(TABLE_NAMES) == SSDT_COUNT + 1
 
 
 def _table(signature: str, body: bytes) -> bytes:
@@ -71,7 +72,8 @@ def test_capture_writes_importer_layout_privately_in_firmware_order(tmp_path: Pa
     assert sorted(path.name for path in table_dir.glob("*.dat")) == sorted(TABLE_NAMES)
     assert (table_dir / "ssdt.dat").read_bytes() == (tables / "SSDT1").read_bytes()
     assert (table_dir / "ssdt1.dat").read_bytes() == (tables / "SSDT2").read_bytes()
-    assert (table_dir / "ssdt11.dat").read_bytes() == (tables / f"SSDT{SSDT_COUNT}").read_bytes()
+    assert (table_dir / "ssdt10.dat").read_bytes() == (tables / f"SSDT{SSDT_COUNT}").read_bytes()
+    assert not (table_dir / "ssdt11.dat").exists()
     assert b"runtime" not in b"".join(path.read_bytes() for path in table_dir.iterdir())
     for path in (destination, table_dir):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
@@ -97,7 +99,7 @@ def test_captured_directory_is_accepted_by_the_private_importer(
     monkeypatch.setattr(workflow_module, "DEFAULT_ACPI_DIR", tmp_path / "workspace" / "private" / "acpi")
     service = WorkflowService(store=ConfigurationStore(tmp_path / "configs"))
     configuration, snapshot = service.create(fixtures_dir / "t480s" / "t480s_20l8_bios162_synthetic.json")
-    updated, record = service.import_acpi_capture(configuration, snapshot, destination)
+    updated, record = service.import_acpi_capture(configuration, snapshot, destination, allow_synthetic_snapshot=True)
     assert record.completeness.value == "complete"
     assert any(item.kind == "acpi" for item in updated.evidence)
 
@@ -236,8 +238,27 @@ def test_cli_capture_reports_next_step_and_refusals(tmp_path: Path, monkeypatch:
     )
     result = CliRunner().invoke(cli, ["evidence", "acpi-capture", str(tmp_path / "capture")])
     assert result.exit_code == 0, result.output
-    assert "Next: macloader evidence acpi-import CONFIG_ID capture" in result.output
+    assert f"Next: macloader evidence acpi-import CONFIG_ID {tmp_path / 'capture'}" in result.output.replace("\n", "")
     as_json = CliRunner().invoke(cli, ["evidence", "acpi-capture", str(tmp_path / "capture2"), "--json"])
-    assert json.loads(as_json.output)["table_count"] == len(TABLE_NAMES)
+    assert json.loads(as_json.stdout)["table_count"] == len(TABLE_NAMES)
     refused = CliRunner().invoke(cli, ["evidence", "acpi-capture", str(tmp_path / "capture")])
     assert refused.exit_code != 0 and "already exists" in refused.output
+
+
+def test_synthetic_snapshot_cannot_satisfy_real_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixtures_dir: Path
+) -> None:
+    tables, dmi = _sysfs(tmp_path / "sys")
+    destination = tmp_path / "capture"
+    capture_acpi_tables(destination, tables_root=tables, dmi_root=dmi)
+    monkeypatch.setattr(workflow_module, "DEFAULT_PRIVATE_DIR", tmp_path / "workspace" / "private")
+    monkeypatch.setattr(workflow_module, "DEFAULT_ACPI_DIR", tmp_path / "workspace" / "private" / "acpi")
+    service = WorkflowService(store=ConfigurationStore(tmp_path / "configs"))
+    configuration, snapshot = service.create(fixtures_dir / "t480s" / "t480s_20l8_bios162_synthetic.json")
+    with pytest.raises(ValueError, match="synthetic software-only snapshot"):
+        service.import_acpi_capture(configuration, snapshot, destination)
+    with pytest.raises(ValueError, match="synthetic software-only snapshot"):
+        service.build_efi_preview(configuration, snapshot, tmp_path / "efi")
+    report = service.preflight(None, snapshot)
+    reference = next(item for item in report["checks"] if item["id"] == "reference_machine")
+    assert reference["state"] == "blocked" and "synthetic" in reference["summary"]
