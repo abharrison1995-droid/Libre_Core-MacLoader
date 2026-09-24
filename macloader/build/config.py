@@ -284,6 +284,31 @@ class SchemaDrivenConfigGenerator:
         self.last_binding_digest = config_digest
         return config
 
+    def generate_synthetic_for_test(
+        self,
+        *,
+        identity: Mapping[str, str],
+        kexts: Iterable[str],
+        drivers: Iterable[str],
+    ) -> Dict[str, Any]:
+        """Build an unprofiled schema-shaped config for synthetic integration tests only."""
+        config = self._load_schema()
+        config["#WARNING - MacLoader"] = "Synthetic test config; not machine-qualified or install-ready."
+        config["Kernel"]["Add"] = [self._kernel_entry(item) for item in self._ordered_kexts(kexts)]
+        config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in sorted(set(drivers))]
+        config["ACPI"]["Add"] = []
+        config["ACPI"]["Delete"] = []
+        config["ACPI"]["Patch"] = []
+        generic = config["PlatformInfo"]["Generic"]
+        for key, value in identity.items():
+            generic[key] = bytes.fromhex(value) if key == "ROM" else value
+        config["PlatformInfo"]["Automatic"] = True
+        config["PlatformInfo"]["UpdateDataHub"] = True
+        config["PlatformInfo"]["UpdateNVRAM"] = True
+        config["PlatformInfo"]["UpdateSMBIOS"] = True
+        config["PlatformInfo"]["UpdateSMBIOSMode"] = "Create"
+        return config
+
     def write(self, config: Dict[str, Any], path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as handle:

@@ -196,7 +196,7 @@ class IdentityService:
     ) -> PrivateIdentity:
         if validate_values:
             self.validate(values)
-        ref = storage_ref or f"{canonical_json_digest(values)}.json"
+        ref = storage_ref or f"{uuid.uuid4().hex}.json"
         if Path(ref).name != ref or not ref.endswith(".json"):
             raise IdentityServiceError("Private identity storage reference must be a simple JSON filename")
         self._assert_private_root()

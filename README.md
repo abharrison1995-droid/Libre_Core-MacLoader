@@ -1,153 +1,75 @@
 # Libre_Core MacLoader
 
-Libre_Core MacLoader automates hardware detection, compatibility evaluation, OpenCore dependency resolution, and provisioning for supported ThinkPad laptops.
+MacLoader prepares and reviews OpenCore configurations for ThinkPad hardware. The first supervised installation target is the ThinkPad T480s 20L8 with BIOS N22ET85W 1.62 and macOS Sequoia 15.0 build 24A335.
 
-It is an independent sibling project to [Libre_Core-AutoLoader](https://github.com/abharrison1995-droid/Libre_Core-AutoLoader).
+## Readiness
 
----
+The CLI, shared workflow service, Textual TUI, pinned dependency acquisition, EFI generation/validation code, and Linux USB preparation implementation are present. Host tools can be acquired into the configured workspace and checked against the bundled catalog. The current Linux writer has passed disposable-image tests; no physical USB writer is qualified.
 
-## Current Status: v0.0.4
+The exact Apple Recovery payload for build 24A335 is an external blocker. Apple's HTTPS discovery endpoint currently returns HTTP 405 in the reviewed flow. Apple's `AP` response field is a Recovery product identifier and does not establish the macOS build. No payload or product-to-build guess is accepted. Do not substitute another macOS target.
 
-**2026-09-09 implementation update:** S12 Recovery and removable-media guards are implemented and committed. Local verification is **254 tests passing, mypy clean across 72 files, and 79.79% branch coverage against a 79% CI gate**. The G1 dependency catalog audit and G2 license/manifest provenance safeguards are now recorded and committed. It is not release-ready: EFI trust and real-validator qualification, official Recovery acquisition, host USB adapters, clean-checkout CI evidence and physical acceptance remain open. Follow the [active implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining gates and **Sequoia-first** route to shipping.
+This checkout has no private machine ACPI capture, selected real SMBIOS identity, or qualified physical USB. Structural checks, synthetic tests, a passing `ocvalidate`, and disposable media do not establish a successful physical installation. See the [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) for checkpoints and current gates.
 
-This repository currently implements **milestones v0.0.1 through v0.0.4**:
-- **v0.0.1**: ThinkPad T480s hardware detection (`20L7`, `20L8`)
-- **v0.0.2**: ThinkPad T480 hardware detection (`20L5`, `20L6`) & Nvidia MX150 dGPU variant detection
-- **v0.0.3**: Version-aware macOS compatibility reporting (Sonoma, Sequoia, Tahoe) and preliminary BuildPlan generation
-- **v0.0.4**: OpenCore dependency catalog, DAG graph resolver, SHA-256 integrity verification, and offline cache
-
-> [!NOTE]
-> EFI `build`/`validate` commands are preliminary and do not yet provide matching ocvalidate qualification. Recovery and removable-media guards have automated coverage, but official Recovery discovery, platform adapters and end-to-end installation remain incomplete. Their remaining work is tracked under G1-G7 in the active plan.
-
----
-
-## Installation & Setup
+## Install and inspect
 
 ```bash
-# Clone the repository and install dependencies
-git clone https://github.com/abharrison1995-droid/Libre_Core-MacLoader.git
-cd Libre_Core-MacLoader
-
-# Install in editable mode with test/type tooling
 python -m pip install -e ".[dev]"
-
-# Run test suite and type checks
-python -m pytest -q
-python -m mypy macloader tests
+macloader --help
+macloader toolchain status
+macloader preflight --fixture tests/fixtures/t480s/t480s_baseline.json --json
 ```
 
----
+The default workspace is a per-user cache directory. Set `MACLOADER_WORKSPACE` before starting MacLoader to use another workspace. Configuration snapshots, raw ACPI evidence, identities, cached dependencies, tools, Recovery files, and generated EFI are stored outside the Git checkout. Keep private data and generated output out of commits.
 
-## CLI Usage
+## Reviewed workflow
 
-### 1. Probe Hardware
+Use the reference machine itself for a supervised installation configuration. Fixtures support deterministic software checks only.
+
 ```bash
-# Probe current machine
-macloader probe
+# Start a local draft; the real machine snapshot is kept in the private workspace.
+macloader config new
 
-# Output machine-readable JSON
-macloader probe --json
+# Select the frozen target and inspect issues.
+macloader config set CONFIG_ID --version 15.0 --build 24A335
+macloader config show CONFIG_ID
+macloader config check CONFIG_ID
 
-# Save sanitized snapshot
-macloader probe --sanitize --output my_hardware.json
+# Import that machine's validated DSDT plus eleven SSDTs into private storage.
+macloader evidence acpi-import CONFIG_ID PRIVATE_CAPTURE_DIRECTORY
 
-# Probe from a saved hardware fixture
-macloader probe --fixture tests/fixtures/t480s/t480s_baseline.json
+# Acquire/check catalog-pinned host tools and dependencies.
+macloader toolchain install
+macloader preflight --config CONFIG_ID --json
+
+# Build/validate EFI only after machine evidence, review, and identity checkpoints.
+macloader build --config CONFIG_ID --output /path/outside/the/repository/EFI
+macloader validate /path/outside/the/repository/EFI
 ```
 
-### 2. Check macOS Compatibility
+Replace `CONFIG_ID` and paths with the actual reviewed inputs. Do not use the checked-in 20L7 fixture as evidence for a 20L8 machine. `config check`, `plan`, `build`, and preflight resume from the private snapshot saved by `config new` when `--fixture` is omitted.
+
+The shared preflight reports the missing prerequisites and their next actions:
+
 ```bash
-# Evaluate compatibility for macOS Sequoia (default)
-macloader support --macos sequoia
-
-# Evaluate compatibility for macOS Tahoe
-macloader support --macos tahoe
-
-# Evaluate against a specific hardware fixture
-macloader support --fixture tests/fixtures/t480/t480_mx150.json --macos sequoia
-
-# Output JSON report
-macloader support --macos sequoia --json
+macloader preflight --config CONFIG_ID --json
+macloader tui --config CONFIG_ID
 ```
 
-### 3. Generate Preliminary BuildPlan
+The TUI can acquire verified dependencies from an empty cache. It does not bypass missing machine-bound evidence or enable an unqualified physical writer.
+
+## Recovery and media gates
+
+`macloader recovery resolve` does not accept an unbound product ID as proof of build 24A335. Signed chunklist validation and bounded HTTPS acquisition remain enforced. Continue only when Apple provides an authenticated exact-build relationship or an Apple-signed payload independently bound to 24A335.
+
+Linux is the first supported preparation host for qualification. The Linux device discovery and guarded layout/write/readback code is implemented, but physical writing remains disabled until a sacrificial USB campaign is separately approved and passes. Use `macloader usb list` and non-destructive planning for inspection only. Never use an internal/system disk. Windows readback failures invalidate media before remount.
+
+## Verification
+
 ```bash
-# View preliminary BuildPlan for macOS Tahoe
-macloader plan --macos tahoe
-
-# Generate BuildPlan from fixture in JSON format
-macloader plan --fixture tests/fixtures/t480s/t480s_baseline.json --macos tahoe --json
+python -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79
+python -m mypy macloader tests --follow-imports=skip
+python -m compileall -q macloader tests
+git diff --check
 ```
 
-### 4. Dependency Catalog, Resolution & Cache (v0.0.4)
-```bash
-# List all verified dependencies in the catalog
-macloader deps list
-macloader deps list --json
-
-# Side-effect-free dependency resolution for target model and macOS
-macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia
-macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --macos tahoe --json -o resolved-dependencies.json
-
-# Fetch and cache verified dependency archives with SHA-256 validation
-macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia
-macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --json
-
-# Operate in strict offline mode from cache
-macloader deps fetch --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --offline
-
-# Verify cache integrity
-macloader deps verify --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia
-macloader deps verify --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --json
-
-# View or clear local cache stats
-macloader deps cache
-macloader deps cache --clear
-macloader deps cache --json
-
-# resolve/fetch/verify also accept --variant (RELEASE or DEBUG builds, default RELEASE)
-macloader deps resolve --fixture tests/fixtures/t480s/t480s_baseline.json --macos sequoia --variant DEBUG
-```
-
-Note: `support`, `plan`, and `deps` commands default to the Sequoia qualification target. Tahoe remains a separate experimental policy.
-
----
-
-## Architecture Overview
-
-```
-Hardware Provider (Linux sysfs / Windows CIM / Fixtures)
-       ↓
-HardwareSnapshot (Typed domain model)
-       ↓
-Normalization & Privacy Sanitization
-       ↓
-Declarative Support Database (YAML schemas for models, components, macOS)
-       ↓
-Compatibility Engine (Version-aware rules & conservative state policy)
-       ↓
-CompatibilityReport (Rich terminal presentation & JSON)
-       ↓
-Preliminary BuildPlan (Required capabilities & future resolution targets)
-       ↓
-Dependency Resolver & DAG Graph (Topological sort, transitive Lilu resolution)
-       ↓
-Integrity Verification & Cache (SHA-256 checksums, offline workspace/cache/)
-```
-
----
-
-## Project Roadmap
-
-The checklist below records feature tranches, not production acceptance. Follow the [active execution plan and exit gates](docs/IMPLEMENTATION_PLAN.md); the next tranche is v0.0.4 foundation repairs. Matching ocvalidate is brought into the first EFI generator, and v0.1.0 also requires the user workflow, packaging and physical acceptance.
-
-- [x] **v0.0.1** — ThinkPad T480s hardware detection
-- [x] **v0.0.2** — ThinkPad T480 hardware detection & MX150 handling
-- [x] **v0.0.3** — Hardware compatibility reporting & preliminary BuildPlan
-- [x] **v0.0.4** — OpenCore dependency catalog, resolver, verification & cache
-- [ ] **v0.0.5** — T480s OpenCore EFI generator
-- [ ] **v0.0.6** — T480 OpenCore EFI generator
-- [ ] **v0.0.7** — ocvalidate & structural EFI validation pipeline
-- [ ] **v0.0.8** — Legitimate Apple macOS Recovery downloader
-- [ ] **v0.0.9** — Guarded USB installer builder
-- [ ] **v0.1.0** — End-to-end validated release
+These gates establish software behavior only. Physical USB boot, Recovery, installation, rollback, and hardware acceptance require the separate checkpoints in the [T480s runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md).

@@ -1,9 +1,14 @@
 """Schema-driven, non-destructive configuration workflow shared by all UIs."""
 
 from dataclasses import dataclass, replace
+import getpass
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
 import tempfile
 from typing import Any, Callable, Mapping, Optional, Tuple
 import uuid
@@ -11,18 +16,23 @@ import uuid
 from macloader.configuration.migrations import import_configuration
 from macloader.configuration.service import ConfigurationEvaluation
 from macloader.configuration.store import ConfigurationStore
-from macloader.config import DEFAULT_WORKSPACE_DIR
+from macloader.config import (
+    DEFAULT_ACPI_DIR, DEFAULT_IDENTITY_DIR, DEFAULT_PRIVATE_DIR, DEFAULT_WORKSPACE_DIR,
+)
 from macloader.domain.configuration import ConfigurationIssue, UserConfiguration
 from macloader.domain.compatibility import CompatibilityReport
-from macloader.domain.evidence import EvidenceRecord
+from macloader.domain.evidence import EvidenceConfidence, EvidenceRecord
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.build_plan import BuildPlan
 from macloader.domain.dependencies import ArtifactVariant, ResolvedDependencySet
 from macloader.domain.contracts import BuildManifest, IdentityReference, ToolchainSelection, canonical_json_digest
 from macloader.domain.recovery import RecoveryBinding, RecoveryEvidence, RecoveryLock
-from macloader.build.acpi import AcpiProcessor
+from macloader.exceptions import MacLoaderError
+from macloader.build.acpi import AcpiProcessor, normalize_bios_binding
 from macloader.build.config import effective_profile_digest, load_reviewed_profile
 from macloader.build.efi import EfiBuildResult
+from macloader.evidence.acpi import AcpiEvidenceBundle, AcpiTableRecord
+from macloader.identity.service import IdentityService, IdentityServiceError
 from macloader.orchestrator import Orchestrator
 from macloader.recovery.discovery import DiscoveryResponse, RecoveryDiscoveryResult
 from macloader.recovery.acquirer import RecoveryBundle
@@ -33,6 +43,7 @@ MAX_IMPORT_BYTES = 4 * 1024 * 1024
 MAX_IMPORT_DEPTH = 32
 MAX_IMPORT_NODES = 10000
 MAX_IMPORT_STRING = 8192
+PRIVATE_IDENTITY_CONFIRMATION = "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INSTALLATION"
 
 
 @dataclass(frozen=True)
@@ -70,6 +81,347 @@ class WorkflowService:
     def load(self, configuration_id: str) -> UserConfiguration:
         configuration = self.store.load(configuration_id)
         return replace(configuration, loaded_base_revision=configuration.revision)
+
+    def save_snapshot(self, configuration: UserConfiguration, snapshot: HardwareSnapshot) -> Path:
+        """Persist the local resume snapshot with owner-only permissions."""
+        if configuration.hardware_snapshot_id != snapshot.snapshot_id:
+            raise ValueError("resume snapshot does not match the configuration binding")
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration.configuration_id):
+            raise ValueError("configuration ID is not safe for private snapshot storage")
+        root = DEFAULT_PRIVATE_DIR / "snapshots"
+        self._ensure_private_directory(root)
+        destination = root / f"{configuration.configuration_id}.json"
+        payload = snapshot.to_json(indent=2) + "\n"
+        self._write_private_json(destination, payload)
+        return destination
+
+    def resume_snapshot(self, configuration_id: str) -> HardwareSnapshot:
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration_id):
+            raise ValueError("configuration ID is not safe for private snapshot storage")
+        path = DEFAULT_PRIVATE_DIR / "snapshots" / f"{configuration_id}.json"
+        data = self._read_private_json(path, "resume snapshot")
+        snapshot = HardwareSnapshot.from_dict(data)
+        configuration = self.load(configuration_id)
+        if snapshot.snapshot_id != configuration.hardware_snapshot_id:
+            raise ValueError("stored resume snapshot does not match the configuration binding")
+        return snapshot
+
+    def import_acpi_capture(
+        self,
+        configuration: UserConfiguration,
+        snapshot: HardwareSnapshot,
+        source_directory: Path,
+    ) -> tuple[UserConfiguration, EvidenceRecord]:
+        """Validate and privately import this machine's raw DSDT/SSDT capture."""
+        if configuration.hardware_snapshot_id != snapshot.snapshot_id:
+            raise ValueError("ACPI import requires the configuration's bound hardware snapshot")
+        if snapshot.machine_type != "20L8":
+            raise ValueError("machine-bound ACPI import is currently reviewed only for ThinkPad T480s 20L8")
+        profile = load_reviewed_profile()
+        if normalize_bios_binding(snapshot.bios_version or "") != profile.bios_binding:
+            raise ValueError("ACPI capture must match the reviewed N22ET85W BIOS 1.62 profile")
+        source = Path(source_directory).expanduser().absolute()
+        self._reject_symlink_path(source)
+        table_dir = source / "PRIVATE-ACPI" if (source / "PRIVATE-ACPI").is_dir() else source
+        paths = AcpiProcessor._find_tables(table_dir)
+        table_data: list[tuple[Path, bytes, dict[str, object]]] = []
+        for path in paths:
+            data = AcpiProcessor._read_table_bytes(path)
+            metadata = AcpiProcessor._validate_table_bytes(data, path.name)
+            if len(data) != metadata["length"]:
+                raise ValueError("ACPI capture changed while being imported")
+            table_data.append((path, data, metadata))
+
+        self._ensure_private_directory(DEFAULT_ACPI_DIR)
+        capture_id = uuid.uuid4().hex
+        final_root = DEFAULT_ACPI_DIR / capture_id
+        staging_path = Path(tempfile.mkdtemp(prefix=".capture-", dir=DEFAULT_ACPI_DIR))
+        staging_root: Optional[Path] = staging_path
+        try:
+            if os.name != "nt":
+                os.chmod(staging_path, 0o700)
+            private_tables = staging_path / "PRIVATE-ACPI"
+            private_tables.mkdir(mode=0o700)
+            records: list[AcpiTableRecord] = []
+            for path, data, metadata in table_data:
+                target = private_tables / path.name.lower()
+                with target.open("xb") as handle:
+                    os.fchmod(handle.fileno(), 0o600) if hasattr(os, "fchmod") else None
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                self._protect_private_file(target)
+                records.append(AcpiTableRecord(
+                    table_name=path.name.lower(),
+                    sha256=str(metadata["sha256"]),
+                    source="operator-imported from the bound T480s machine",
+                    namespace_paths=(),
+                ))
+            bundle = AcpiEvidenceBundle(
+                snapshot_id=snapshot.snapshot_id,
+                bios_binding=profile.bios_binding,
+                private_ref=str(final_root / "evidence.json"),
+                capture_version="1",
+                tables=tuple(records),
+                confidence=EvidenceConfidence.MEDIUM,
+            )
+            metadata_path = staging_path / "evidence.json"
+            self._write_private_json(metadata_path, json.dumps(bundle.to_dict(), sort_keys=True, indent=2) + "\n")
+            os.replace(staging_path, final_root)
+            staging_root = None
+            record = bundle.to_evidence_record()
+            updated = self.add_evidence(configuration, record)
+            return updated, record
+        finally:
+            if staging_root is not None and staging_root.exists():
+                shutil.rmtree(staging_root, ignore_errors=True)
+
+    def generate_private_identity(
+        self,
+        configuration: UserConfiguration,
+        confirmation: str,
+    ) -> tuple[UserConfiguration, str]:
+        if confirmation != PRIVATE_IDENTITY_CONFIRMATION:
+            raise IdentityServiceError("Private identity generation requires the exact explicit confirmation phrase")
+        if configuration.target is None or configuration.target.product_id != "sequoia":
+            raise IdentityServiceError("Private identity requires a selected T480s Sequoia configuration")
+        from macloader.toolchain.loader import TrustedToolchainLoader
+        toolchain = TrustedToolchainLoader().provision()
+        if toolchain.identity_tool_path is None:
+            raise IdentityServiceError("Trusted macserial is unavailable; provision the pinned toolchain first")
+        identities = IdentityService(DEFAULT_IDENTITY_DIR, Path(toolchain.identity_tool_path))
+        private = identities.store(identities.generate(allow_real=True))
+        updated = self.set_identity_reference(configuration, private.storage_ref)
+        return updated, private.storage_ref
+
+    def reuse_private_identity(
+        self,
+        configuration: UserConfiguration,
+        storage_ref: str,
+    ) -> UserConfiguration:
+        private = IdentityService(DEFAULT_IDENTITY_DIR).reuse(IdentityReference("0.1", storage_ref, redacted=True))
+        return self.set_identity_reference(configuration, private.storage_ref)
+
+    def preflight(
+        self,
+        configuration: Optional[UserConfiguration],
+        snapshot: Optional[HardwareSnapshot],
+    ) -> dict[str, Any]:
+        """Report every locally knowable prerequisite and unresolved external gate."""
+        checks: list[dict[str, str]] = []
+
+        def add(check_id: str, state: str, summary: str, action: str = "") -> None:
+            checks.append({"id": check_id, "state": state, "summary": summary, "action": action})
+
+        if configuration is None:
+            add("configuration", "missing", "No saved configuration is selected.", "Run `macloader config new`, then set and review the exact target.")
+        else:
+            exact_target = configuration.target is not None and (
+                configuration.target.product_id == "sequoia"
+                and configuration.target.version == "15.0"
+                and configuration.target.build == "24A335"
+            )
+            add(
+                "exact_target", "ready" if exact_target else "missing",
+                "Configuration selects Sequoia 15.0 build 24A335." if exact_target else "Configuration does not select the frozen Sequoia 15.0/24A335 target.",
+                "Use `config set ID --version 15.0 --build 24A335` after reviewing the target." if not exact_target else "",
+            )
+        if snapshot is None:
+            add("machine_snapshot", "missing", "No matching local hardware snapshot is available.", "Resume with the private saved snapshot or provide the matching fixture.")
+        elif configuration is None or snapshot.snapshot_id != configuration.hardware_snapshot_id:
+            add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
+        else:
+            supported_machine = snapshot.machine_type == "20L8"
+            bios_matches = normalize_bios_binding(snapshot.bios_version or "") == "N22ET85W-1.62"
+            add("reference_machine", "ready" if supported_machine and bios_matches else "blocked",
+                "Reference ThinkPad T480s 20L8 / N22ET85W 1.62 observed." if supported_machine and bios_matches else "Observed hardware or BIOS does not match ThinkPad T480s 20L8 / N22ET85W 1.62.",
+                "Probe the reference 20L8 with BIOS N22ET85W 1.62; do not change BIOS as part of preflight." if not supported_machine or not bios_matches else "")
+
+        if configuration is not None and snapshot is not None and snapshot.snapshot_id == configuration.hardware_snapshot_id:
+            evaluation = self.evaluate(configuration, snapshot).evaluation
+            blocking = [issue for issue in evaluation.issues if issue.blocking]
+            add("configuration_review", "ready" if not blocking else "blocked",
+                "Configuration review has no blockers." if not blocking else f"Configuration review has {len(blocking)} blocker(s).",
+                "Review each issue and its remediation: " + "; ".join(f"{item.code}: {item.remediation}" for item in blocking) if blocking else "")
+
+            acpi_record = next((record for record in configuration.evidence if record.kind == "acpi"), None)
+            acpi_ready = False
+            if acpi_record is not None:
+                source = self.orchestrator.configuration_service._evidence_source(acpi_record.private_ref)
+                try:
+                    if source is None:
+                        raise ValueError("private capture is missing")
+                    profile = load_reviewed_profile()
+                    AcpiProcessor.capture_evidence_digest(source.parent, profile.bios_binding, snapshot.snapshot_id)
+                    acpi_ready = True
+                except (OSError, ValueError, MacLoaderError):
+                    acpi_ready = False
+            add("private_acpi", "ready" if acpi_ready else "missing",
+                "Machine-bound private ACPI capture is present." if acpi_ready else "Machine-bound private ACPI capture is missing or invalid.",
+                "Import the same machine's complete DSDT plus eleven SSDTs with `macloader evidence acpi-import ID DIRECTORY`." if not acpi_ready else "")
+
+            usb_records = [record for record in configuration.evidence if record.kind == "usb"]
+            usb_ready = any(record.completeness.value == "complete" and record.physical_port_evidence for record in usb_records)
+            add("usb_evidence", "ready" if usb_ready else "missing",
+                "Complete physical USB port evidence is present." if usb_ready else "Physical USB port evidence is absent or incomplete.",
+                "Capture and review the physical port session; USB-C logical correlation remains unresolved until measured." if not usb_ready else "")
+
+            identity_ok = False
+            if configuration.identity_ref is not None:
+                try:
+                    IdentityService(DEFAULT_IDENTITY_DIR).reuse(configuration.identity_ref)
+                    identity_ok = True
+                except IdentityServiceError:
+                    identity_ok = False
+            add("private_identity", "ready" if identity_ok else "missing",
+                "A private SMBIOS identity is selected and locally verified." if identity_ok else "No reusable private SMBIOS identity is selected.",
+                "Choose `macloader identity generate ID` with its explicit confirmation phrase, or reuse a reviewed private identity." if not identity_ok else "")
+
+            try:
+                from macloader.toolchain.loader import TrustedToolchainLoader, ToolchainTrustError
+                try:
+                    TrustedToolchainLoader().select()
+                    tools_ok = True
+                except ToolchainTrustError:
+                    tools_ok = False
+                add("toolchain", "ready" if tools_ok else "missing",
+                    "Catalog-pinned OpenCore, ocvalidate, iASL and macserial are verified." if tools_ok else "Catalog-pinned host tools are not installed or failed verification.",
+                    "Run `macloader toolchain install` to acquire and verify catalog-pinned tools." if not tools_ok else "")
+            except (OSError, ValueError):
+                add("toolchain", "blocked", "Trusted toolchain policy could not be loaded.", "Repair the packaged toolchain catalog before building.")
+
+            try:
+                _, dependencies = self.resolve_dependencies(configuration, snapshot)
+                complete = dependencies.is_complete
+                cached = self.orchestrator.verify_cached_dependencies(dependencies, plan=self.evaluate(configuration, snapshot).evaluation.plan)
+                cache_ready = complete and bool(cached) and all(cached.values())
+                add("dependencies", "ready" if cache_ready else "missing",
+                    "All catalog-pinned dependencies are resolved and cached." if cache_ready else "Verified dependencies are missing from the workspace cache.",
+                    "Use the TUI build action or `macloader deps fetch --fixture FIXTURE` to acquire verified dependencies." if not cache_ready else "")
+            except Exception as exc:
+                add("dependencies", "blocked", "Dependency resolution could not complete.", f"Resolve the configuration blockers and retry ({type(exc).__name__}).")
+        else:
+            for check_id, summary in (
+                ("private_acpi", "Machine-bound private ACPI evidence has not been checked."),
+                ("usb_evidence", "Physical USB port evidence has not been checked."),
+                ("private_identity", "A private SMBIOS identity has not been checked."),
+                ("toolchain", "Catalog-pinned host tools have not been checked."),
+                ("dependencies", "Dependency readiness has not been checked."),
+            ):
+                add(check_id, "missing", summary)
+
+        add("exact_recovery", "externally_blocked",
+            "Apple's Recovery endpoint returned HTTPS 405; AP supplies a product identifier, not build metadata, so 24A335 availability is unproven.",
+            "An Apple-approved authenticated HTTPS method that binds the Recovery product to build 24A335, or an Apple-signed matching Recovery payload, is required.")
+        try:
+            adapter = self.removable_status()
+            media_ready = adapter["status"] == "qualified"
+            add("physical_media", "ready" if media_ready else "unqualified",
+                "Removable-media adapter reports qualified." if media_ready else "Media software checks do not establish physical USB writer qualification.",
+                "Complete sacrificial USB write, full readback, failure invalidation and safe-eject qualification after disposable-image tests." if not media_ready else "")
+        except (MacLoaderError, OSError, ValueError, RuntimeError) as exc:
+            add("physical_media", "blocked",
+                "Removable-media discovery could not complete safely.",
+                f"Resolve the host discovery error ({type(exc).__name__}) before considering media operations.")
+
+        states = [item["state"] for item in checks]
+        overall = "ready" if all(state == "ready" for state in states) else "blocked"
+        return {"status": overall, "checks": checks, "synthetic_test_results_are_not_physical_qualification": True}
+
+    @staticmethod
+    def _ensure_private_directory(path: Path) -> None:
+        root = Path(path).expanduser().absolute()
+        for ancestor in (root, *root.parents):
+            if ancestor.exists() and ancestor.is_symlink():
+                raise ValueError("private workspace contains a symlink boundary")
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if os.name != "nt":
+                root.chmod(0o700)
+                if root.stat().st_mode & 0o077:
+                    raise ValueError("private workspace permissions are too broad")
+            else:
+                IdentityService(root)._assert_private_root()
+        except OSError as exc:
+            raise ValueError("unable to protect the private workspace") from exc
+
+    @classmethod
+    def _write_private_json(cls, path: Path, content: str) -> None:
+        destination = Path(path).absolute()
+        cls._ensure_private_directory(destination.parent)
+        if destination.is_symlink():
+            raise ValueError("private workspace destination must not be a symlink")
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+        temporary = Path(temporary_name)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            cls._protect_private_file(temporary)
+            if destination.is_symlink():
+                raise ValueError("private workspace destination became a symlink")
+            os.replace(temporary, destination)
+            if os.name != "nt" and destination.stat().st_mode & 0o077:
+                destination.chmod(0o600)
+                if destination.stat().st_mode & 0o077:
+                    raise ValueError("private workspace file permissions are too broad")
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_private_json(path: Path, label: str) -> Any:
+        destination = Path(path)
+        if destination.is_symlink() or not destination.is_file():
+            raise ValueError(f"{label} is missing or unsafe")
+        if os.name != "nt" and destination.stat().st_mode & 0o077:
+            raise ValueError(f"{label} permissions are too broad")
+        if os.name == "nt":
+            IdentityService._assert_private_acl(destination)
+        fd: Optional[int] = None
+        try:
+            fd = os.open(destination, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode) or status.st_size > 32 * 1024 * 1024:
+                raise ValueError(f"{label} exceeds the safe read limit")
+            payload = os.read(fd, status.st_size)
+            return json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{label} is malformed or unreadable") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def _protect_private_file(path: Path) -> None:
+        if os.name != "nt":
+            path.chmod(0o600)
+            if path.stat().st_mode & 0o077:
+                raise ValueError("private workspace file permissions are too broad")
+            return
+        account = getpass.getuser()
+        if not account:
+            raise ValueError("unable to determine the private workspace owner")
+        try:
+            result = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:(R,W)"],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            raise ValueError("unable to protect private workspace file") from exc
+        if result.returncode != 0:
+            raise ValueError("unable to protect private workspace file")
+        IdentityService._assert_private_acl(path)
+
+    @staticmethod
+    def _reject_symlink_path(path: Path) -> None:
+        for ancestor in (path, *path.parents):
+            if ancestor.exists() and ancestor.is_symlink():
+                raise ValueError("ACPI import path contains a symlink boundary")
+        if not path.is_dir():
+            raise ValueError("ACPI import source must be a directory")
 
     def save(self, configuration: UserConfiguration) -> Path:
         expected = configuration.loaded_base_revision
@@ -232,9 +584,21 @@ class WorkflowService:
         """Build and validate only the generated EFI output; media is never touched."""
         state, dependencies = self.resolve_dependencies(configuration, snapshot, cancel=cancel)
         if state.evaluation.has_blockers:
-            raise ValueError("EFI build blocked by configuration issues")
+            details = "; ".join(
+                f"{issue.code}: {issue.remediation}"
+                for issue in state.evaluation.issues if issue.blocking
+            )
+            raise ValueError(f"EFI build blocked by configuration issues: {details}")
         if not dependencies.is_complete:
-            raise ValueError("EFI build blocked by unresolved dependency requirements")
+            unresolved = ", ".join(dependencies.unresolved_requirements)
+            raise ValueError(f"EFI build blocked by unresolved dependencies: {unresolved or 'see the BuildPlan'}")
+        from macloader.toolchain.loader import ToolchainTrustError, TrustedToolchainLoader
+        toolchain_loader = TrustedToolchainLoader()
+        try:
+            toolchain = toolchain_loader.select() if offline else toolchain_loader.provision()
+        except ToolchainTrustError as exc:
+            action = "run `macloader toolchain install` while online" if offline else "check the pinned toolchain catalog and network access"
+            raise ValueError(f"EFI build requires the verified catalog-pinned toolchain; {action}: {exc}") from exc
         try:
             reviewed_profile = load_reviewed_profile()
             acpi_record = next(record for record in configuration.evidence if record.kind == "acpi")
@@ -256,6 +620,7 @@ class WorkflowService:
                 dependencies,
                 leased_artifacts,
                 Path(output),
+                toolchain=toolchain,
                 reviewed_profile=reviewed_profile,
                 private_acpi_capture=private_acpi_capture,
                 expected_acpi_evidence_digest=expected_evidence_digest,

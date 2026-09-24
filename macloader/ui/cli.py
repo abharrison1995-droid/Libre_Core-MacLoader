@@ -29,7 +29,7 @@ from macloader.domain.contracts import BuildManifest
 from macloader.domain.configuration import UserConfiguration
 from macloader.evidence.usb import UsbEvidenceSession
 from macloader.evidence.acpi import AcpiEvidenceBundle
-from macloader.workflow.service import WorkflowService
+from macloader.workflow.service import PRIVATE_IDENTITY_CONFIRMATION, WorkflowService
 from macloader.ui.tui import run_tui
 from macloader.removable import RemovableDevice, RemovableMediaWriter
 from macloader.toolchain.loader import ToolchainTrustError, TrustedToolchainLoader
@@ -113,7 +113,7 @@ def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], out
     "-m",
     "--macos",
     "target_macos",
-    default=DEFAULT_MACOS_TARGET,
+    default=None,
     type=click.Choice(SUPPORTED_MACOS_TARGETS, case_sensitive=False),
     help="Target macOS version (sonoma, sequoia, tahoe).",
 )
@@ -121,17 +121,21 @@ def support_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], out
 @click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Load hardware snapshot from a fixture file.")
 @click.option("-o", "--output", type=click.Path(dir_okay=False, writable=True, path_type=Path), help="Save JSON plan to file.")
 @click.option("--config", "configuration_id", type=str, help="Evaluate a persisted exact configuration instead of a product-only plan.")
-def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output: Optional[Path], configuration_id: Optional[str]) -> None:
+def plan_cmd(target_macos: Optional[str], json_mode: bool, fixture: Optional[Path], output: Optional[Path], configuration_id: Optional[str]) -> None:
     """Generate a preliminary BuildPlan detailing future EFI requirements."""
     try:
         orchestrator = Orchestrator()
-        snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         if configuration_id:
             workflow = WorkflowService(orchestrator=orchestrator)
-            state = workflow.evaluate(workflow.load(configuration_id), snapshot)
+            configuration = workflow.load(configuration_id)
+            if target_macos is not None and (configuration.target is None or configuration.target.product_id != target_macos.lower()):
+                raise click.ClickException("--macos conflicts with --config target; change the saved configuration explicitly or omit --macos")
+            snapshot = orchestrator.probe_hardware(fixture_path=fixture) if fixture else workflow.resume_snapshot(configuration_id)
+            state = workflow.evaluate(configuration, snapshot)
             plan = state.evaluation.plan
         else:
-            plan = orchestrator.generate_plan(snapshot, target_macos=target_macos)
+            snapshot = orchestrator.probe_hardware(fixture_path=fixture)
+            plan = orchestrator.generate_plan(snapshot, target_macos=target_macos or DEFAULT_MACOS_TARGET)
 
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -144,9 +148,11 @@ def plan_cmd(target_macos: str, json_mode: bool, fixture: Optional[Path], output
         else:
             render_build_plan(plan, console)
 
-    except MacLoaderError as e:
+    except click.ClickException:
+        raise
+    except (MacLoaderError, OSError, ValueError) as e:
         err_console.print(f"[bold red]BuildPlan Error:[/bold red] {e}")
-        sys.exit(1)
+        raise click.ClickException(str(e)) from e
 
 
 @cli.command("configure")
@@ -203,6 +209,7 @@ def config_new_cmd(fixture: Optional[Path], sanitize: bool, json_mode: bool) -> 
     try:
         service = WorkflowService()
         draft, snapshot = service.create(fixture, sanitize=sanitize)
+        service.save_snapshot(draft, snapshot)
         path = service.save(draft)
         payload = {"configuration": draft.to_dict(), "snapshot": {"snapshot_id": snapshot.snapshot_id}, "saved": True}
         if json_mode:
@@ -263,14 +270,14 @@ def config_set_cmd(configuration_id: str, macos_version: Optional[str], macos_bu
 
 @config_group.command("check")
 @click.argument("configuration_id")
-@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Optional matching hardware snapshot fixture; otherwise resume the private saved snapshot.")
 @click.option("--json", "json_mode", is_flag=True)
-def config_check_cmd(configuration_id: str, fixture: Path, json_mode: bool) -> None:
-    """Evaluate configuration, issues and exact BuildPlan against current evidence."""
+def config_check_cmd(configuration_id: str, fixture: Optional[Path], json_mode: bool) -> None:
+    """Evaluate configuration against its saved snapshot or an explicit matching fixture."""
     try:
         service = WorkflowService()
         draft = service.load(configuration_id)
-        _, snapshot = service.create(fixture)
+        snapshot = service.orchestrator.probe_hardware(fixture_path=fixture) if fixture else service.resume_snapshot(configuration_id)
         state = service.evaluate(draft, snapshot)
         if json_mode:
             click.echo(service.render_json(state))
@@ -370,6 +377,147 @@ def evidence_import_cmd(configuration_id: str, input_path: Path, kind: str, json
         click.echo(json.dumps(result, indent=2) if json_mode else f"Imported {kind.lower()} evidence into revision {updated.revision}")
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@evidence_group.command("acpi-import")
+@click.argument("configuration_id")
+@click.argument("capture_directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="The exact fixture snapshot bound to this configuration.")
+@click.option("--json", "json_mode", is_flag=True)
+def evidence_acpi_import_cmd(configuration_id: str, capture_directory: Path, fixture: Optional[Path], json_mode: bool) -> None:
+    """Validate and privately import this T480s machine's DSDT and eleven SSDTs."""
+    try:
+        service = WorkflowService()
+        configuration = service.load(configuration_id)
+        snapshot = (
+            service.orchestrator.probe_hardware(fixture_path=fixture)
+            if fixture is not None
+            else service.resume_snapshot(configuration_id)
+        )
+        updated, record = service.import_acpi_capture(configuration, snapshot, capture_directory)
+        service.save(updated)
+        payload = {
+            "configuration_id": updated.configuration_id,
+            "revision": updated.revision,
+            "evidence_id": record.evidence_id,
+            "evidence_digest": record.digest,
+            "completeness": record.completeness.value,
+            "confidence": record.confidence.value,
+            "raw_tables_persisted_privately": True,
+        }
+        click.echo(json.dumps(payload, indent=2) if json_mode else "ACPI capture validated and stored privately.")
+    except (MacLoaderError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.group("identity")
+def identity_group() -> None:
+    """Deliberately generate or reuse a private local SMBIOS identity."""
+    pass
+
+
+@identity_group.command("generate")
+@click.argument("configuration_id")
+@click.option("--confirm", required=True, help="Type the exact private-identity checkpoint phrase.")
+def identity_generate_cmd(configuration_id: str, confirm: str) -> None:
+    """Generate one private identity with the verified local macserial tool."""
+    if confirm != PRIVATE_IDENTITY_CONFIRMATION:
+        raise click.ClickException(f"Type the exact confirmation: {PRIVATE_IDENTITY_CONFIRMATION}")
+    try:
+        service = WorkflowService()
+        updated, _reference = service.generate_private_identity(service.load(configuration_id), confirm)
+        service.save(updated)
+        console.print(f"Private identity generated and bound to configuration {updated.configuration_id}; values remain in protected local storage.")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@identity_group.command("use")
+@click.argument("configuration_id")
+@click.option("--reference", required=True, help="Private identity JSON filename in this workspace's protected identity store.")
+def identity_use_cmd(configuration_id: str, reference: str) -> None:
+    """Verify and deliberately reuse an existing protected local identity."""
+    try:
+        service = WorkflowService()
+        updated = service.reuse_private_identity(service.load(configuration_id), reference)
+        service.save(updated)
+        console.print(f"Verified private identity reuse for configuration {updated.configuration_id}; values were not displayed.")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.group("toolchain")
+def toolchain_group() -> None:
+    """Inspect or acquire host tools whose bytes are pinned in the catalog."""
+    pass
+
+
+@toolchain_group.command("install")
+@click.option("--json", "json_mode", is_flag=True)
+def toolchain_install_cmd(json_mode: bool) -> None:
+    """Download approved source archives and install only catalog-verified tools."""
+    try:
+        selection = TrustedToolchainLoader().provision()
+        payload = {
+            "status": "verified",
+            "host_platform": selection.host_platform,
+            "host_architecture": selection.host_architecture,
+            "opencore": selection.opencore_version,
+            "ocvalidate": selection.ocvalidate_version,
+            "iasl": selection.acpi_compiler,
+            "macserial": selection.identity_tool,
+            "toolchain_digest": selection.digest,
+        }
+        click.echo(json.dumps(payload, indent=2) if json_mode else "Catalog-pinned OpenCore, ocvalidate, iASL and macserial are verified and installed in the configured workspace.")
+    except (MacLoaderError, OSError, ValueError) as exc:
+        raise click.ClickException(f"Pinned toolchain installation failed: {exc}") from exc
+
+
+@toolchain_group.command("status")
+@click.option("--json", "json_mode", is_flag=True)
+def toolchain_status_cmd(json_mode: bool) -> None:
+    try:
+        loader = TrustedToolchainLoader()
+        selection = loader.select()
+        payload = {"status": "verified", "host_platform": selection.host_platform,
+                   "host_architecture": selection.host_architecture, "opencore": selection.opencore_version,
+                   "ocvalidate": selection.ocvalidate_version, "iasl": selection.acpi_compiler,
+                   "macserial": selection.identity_tool, "toolchain_digest": selection.digest}
+    except (MacLoaderError, OSError, ValueError) as exc:
+        payload = {"status": "missing_or_unverified", "action": "run `macloader toolchain install`", "reason": str(exc)}
+    click.echo(json.dumps(payload, indent=2) if json_mode else f"Toolchain status: {payload['status']}. {payload.get('action', '')} {payload.get('reason', '')}")
+
+
+@cli.command("preflight")
+@click.option("--config", "configuration_id", type=str, help="Saved workflow configuration to inspect.")
+@click.option("--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Exact hardware fixture to bind to the preflight.")
+@click.option("--json", "json_mode", is_flag=True)
+def preflight_cmd(configuration_id: Optional[str], fixture: Optional[Path], json_mode: bool) -> None:
+    """List all known installation prerequisites without downloading or writing media."""
+    service = WorkflowService()
+    configuration: Optional[UserConfiguration] = None
+    snapshot = None
+    if configuration_id:
+        try:
+            configuration = service.load(configuration_id)
+            snapshot = service.orchestrator.probe_hardware(fixture_path=fixture) if fixture else service.resume_snapshot(configuration_id)
+        except (MacLoaderError, OSError, ValueError) as exc:
+            click.echo(f"Preflight could not load the selected configuration or snapshot: {exc}", err=True)
+    else:
+        try:
+            snapshot = service.orchestrator.probe_hardware(fixture_path=fixture)
+        except (MacLoaderError, OSError, ValueError) as exc:
+            click.echo(f"Hardware probe unavailable: {type(exc).__name__}", err=True)
+    report = service.preflight(configuration, snapshot)
+    if json_mode:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        console.print(f"Installation preflight: {report['status']}")
+        for check in report["checks"]:
+            assert isinstance(check, dict)
+            console.print(f"[{check['state']}] {check['id']}: {check['summary']}")
+            if check["action"]:
+                console.print(f"  Next: {check['action']}")
 
 
 @cli.command("tui")
@@ -868,14 +1016,14 @@ def validate_cmd(efi_dir: Path, json_mode: bool, structural_only: bool, ocvalida
 
 
 @cli.command("build")
-@click.option("-m", "--macos", "target_macos", default=DEFAULT_MACOS_TARGET, type=click.Choice(SUPPORTED_MACOS_TARGETS, case_sensitive=False))
+@click.option("-m", "--macos", "target_macos", default=None, type=click.Choice(SUPPORTED_MACOS_TARGETS, case_sensitive=False))
 @click.option("-f", "--fixture", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-o", "--output", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--offline", is_flag=True, help="Use only verified cached dependencies.")
 @click.option("--ocvalidate", "ocvalidate_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Matching OpenCore ocvalidate executable or script.")
 @click.option("--ocvalidate-sha256", type=str, help="SHA-256 for the selected ocvalidate executable/script.")
 @click.option("--config", "configuration_id", type=str, help="Build from a persisted configuration and its exact target bindings.")
-def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str], configuration_id: Optional[str]) -> None:
+def build_cmd(target_macos: Optional[str], fixture: Optional[Path], output: Path, offline: bool, ocvalidate_path: Optional[Path], ocvalidate_sha256: Optional[str], configuration_id: Optional[str]) -> None:
     """Build a validated EFI tree from the actionable hardware plan."""
     try:
         orchestrator = Orchestrator()
@@ -884,10 +1032,13 @@ def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline:
                 "EFI build requires a persisted reviewed configuration; run "
                 "`config new`, set the exact target/evidence, then pass `--config ID`."
             )
-        snapshot = orchestrator.probe_hardware(fixture_path=fixture)
         workflow = WorkflowService(orchestrator=orchestrator)
+        configuration = workflow.load(configuration_id)
+        if target_macos is not None and (configuration.target is None or configuration.target.product_id != target_macos.lower()):
+            raise click.ClickException("--macos conflicts with --config target; change the saved configuration explicitly or omit --macos")
+        snapshot = orchestrator.probe_hardware(fixture_path=fixture) if fixture else workflow.resume_snapshot(configuration_id)
         result = workflow.build_efi_preview(
-            workflow.load(configuration_id),
+            configuration,
             snapshot,
             output,
             offline=offline,
@@ -895,6 +1046,8 @@ def build_cmd(target_macos: str, fixture: Optional[Path], output: Path, offline:
             ocvalidate_sha256=ocvalidate_sha256,
         )
         click.echo(json.dumps({"status": result.validation.status, "output": str(result.output_dir), "manifest": result.manifest.to_dict()}, indent=2))
-    except MacLoaderError as e:
+    except click.ClickException:
+        raise
+    except (MacLoaderError, OSError, ValueError) as e:
         err_console.print(f"[bold red]Build Error:[/bold red] {e}")
         raise click.ClickException(str(e)) from e

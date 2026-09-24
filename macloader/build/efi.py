@@ -39,6 +39,7 @@ from macloader.domain.dependencies import ResolvedDependency, ResolvedDependency
 from macloader.exceptions import ArchiveSecurityError, BuildPlanError
 from macloader.build.acpi import AcpiProcessor
 from macloader.build.config import ReviewedEfiProfile, SchemaDrivenConfigGenerator, effective_profile_digest
+from macloader.config import DEFAULT_IDENTITY_DIR, DEFAULT_WORKSPACE_DIR
 from macloader.identity.service import IdentityService, IdentityServiceError
 from macloader.toolchain.loader import TrustedToolchainLoader, ToolchainTrustError
 
@@ -62,7 +63,7 @@ class EfiBuilder:
         max_build_expanded_bytes: int = DEFAULT_MAX_BUILD_EXPANDED_BYTES,
     ) -> None:
         self.db = db or get_database()
-        self.identity_store_dir = identity_store_dir
+        self.identity_store_dir = identity_store_dir or DEFAULT_IDENTITY_DIR
         self.max_artifact_expanded_bytes = max_artifact_expanded_bytes
         self.max_build_expanded_bytes = max_build_expanded_bytes
 
@@ -277,7 +278,7 @@ class EfiBuilder:
                     raise BuildPlanError("P4 EFI generation requires the private machine-bound ACPI capture")
                 acpi_result = AcpiProcessor(
                     Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256,
-                    work_root=Path.cwd() / "workspace" / "p4-acpi-build",
+                    work_root=DEFAULT_WORKSPACE_DIR / "p4-acpi-build",
                 ).build(
                     private_acpi_capture, efi_root / "OC" / "ACPI",
                     expected_bios_binding=reviewed_profile.bios_binding,
@@ -303,8 +304,18 @@ class EfiBuilder:
             if identity_errors:
                 raise BuildPlanError("Invalid EFI identity: " + "; ".join(identity_errors))
             if reviewed_profile is None:
-                self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
-                schema_digest = ""
+                if synthetic_test_mode and toolchain.sample_plist_path and toolchain.sample_plist_sha256:
+                    generator = SchemaDrivenConfigGenerator(
+                        Path(toolchain.sample_plist_path), toolchain.sample_plist_sha256
+                    )
+                    config = generator.generate_synthetic_for_test(
+                        identity=identity_data, kexts=kexts, drivers=drivers
+                    )
+                    generator.write(config, efi_root / "OC" / "config.plist")
+                    schema_digest = generator.schema_digest
+                else:
+                    self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
+                    schema_digest = ""
                 profile_digest = ""
                 acpi_digest = ""
                 evidence_digests: tuple[str, ...] = ()
@@ -803,7 +814,7 @@ class EfiBuilder:
         dependencies: ResolvedDependencySet,
         identity_reference: Optional[IdentityReference] = None,
     ) -> Path:
-        base = self.identity_store_dir or (Path.home() / "AppData" / "Local" / "MacLoader" / "identities" if os.name == "nt" else Path.home() / ".local" / "share" / "macloader" / "identities")
+        base = self.identity_store_dir
         if identity_reference is not None:
             if not identity_reference.redacted or Path(identity_reference.storage_ref).name != identity_reference.storage_ref:
                 raise BuildPlanError("EFI identity reference must be a redacted local filename")

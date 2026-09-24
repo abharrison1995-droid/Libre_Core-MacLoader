@@ -8,6 +8,7 @@ import zipfile
 import pytest
 
 from macloader.build.efi import EfiBuilder
+from macloader.build.config import SchemaDrivenConfigGenerator
 from macloader.database.loader import Database
 from macloader.dependencies.resolver import DependencyResolver
 from macloader.domain.build_plan import BuildPlan
@@ -15,6 +16,7 @@ from macloader.domain.compatibility import CompatibilityState
 from macloader.domain.contracts import BuildManifest, CONTRACT_SCHEMA_VERSION, ToolchainSelection
 from macloader.domain.dependencies import ArtifactVariant
 from macloader.exceptions import BuildPlanError
+from macloader.identity.service import IdentityService
 
 
 def _minimal_tree(root: Path) -> None:
@@ -153,3 +155,22 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
 def test_identity_validation_rejects_incomplete_or_extra_fields() -> None:
     assert EfiBuilder._identity_errors({"SystemProductName": "MacBookPro15,2"})
     assert EfiBuilder._identity_errors({"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "s", "MLB": "m", "SystemUUID": "u", "secret": "x"})
+
+
+def test_synthetic_schema_config_uses_sample_schema_and_encoded_rom(tmp_path: Path) -> None:
+    schema = {
+        "ACPI": {"Add": [], "Delete": [], "Patch": []},
+        "Booter": {}, "DeviceProperties": {"Add": {}},
+        "Kernel": {"Add": []}, "Misc": {}, "NVRAM": {"Add": {}},
+        "PlatformInfo": {"Generic": {"ROM": bytes(6)}}, "UEFI": {"Drivers": []},
+    }
+    sample = tmp_path / "Sample.plist"
+    sample.write_bytes(plistlib.dumps(schema))
+    generator = SchemaDrivenConfigGenerator(sample, hashlib.sha256(sample.read_bytes()).hexdigest())
+    identity = IdentityService.fake_identity()
+
+    config = generator.generate_synthetic_for_test(identity=identity, kexts=["Kexts/Lilu.kext"], drivers=[])
+
+    assert config["Kernel"]["Add"][0]["BundlePath"] == "Kexts/Lilu.kext"
+    assert config["PlatformInfo"]["Generic"]["ROM"] == bytes.fromhex(identity["ROM"])
+    assert "synthetic" in config["#WARNING - MacLoader"].lower()

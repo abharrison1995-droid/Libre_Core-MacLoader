@@ -102,6 +102,11 @@ class WorkflowApp(App[None]):
             with Horizontal(classes="control-row"):
                 yield Input(placeholder="private identity filename to reuse", id="identity-ref-input")
                 yield Button("Use stored identity", id="set-identity")
+                yield Input(placeholder="type private identity checkpoint phrase", id="identity-checkpoint-input")
+                yield Button("Generate private identity", id="generate-identity")
+            with Horizontal(classes="control-row"):
+                yield Input(placeholder="same-machine PRIVATE-ACPI capture directory", id="acpi-capture-input")
+                yield Button("Import ACPI privately", id="import-acpi-capture")
             yield Label("Plan, dependency, EFI and Recovery stages")
             with Horizontal(classes="control-row"):
                 yield Button("Review hardware support", id="support-review")
@@ -120,6 +125,7 @@ class WorkflowApp(App[None]):
                 yield Input(placeholder="Recovery chunklist", id="recovery-chunklist-input")
                 yield Button("Verify Recovery cache", id="verify-recovery")
                 yield Button("USB adapter status", id="usb-status")
+                yield Button("Shared preflight", id="preflight")
             yield Label("Non-destructive media plan")
             with Horizontal(classes="control-row"):
                 yield Input(placeholder="stable device identity", id="media-device-id-input")
@@ -140,15 +146,11 @@ class WorkflowApp(App[None]):
         try:
             if self.config_id and self._draft is None:
                 self._draft = self.service.load(self.config_id)
-                if self.fixture is None:
-                    self._snapshot = None
-                    status.update(
-                        "Resume blocked: --fixture is required to validate the saved hardware snapshot. "
-                        "No live hardware re-probe was performed."
-                    )
-                    self._show_stages(None)
-                    return
-                _, self._snapshot = self.service.create(self.fixture)
+                self._snapshot = (
+                    self.service.orchestrator.probe_hardware(fixture_path=self.fixture)
+                    if self.fixture is not None
+                    else self.service.resume_snapshot(self.config_id)
+                )
             elif self._draft is not None and self.fixture is not None:
                 # Refresh hardware observations without abandoning an active
                 # draft.  Starting a new draft is an explicit user action.
@@ -168,6 +170,8 @@ class WorkflowApp(App[None]):
         self._cancel_workflow_workers()
         self._cancel_requested = False
         try:
+            if self._snapshot is not None:
+                self.service.save_snapshot(self._draft, self._snapshot)
             self.service.save_revision(self._draft)
             self._draft = self.service.load(self._draft.configuration_id)
             self.config_id = self._draft.configuration_id
@@ -215,6 +219,9 @@ class WorkflowApp(App[None]):
             "export-config": self._export_config,
             "import-evidence": self._import_evidence,
             "set-identity": self._set_identity,
+            "generate-identity": self._generate_identity,
+            "import-acpi-capture": self._import_acpi_capture,
+            "preflight": self._run_preflight,
             "resolve-dependencies": self._resolve_dependencies,
             "support-review": self._support_review,
             "build-efi": self._build_efi,
@@ -356,7 +363,7 @@ class WorkflowApp(App[None]):
             self._message("Identity reuse requires a loaded configuration.")
             return
         try:
-            self._draft = self.service.set_identity_reference(
+            self._draft = self.service.reuse_private_identity(
                 self._draft, self.query_one("#identity-ref-input", Input).value.strip()
             )
             self._invalidate_efi()
@@ -364,6 +371,88 @@ class WorkflowApp(App[None]):
             self._evaluate()
         except Exception as exc:
             self._message(f"Identity reuse blocked: {type(exc).__name__}: {exc}")
+
+    def _generate_identity(self) -> None:
+        phrase = self.query_one("#identity-checkpoint-input", Input).value.strip()
+        if self._draft is None or self.config_id is None:
+            self._message("Save the configuration draft before generating a private identity.")
+            return
+        if phrase != "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INSTALLATION":
+            self._message("Private identity generation requires typing the exact checkpoint phrase.")
+            return
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._generate_identity_worker(self._draft, phrase, self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _generate_identity_worker(self, draft: UserConfiguration, phrase: str, generation: int) -> None:
+        try:
+            updated, _reference = self.service.generate_private_identity(draft, phrase)
+            self.service.save(updated)
+            self.call_from_thread(self._publish_identity_result, generation, updated.configuration_id)
+        except Exception as exc:
+            self.call_from_thread(
+                self._publish_message_if_current, generation,
+                f"Private identity generation blocked: {type(exc).__name__}: {exc}",
+            )
+
+    def _publish_identity_result(self, generation: int, configuration_id: str) -> None:
+        if generation != self._operation_generation:
+            return
+        self._draft = self.service.load(configuration_id)
+        self._invalidate_efi()
+        self.query_one("#identity-checkpoint-input", Input).value = ""
+        self._message("Private identity generated, protected locally, and bound to this configuration; values were not displayed.")
+
+    def _import_acpi_capture(self) -> None:
+        if self._draft is None or self._snapshot is None or self.config_id is None:
+            self._message("Save or resume a configuration with its matching machine snapshot before ACPI import.")
+            return
+        source = Path(self.query_one("#acpi-capture-input", Input).value.strip())
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._import_acpi_worker(self._draft, self._snapshot, source, self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _import_acpi_worker(
+        self, draft: UserConfiguration, snapshot: HardwareSnapshot, source: Path, generation: int
+    ) -> None:
+        try:
+            updated, record = self.service.import_acpi_capture(draft, snapshot, source)
+            self.service.save(updated)
+            self.call_from_thread(self._publish_acpi_result, generation, updated.configuration_id, record.digest)
+        except Exception as exc:
+            self.call_from_thread(
+                self._publish_message_if_current, generation,
+                f"Private ACPI import blocked: {type(exc).__name__}: {exc}",
+            )
+
+    def _publish_acpi_result(self, generation: int, configuration_id: str, digest: str) -> None:
+        if generation != self._operation_generation:
+            return
+        self._draft = self.service.load(configuration_id)
+        self._invalidate_efi()
+        self._message(f"Machine-bound ACPI capture validated and stored privately; evidence digest={digest[:12]}…")
+
+    def _run_preflight(self) -> None:
+        self._cancel_requested = False
+        self._operation_generation += 1
+        self._preflight_worker(self._draft, self._snapshot, self._operation_generation)
+
+    @work(thread=True, exclusive=True, group="workflow-stage")
+    def _preflight_worker(
+        self, draft: Optional[UserConfiguration], snapshot: Optional[HardwareSnapshot], generation: int
+    ) -> None:
+        report = self.service.preflight(draft, snapshot)
+        blocked = [
+            f"{item['id']}: {item['summary']}"
+            for item in report["checks"]
+            if isinstance(item, dict) and item["state"] != "ready"
+        ]
+        self.call_from_thread(
+            self._publish_message_if_current, generation,
+            "Shared preflight: " + str(report["status"]) + (". " + "; ".join(blocked) if blocked else ". All checked prerequisites are ready."),
+        )
 
     def _resolve_dependencies(self) -> None:
         if self._draft is None or self._snapshot is None:
@@ -404,7 +493,7 @@ class WorkflowApp(App[None]):
     def _build_efi_worker(self, output: Path, draft: UserConfiguration, snapshot: HardwareSnapshot, generation: int) -> None:
         try:
             result = self.service.build_efi_preview(
-                draft, snapshot, output, offline=True,
+                draft, snapshot, output, offline=False,
                 cancel=lambda: self._cancel_requested or generation != self._operation_generation,
             )
             self.call_from_thread(self._publish_efi_result, generation, result, output)

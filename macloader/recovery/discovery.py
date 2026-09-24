@@ -7,6 +7,7 @@ import re
 import secrets
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 import urllib.request as _urllib_request
 
@@ -23,7 +24,7 @@ MAX_DISCOVERY_BYTES = 64 * 1024
 MAX_RECOVERY_ASSET_BYTES = 16 * 1024 * 1024 * 1024
 
 _REQUIRED_KEYS = ("AP", "AU", "AH", "AT", "CU", "CH", "CT")
-_BUILD_RE = re.compile(r"\b(?P<build>\d{2}[A-Z]\d{2,6}[a-z]?)\b")
+_PRODUCT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class RecoveryDiscoveryResult:
     product: Optional[RecoveryProduct]
     record_digest: str
     diagnostics: Tuple[str, ...] = ()
+    apple_product_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -46,6 +48,7 @@ class RecoveryDiscoveryResult:
             "target": self.target.to_dict(),
             "product": self.product.to_dict() if self.product else None,
             "record_digest": self.record_digest,
+            "apple_product_id": self.apple_product_id,
             "diagnostics": list(self.diagnostics),
         }
 
@@ -82,11 +85,6 @@ class _AppleDiscoveryRedirectHandler(HTTPRedirectHandler):
         ):
             raise ArtifactDownloadError("Recovery discovery redirect leaves the approved HTTPS origin")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _build_version(build: str) -> Optional[str]:
-    prefixes = {"23": "14.0", "24": "15.0", "26": "26.0"}
-    return prefixes.get(build[:2])
 
 
 def _redacted_record_digest(target: RecoveryTarget, values: Mapping[str, str]) -> str:
@@ -156,6 +154,8 @@ class AppleRecoveryDiscovery:
                 return DiscoveryResponse({str(k): str(v) for k, v in response.headers.items()}, body)
         except ArtifactDownloadError:
             raise
+        except HTTPError as exc:
+            raise ArtifactDownloadError(f"Recovery discovery failed: HTTPS returned HTTP {exc.code}") from exc
         except Exception as exc:
             raise ArtifactDownloadError(f"Recovery discovery failed: {type(exc).__name__}") from exc
 
@@ -187,40 +187,23 @@ class AppleRecoveryDiscovery:
                 record_digest,
                 ("Apple explicitly reported the exact Recovery product as unavailable",),
             )
-        build_match = _BUILD_RE.search(values["AP"])
-        resolved_build = build_match.group("build") if build_match else None
-        resolved_version = _build_version(resolved_build) if resolved_build else None
-        if resolved_build != target.build or resolved_version != target.version:
-            state = RecoveryState.UNAVAILABLE if resolved_build else RecoveryState.AMBIGUOUS
-            reason = "Apple response did not identify the exact requested build" if not resolved_build else f"Apple selected build {resolved_build}, not {target.build}"
-            return RecoveryDiscoveryResult(state, target, None, record_digest, (reason,))
-        try:
-            image_url = self._asset_url(values["AU"], self.asset_hosts)
-            chunklist_url = self._asset_url(values["CU"], self.asset_hosts)
-            image_size = self._asset_size(image_url, values["AT"]) if not self._custom_transport else None
-            chunklist_size = self._asset_size(chunklist_url, values["CT"]) if not self._custom_transport else None
-            if not self._custom_transport and (image_size is None or chunklist_size is None):
-                return RecoveryDiscoveryResult(
-                    RecoveryState.FAILED,
-                    target,
-                    None,
-                    record_digest,
-                    ("Apple Recovery asset sizes were not available from authenticated HTTPS metadata",),
-                )
-            product = RecoveryProduct(
-                target=target,
-                image_url=image_url,
-                image_sha256=values["AH"].lower(),
-                image_size_bytes=image_size,
-                chunklist_url=chunklist_url,
-                chunklist_sha256=values["CH"].lower(),
-                chunklist_size_bytes=chunklist_size,
-                image_session_ref=values["AT"],
-                chunklist_session_ref=values["CT"],
+        # OpenCore's Recovery protocol names AP as INFO_PRODUCT.  It is an
+        # opaque Apple product identifier, not a marketing version or build.
+        # Do not infer a build by searching arbitrary product text.
+        product_id = values["AP"].strip()
+        if not _PRODUCT_ID_RE.fullmatch(product_id):
+            return RecoveryDiscoveryResult(
+                RecoveryState.FAILED, target, None, record_digest,
+                ("Apple Recovery response contains an invalid product identifier",),
             )
-        except (KeyError, ValueError) as exc:
-            return RecoveryDiscoveryResult(RecoveryState.FAILED, target, None, record_digest, (f"invalid Apple Recovery metadata: {type(exc).__name__}",))
-        return RecoveryDiscoveryResult(RecoveryState.DISCOVERED, target, product, record_digest)
+        return RecoveryDiscoveryResult(
+            RecoveryState.AMBIGUOUS,
+            target,
+            None,
+            record_digest,
+            ("Apple returned a Recovery product identifier without authenticated version/build metadata; exact target is unproven",),
+            product_id,
+        )
 
     def _asset_size(self, url: str, session_token: str) -> Optional[int]:
         request = Request(

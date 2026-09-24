@@ -1,50 +1,59 @@
-# START HERE — Libre_Core MacLoader
+# Start here
 
-## Current entry point (2026-09-08)
+MacLoader is preparing for a first supervised install on a ThinkPad T480s 20L8 with BIOS N22ET85W 1.62, targeting Sequoia 15.0 build 24A335. Read the current readiness note in [README](README.md) and the [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) before using the workflow.
 
-Read [the active implementation plan](docs/IMPLEMENTATION_PLAN.md) first. The hardened foundation and preliminary builder, Recovery and removable-media code are present, with 254 local tests passing, clean mypy and 79.79% branch coverage against a 79% CI gate. **G0 is reopened:** S12 is verified and committed; hosted clean-checkout evidence and the EFI trust/validation boundaries (S01-S04) remain before qualifying T480s/Sequoia. The plan records progress, concrete regression tests and shipping gates. The [review ledger](docs/IMPLEMENTATION_REVIEW.md) preserves earlier findings; old closeout claims are superseded by the plan. Setup and first-tranche instructions below are historical context.
+## Current stop gates
 
-Libre_Core MacLoader is a **new sibling project** to `Libre_Core-AutoLoader`.
+- Apple Recovery discovery does not prove that its product ID is build 24A335. The HTTPS endpoint returned 405, and no authenticated exact-build binding or matching Apple-signed payload is available in this checkout.
+- There is no private ACPI capture or selected real SMBIOS identity in the current workspace.
+- Linux is the first preparation host. Disposable-image tests pass, but no physical USB writer is qualified. Physical writes remain disabled.
+- No BIOS settings, internal disks, or physical USB media have been changed.
 
-## Recommendation: do not create this as a GitHub fork
+Do not substitute a different macOS version/build. The first eventual physical boot must reach the OpenCore picker and Recovery without changing the internal disk. Installing to a disk requires a separate confirmation that names the exact target disk.
 
-Create a fresh repository named something like:
+## Set up the software
 
-`Libre_Core-MacLoader`
-
-Keep the existing AutoLoader repository beside it:
-
-```text
-Projects/
-├── Libre_Core-AutoLoader/
-└── Libre_Core-MacLoader/
+```bash
+python -m pip install -e ".[dev]"
+macloader toolchain install
 ```
 
-MacLoader should explicitly treat AutoLoader as an **architectural reference / code donor where appropriate**, not as its Git history parent.
+Tool bytes are checked against the catalog and installed in the configured per-user workspace. Set `MACLOADER_WORKSPACE` before invoking MacLoader when using a different workspace. Do not store private data or generated artifacts in the repository.
 
-Why:
+## Start a local workflow
 
-- AutoLoader's domain is firmware modification; MacLoader's domain is OpenCore/macOS provisioning.
-- A literal fork would inherit firmware-specific history, naming, issues, assumptions, releases and potentially irrelevant files.
-- We only want selected patterns: project organisation, detection abstractions, database separation, CLI/TUI style, logging/testing conventions and the host/USB workflow philosophy.
-- Starting fresh makes it much easier to keep MacLoader's support promise, dependencies and safety boundaries clean.
-- If generic utilities are genuinely reusable later, they can be extracted into a shared package instead of coupling the two applications prematurely.
+On the actual reference machine, create and review a draft, then inspect its complete blocker list:
 
-## First implementation tranche
+```bash
+macloader config new
+macloader config set CONFIG_ID --version 15.0 --build 24A335
+macloader config check CONFIG_ID
+macloader preflight --config CONFIG_ID --json
+```
 
-The first Codex run should implement only:
+Import the same machine's validated raw ACPI capture only after it has been captured on the 20L8 / BIOS 1.62 machine:
 
-- v0.0.1 — T480s hardware detection
-- v0.0.2 — T480 hardware detection
-- v0.0.3 — hardware compatibility reporting
+```bash
+macloader evidence acpi-import CONFIG_ID PRIVATE_CAPTURE_DIRECTORY
+```
 
-Do **not** implement USB writing, macOS installation, firmware changes or a fake EFI builder in the first tranche.
+The import verifies the DSDT and eleven SSDTs and keeps raw tables in the owner-only private workspace. Do not paste ACPI tables or SMBIOS values into tickets, exports, manifests, logs, or chat. Generate or reuse a real SMBIOS identity only at its deliberate workflow checkpoint; that action is not part of software smoke testing.
 
-## Read in this order
+For an interactive workflow:
 
-1. `docs/ENGINEERING_SPEC_V0.1.md`
-2. `docs/PROJECT_STRUCTURE.md`
-3. `docs/DECISIONS.md`
-4. `prompts/CODEX_MASTER_PROMPT_V0.0.1-V0.0.3.md`
+```bash
+macloader tui --config CONFIG_ID
+```
 
-The remaining documents are working ledgers/templates for the implementation agent.
+The TUI can download and verify missing catalog dependencies. Missing machine-bound evidence and external Recovery/media gates remain visible blockers.
+
+## Check software and physical gates
+
+```bash
+python -m pytest -q --cov=macloader --cov-branch --cov-fail-under=79
+python -m mypy macloader tests --follow-imports=skip
+python -m compileall -q macloader tests
+git diff --check
+```
+
+Read [docs/T480S_FIRST_INSTALL_RUNBOOK.md](docs/T480S_FIRST_INSTALL_RUNBOOK.md) for the BIOS baseline, USB-A SS01/F12 path, Recovery networking, failure capture, disk selection, rollback and hardware acceptance steps. A passing test suite, a generated synthetic EFI, or a real `ocvalidate` result is software evidence only; none proves physical boot or installation success.

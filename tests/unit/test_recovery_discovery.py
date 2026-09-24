@@ -32,19 +32,20 @@ def _response(ap: str) -> bytes:
     ).encode()
 
 
-def test_discovery_locks_only_an_exact_server_identified_target() -> None:
+def test_ap_product_identifier_never_proves_an_exact_build() -> None:
     calls: list[tuple[str, bytes]] = []
 
     def transport(url: str, _headers: object, data: bytes) -> DiscoveryResponse:
         calls.append((url, data))
         if url.endswith("/"):
             return DiscoveryResponse({"Set-Cookie": "session=opaque-token; Path=/"}, b"")
-        return DiscoveryResponse({}, _response("InstallAssistant 24A335"))
+        return DiscoveryResponse({}, _response("696-28424"))
 
     result = AppleRecoveryDiscovery(transport=transport).discover(_target())
-    assert result.state == RecoveryState.DISCOVERED
-    assert result.product is not None
-    assert result.product.target == _target()
+    assert result.state == RecoveryState.AMBIGUOUS
+    assert result.product is None
+    assert result.apple_product_id == "696-28424"
+    assert "without authenticated version/build metadata" in result.diagnostics[0]
     assert "token" not in str(result.to_dict()).lower()
     assert len(calls) == 2
     assert b"sn=00000000000000000" in calls[1][1]
@@ -54,22 +55,24 @@ def test_discovery_does_not_treat_default_product_as_exact() -> None:
     def transport(url: str, _headers: object, _data: bytes) -> DiscoveryResponse:
         if url.endswith("/"):
             return DiscoveryResponse({"Set-Cookie": "session=opaque"}, b"")
-        return DiscoveryResponse({}, _response("InstallAssistant"))
+        return DiscoveryResponse({}, _response("696-28424"))
 
     result = AppleRecoveryDiscovery(transport=transport).discover(_target())
     assert result.state == RecoveryState.AMBIGUOUS
     assert result.product is None
+    assert result.apple_product_id == "696-28424"
 
 
 def test_discovery_rejects_server_substitution_and_malformed_metadata() -> None:
     def substituted(url: str, _headers: object, _data: bytes) -> DiscoveryResponse:
         if url.endswith("/"):
             return DiscoveryResponse({"Set-Cookie": "session=opaque"}, b"")
-        return DiscoveryResponse({}, _response("InstallAssistant 24A348"))
+        return DiscoveryResponse({}, _response("696-28424"))
 
     result = AppleRecoveryDiscovery(transport=substituted).discover(_target())
-    assert result.state == RecoveryState.UNAVAILABLE
+    assert result.state == RecoveryState.AMBIGUOUS
     assert result.product is None
+    assert result.apple_product_id == "696-28424"
 
     with pytest.raises(ArtifactDownloadError, match="malformed line"):
         AppleRecoveryDiscovery._parse_key_values(b"AP: x\nnot metadata\n")
@@ -127,7 +130,7 @@ def test_discovery_rejects_missing_cookie_and_cancellation() -> None:
         return calls > 1
 
     def transport(url: str, _headers: object, _data: bytes) -> DiscoveryResponse:
-        return DiscoveryResponse({"Set-Cookie": "session=opaque"} if url.endswith("/") else {}, _response("InstallAssistant 24A335"))
+        return DiscoveryResponse({"Set-Cookie": "session=opaque"} if url.endswith("/") else {}, _response("696-28424"))
 
     with pytest.raises(ArtifactDownloadError, match="cancelled"):
         AppleRecoveryDiscovery(transport=transport, cancel=cancel_after_first).discover(_target())
@@ -234,14 +237,11 @@ def test_policy_loader_and_service_bind_exact_target() -> None:
 
     result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
         {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
-        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
+        b"" if url.endswith("/") else _response("696-28424"),
     ))
-    assert result.product is not None
-    digest = "c" * 64
-    binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
-    lock = service.lock(result, binding)
-    assert lock.state == RecoveryState.LOCKED
-    assert lock.product.to_dict()["image_session_ref"] == "<private>"
+    assert result.state == RecoveryState.AMBIGUOUS
+    assert result.apple_product_id == "696-28424"
+    assert result.product is None
 
 
 def test_service_rejects_non_discovered_result_and_evidence_rejects_untrusted_data() -> None:
@@ -260,11 +260,13 @@ def test_service_rejects_non_discovered_result_and_evidence_rejects_untrusted_da
 def test_recovery_lock_round_trips_without_private_session_values(tmp_path: Path) -> None:
     policy = load_recovery_policy()
     service = RecoveryService(policy)
-    result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
-        {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
-        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
-    ))
-    assert result.product is not None
+    product = RecoveryProduct(
+        _target(), "https://updates.cdn-apple.com/image", "a" * 64, 1,
+        "https://updates.cdn-apple.com/chunklist", "b" * 64, 1, "<private>", "<private>"
+    )
+    result = __import__("macloader.recovery.discovery", fromlist=["RecoveryDiscoveryResult"]).RecoveryDiscoveryResult(
+        RecoveryState.DISCOVERED, _target(), product, "f" * 64,
+    )
     digest = "f" * 64
     binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
     lock = service.lock(result, binding)
@@ -285,21 +287,24 @@ def test_recovery_service_blocks_unbounded_live_acquisition(tmp_path: Path) -> N
     service = RecoveryService(policy)
     result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
         {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
-        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
+        b"" if url.endswith("/") else _response("696-28424"),
     ))
     digest = "1" * 64
     binding = RecoveryBinding(_target().digest, "thinkpad-t480s", digest, digest, policy.digest, digest, digest, digest)
-    with pytest.raises(ArtifactDownloadError, match="asset sizes"):
+    with pytest.raises(ValueError, match="exact discovered"):
         service.acquire(result, binding, tmp_path)
 
 
 def test_recovery_service_rejects_stale_lock_bindings() -> None:
     policy = load_recovery_policy()
     service = RecoveryService(policy)
-    result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
-        {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
-        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
-    ))
+    product = RecoveryProduct(
+        policy.target, "https://updates.cdn-apple.com/image", "a" * 64, 1,
+        "https://updates.cdn-apple.com/chunklist", "b" * 64, 1, "<private>", "<private>"
+    )
+    result = __import__("macloader.recovery.discovery", fromlist=["RecoveryDiscoveryResult"]).RecoveryDiscoveryResult(
+        RecoveryState.DISCOVERED, policy.target, product, "f" * 64,
+    )
     base = RecoveryBinding(
         policy.target.digest,
         "thinkpad-t480s",
@@ -314,7 +319,6 @@ def test_recovery_service_rejects_stale_lock_bindings() -> None:
         service.lock(result, replace(base, target_digest="f" * 64))
     with pytest.raises(ValueError, match="policy"):
         service.lock(result, replace(base, policy_digest="f" * 64))
-    assert result.product is not None
     different_target = RecoveryTarget("sonoma", "macOS Sonoma", "14.0", "23F79")
     different_product = replace(result.product, target=different_target)
     different_result = replace(result, product=different_product)
@@ -352,12 +356,13 @@ def test_recovery_service_rejects_malformed_locks_and_unbounded_assets(tmp_path:
 def test_recovery_service_verify_binds_readback_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     policy = load_recovery_policy()
     service = RecoveryService(policy)
-    result = service.discover(transport=lambda url, _headers, _data: DiscoveryResponse(
-        {"Set-Cookie": "session=opaque"} if url.endswith("/") else {},
-        b"" if url.endswith("/") else _response("InstallAssistant 24A335"),
-    ))
-    assert result.product is not None
-    result = replace(result, product=replace(result.product, image_size_bytes=5))
+    product = RecoveryProduct(
+        policy.target, "https://updates.cdn-apple.com/image", "a" * 64, 5,
+        "https://updates.cdn-apple.com/chunklist", "b" * 64, 1, "<private>", "<private>"
+    )
+    result = __import__("macloader.recovery.discovery", fromlist=["RecoveryDiscoveryResult"]).RecoveryDiscoveryResult(
+        RecoveryState.DISCOVERED, policy.target, product, "f" * 64,
+    )
     binding = RecoveryBinding(
         policy.target.digest,
         "thinkpad-t480s",

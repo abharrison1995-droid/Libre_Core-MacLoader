@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -20,7 +21,18 @@ from macloader.exceptions import BuildPlanError
 
 
 ACPI_HEADER_SIZE = 36
+MAX_ACPI_TABLE_BYTES = 64 * 1024 * 1024
 TABLE_NAMES = ("dsdt.dat", "ssdt.dat", *tuple(f"ssdt{i}.dat" for i in range(1, 12)))
+
+
+def normalize_bios_binding(value: str) -> str:
+    """Normalize the provider's BIOS banner to the reviewed family/version form."""
+    text = value.strip().upper()
+    match = re.fullmatch(r"(?P<family>N\d{2}[A-Z0-9]+)\s*(?:\(\s*(?P<version>\d+(?:\.\d+)+)\s*\))?", text)
+    if match is None:
+        return re.sub(r"\s+", "", text)
+    version = match.group("version")
+    return f"{match.group('family')}-{version}" if version else match.group("family")
 
 
 @dataclass(frozen=True)
@@ -266,7 +278,14 @@ class AcpiProcessor:
     def _find_tables(table_dir: Path) -> Tuple[Path, ...]:
         if table_dir.is_symlink() or not table_dir.is_dir():
             raise BuildPlanError("Private ACPI capture directory is missing or unsafe")
-        paths = {path.name.lower(): path for path in table_dir.glob("*.dat")}
+        paths: Dict[str, Path] = {}
+        for path in table_dir.iterdir():
+            if path.suffix.lower() != ".dat":
+                continue
+            key = path.name.lower()
+            if key in paths:
+                raise BuildPlanError("Private ACPI evidence contains duplicate table names")
+            paths[key] = path
         missing = [name for name in TABLE_NAMES if name not in paths]
         if missing or len(paths) != len(TABLE_NAMES):
             raise BuildPlanError("Private ACPI evidence must contain exactly one DSDT and eleven SSDTs")
@@ -274,22 +293,50 @@ class AcpiProcessor:
 
     @staticmethod
     def _validate_table(path: Path) -> Dict[str, object]:
+        return AcpiProcessor._validate_table_bytes(AcpiProcessor._read_table_bytes(path), path.name)
+
+    @staticmethod
+    def _read_table_bytes(path: Path) -> bytes:
         if path.is_symlink() or not path.is_file():
             raise BuildPlanError(f"ACPI table is missing or unsafe: {path.stem}")
-        data = path.read_bytes()
+        fd: Optional[int] = None
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode) or status.st_size > MAX_ACPI_TABLE_BYTES:
+                raise BuildPlanError(f"ACPI table exceeds the safe size limit: {path.stem}")
+            chunks: list[bytes] = []
+            remaining = status.st_size
+            while remaining:
+                chunk = os.read(fd, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise BuildPlanError(f"ACPI table changed while being read: {path.stem}")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        except BuildPlanError:
+            raise
+        except OSError as exc:
+            raise BuildPlanError(f"ACPI table is missing or unsafe: {path.stem}") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def _validate_table_bytes(data: bytes, name: str) -> Dict[str, object]:
         if len(data) < ACPI_HEADER_SIZE:
-            raise BuildPlanError(f"ACPI table is truncated: {path.stem}")
+            raise BuildPlanError(f"ACPI table is truncated: {Path(name).stem}")
         signature = data[:4].decode("ascii", errors="replace")
         declared_length = int.from_bytes(data[4:8], "little")
         if declared_length != len(data):
-            raise BuildPlanError(f"ACPI table length does not match the private capture: {path.stem}")
+            raise BuildPlanError(f"ACPI table length does not match the private capture: {Path(name).stem}")
         if signature not in {"DSDT", "SSDT"} or sum(data) % 256 != 0:
-            raise BuildPlanError(f"ACPI table signature or checksum is invalid: {path.stem}")
+            raise BuildPlanError(f"ACPI table signature or checksum is invalid: {Path(name).stem}")
         return {
-            "name": path.name.lower(),
+            "name": Path(name).name.lower(),
             "signature": signature,
             "length": declared_length,
-            "sha256": _digest_file(path),
+            "sha256": hashlib.sha256(data).hexdigest(),
         }
 
     @staticmethod

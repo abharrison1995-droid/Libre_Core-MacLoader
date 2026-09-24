@@ -32,16 +32,21 @@ def test_tui_mounts_and_runs_shared_actions(t480s_baseline_fixture: Path, tmp_pa
     asyncio.run(exercise())
 
 
-def test_tui_resume_requires_explicit_fixture(tmp_path: Path, t480s_baseline_fixture: Path) -> None:
+def test_tui_resumes_from_private_snapshot_or_requires_matching_fixture(tmp_path: Path, t480s_baseline_fixture: Path) -> None:
     service = WorkflowService(store=ConfigurationStore(tmp_path / "configs"))
-    draft, _ = service.create(t480s_baseline_fixture)
+    draft, snapshot = service.create(t480s_baseline_fixture)
     service.save(draft)
 
     async def exercise() -> None:
         app = WorkflowApp(config_id=draft.configuration_id, service=service)
         async with app.run_test() as pilot:
             await pilot.pause()
-            assert "--fixture is required" in str(app.query_one("#workflow-status").render())
+            assert "resume snapshot is missing" in str(app.query_one("#workflow-status").render())
+        service.save_snapshot(draft, snapshot)
+        resumed_from_workspace = WorkflowApp(config_id=draft.configuration_id, service=service)
+        async with resumed_from_workspace.run_test() as pilot:
+            await pilot.pause()
+            assert resumed_from_workspace._snapshot is not None
         resumed = WorkflowApp(config_id=draft.configuration_id, fixture=t480s_baseline_fixture, service=service)
         async with resumed.run_test() as pilot:
             await pilot.pause()

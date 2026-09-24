@@ -18,7 +18,7 @@ from macloader.domain.contracts import canonical_json_digest
 from macloader.domain.evidence import EvidenceCompleteness
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.build.config import effective_profile_digest, load_reviewed_profile
-from macloader.build.acpi import AcpiProcessor
+from macloader.build.acpi import AcpiProcessor, normalize_bios_binding
 from macloader.evidence.acpi import AcpiEvidenceBundle
 from macloader.evidence.usb import UsbEvidenceSession
 
@@ -218,7 +218,7 @@ class ConfigurationService:
         for record in draft.evidence:
             if record.machine_snapshot_id != snapshot.snapshot_id:
                 issues.append(self._issue("EVIDENCE_SNAPSHOT_MISMATCH", f"evidence.{record.kind}", "Evidence belongs to a different hardware snapshot.", "Capture or import evidence from the active snapshot."))
-            if snapshot.bios_version and record.bios_binding != snapshot.bios_version:
+            if snapshot.bios_version and normalize_bios_binding(record.bios_binding) != normalize_bios_binding(snapshot.bios_version):
                 issues.append(self._issue("EVIDENCE_BIOS_MISMATCH", f"evidence.{record.kind}", "Evidence is bound to a different BIOS version.", "Capture evidence after confirming the active BIOS version."))
             source = self._evidence_source(record.private_ref)
             if source is None:
@@ -235,8 +235,8 @@ class ConfigurationService:
                 if (
                     actual.digest.lower() != record.digest.lower()
                     or actual.machine_snapshot_id != snapshot.snapshot_id
-                    or actual.bios_binding != snapshot.bios_version
-                    or actual.bios_binding != record.bios_binding
+                    or normalize_bios_binding(actual.bios_binding) != normalize_bios_binding(snapshot.bios_version or "")
+                    or normalize_bios_binding(actual.bios_binding) != normalize_bios_binding(record.bios_binding)
                     or actual.private_ref != record.private_ref
                 ):
                     raise ValueError("evidence digest, source reference, snapshot, or BIOS binding does not match")

@@ -28,9 +28,12 @@ toolchains:
       version: "20260408"
       source_url: "https://github.com/open-acpica/acpica/releases/download/20260408/acpica-unix-20260408.tar.gz"
       source_sha256: "e66ceb26d6d514ce164fe22f5a4f7ca165cc38349d7a97f41a21f19b364647a2"
-      size_bytes: 1465744
-      sha256: "4f0f732e7d417ef566e8fd2271f0a46e55efb921b1322a395e2a689ecb4a288d"
+      size_bytes: 1481696
+      sha256: "c40d93ada169e2685a48d34453c828847b354bb9fcf198608cc8f2eedbfbc5ab"
       invocation: "-v"
+      build:
+        kind: acpica-unix-iasl
+        source_root: acpica-unix-20260408
     identity_tool:
       file_name: macserial-1.0.7-linux
       version: "2.1.8"

@@ -1,8 +1,10 @@
 # T480s reference evidence — 2026-09-10
 
+> **Historical record only.** The raw private ACPI tables, USB capture, BIOS photographs, and integrity manifests described below are absent from the current checkout/workspace and cannot be verified here. Do not treat these observations as current machine evidence, as a present BIOS settings baseline, or as authority to build an install EFI. Re-capture and privately import evidence from the actual 20L8 / N22ET85W 1.62 machine before relying on it.
+
 ## Scope and privacy
 
-This record summarizes private physical-machine evidence for the first Sequoia candidate. Raw captures and ACPI tables remain under ignored `workspace/private-t480s-evidence/` and must not be committed or published. A BIOS photograph disclosed serial, UUID, MAC and OEM licence information in the private conversation; none of those values is reproduced here or required by policy.
+This document preserves a prior report of private physical-machine evidence for the first Sequoia candidate. Its former raw-capture location is not present in the current checkout. Any reacquired captures must remain in the ignored private workspace and must not be committed or published. Do not include serial, UUID, MAC, OEM licence, or other identifying values in a public artifact.
 
 Target: macOS Sequoia 15.0 build 24A335 candidate. This is evidence for implementation, not a successful macOS installation or a `SUPPORTED` promotion.
 
