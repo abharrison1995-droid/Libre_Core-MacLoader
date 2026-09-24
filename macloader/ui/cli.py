@@ -664,27 +664,31 @@ def recovery_list_cmd(json_mode: bool) -> None:
 def recovery_resolve_cmd(json_mode: bool) -> None:
     """Query Apple for the exact frozen target; a default/latest response is not accepted."""
     service = WorkflowService()
+
+    def show_gate() -> None:
+        # Both a response and a transport failure are recorded as current
+        # evidence; show what the shared preflight now derives from it.
+        readiness = service.recovery_readiness()
+        if not json_mode:
+            console.print(escape(f"Preflight exact_recovery: {readiness.state}: {readiness.summary}"))
+            console.print(escape(f"Next action: {readiness.action}"))
+
     try:
-        try:
-            result = service.discover_recovery()
-        finally:
-            # Both a response and a transport failure are recorded as current
-            # evidence; show what the shared preflight now derives from it.
-            readiness = service.recovery_readiness()
-        payload = {**result.to_dict(), "readiness": readiness.__dict__}
-        if json_mode:
-            click.echo(json.dumps(payload, indent=2))
-        else:
-            console.print(f"Recovery discovery: {result.state.value}")
-            for diagnostic in result.diagnostics:
-                console.print(f"- {diagnostic}")
-            console.print(f"Preflight exact_recovery: {readiness.state}: {readiness.summary}")
-            console.print(f"Next action: {readiness.action}")
-        if result.state != RecoveryState.DISCOVERED:
-            raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
+        result = service.discover_recovery()
     except (MacLoaderError, OSError, ValueError) as exc:
-        err_console.print(f"[bold red]Recovery Discovery Error:[/bold red] {exc}")
+        err_console.print(escape(f"Recovery Discovery Error: {exc}"))
+        show_gate()
         raise click.ClickException(str(exc)) from exc
+    readiness = service.recovery_readiness()
+    if json_mode:
+        click.echo(json.dumps({**result.to_dict(), "readiness": readiness.__dict__}, indent=2))
+    else:
+        console.print(f"Recovery discovery: {result.state.value}")
+        for diagnostic in result.diagnostics:
+            console.print(escape(f"- {diagnostic}"))
+        show_gate()
+    if result.state != RecoveryState.DISCOVERED:
+        raise click.ClickException("The exact Recovery target was not identified; no fallback was selected")
 
 
 @recovery_group.command("status")
@@ -699,9 +703,9 @@ def recovery_status_cmd(json_mode: bool) -> None:
     if json_mode:
         click.echo(json.dumps(readiness.__dict__, indent=2))
     else:
-        console.print(f"exact_recovery: {readiness.state}")
-        console.print(readiness.summary)
-        console.print(f"Next action: {readiness.action}")
+        console.print(escape(f"exact_recovery: {readiness.state}"))
+        console.print(escape(readiness.summary))
+        console.print(escape(f"Next action: {readiness.action}"))
 
 
 @recovery_group.command("download")

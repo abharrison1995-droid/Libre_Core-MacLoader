@@ -26,7 +26,7 @@ Can MacLoader use an Apple-authoritative, authenticated method to prove that a R
 
 ### Route 1: Recovery discovery protocol
 
-The pinned OpenCore `macrecovery.py` sends a board ID, an MLB, and an `os` value of `default` or `latest` to `http://osrecovery.apple.com/`. Apple returns only these keys: `AP` (product), `AU`/`AH`/`AT` (image URL, hash, token), and `CU`/`CH`/`CT` (chunklist URL, hash, token). The protocol has no field that returns a version or build, and it has no request parameter that selects one. The server returns the Recovery it currently serves for that board. It cannot be asked for a historical build. The 2026-09-11 query returned product `696-28424` without any build. MacLoader classifies that result as `AMBIGUOUS`, and `macloader/recovery/discovery.py` never returns `DISCOVERED`.
+The pinned OpenCore `macrecovery.py` sends a board ID, an MLB, and an `os` value of `default` or `latest` to `http://osrecovery.apple.com/`. Apple returns only these keys: `AP` (product), `AU`/`AH`/`AT` (image URL, hash, token), and `CU`/`CH`/`CT` (chunklist URL, hash, token). The protocol has no field that returns a version or build, and it has no request parameter that selects one. The only selector is `default` or `latest`, so the pinned protocol offers no way to ask for build 24A335 specifically. The 2026-09-11 query returned product `696-28424` without any build. MacLoader classifies that result as `AMBIGUOUS`, and `macloader/recovery/discovery.py` never returns `DISCOVERED`.
 
 MacLoader's policy requires HTTPS. The HTTPS form of the exchange returned HTTP 405, so the protocol cannot be used even as an unbound query without dropping to plaintext. Plaintext is prohibited.
 
@@ -67,5 +67,5 @@ Any one of these requires fresh research and review before code changes:
 
 ## Verification
 
-- `tests/unit/test_recovery_evidence.py` covers forged records (exact-state claims, both resealed and edited), corrupted and unexpected fields, unredacted diagnostics, stale, future-dated and mismatched-policy/target records, broad file permissions, and cancellation. It also checks that preflight reports current evidence instead of a fixed message.
+- `tests/unit/test_recovery_evidence.py` covers forged records (exact-state claims, both resealed and edited), corrupted and unexpected fields, unredacted diagnostics, stale, future-dated and mismatched-policy/target records, broad file permissions, and cancellation after a successful response or with a cancellation error. It also checks that preflight reports current evidence instead of a fixed message.
 - The existing discovery tests (`tests/unit/test_recovery_discovery.py`) still show that an `AP` product ID alone is `AMBIGUOUS`.

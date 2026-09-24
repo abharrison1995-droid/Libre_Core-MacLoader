@@ -702,9 +702,13 @@ class WorkflowService:
                 result = self.orchestrator.discover_recovery(transport=transport, cancel=cancel)
         except (MacLoaderError, OSError) as exc:
             if not (cancel and cancel()) and "cancelled" not in str(exc).lower():
-                self._record_recovery_evidence(
-                    RecoveryDiscoveryEvidence.from_error(exc, policy.digest, policy.target.digest)
-                )
+                try:
+                    self._record_recovery_evidence(
+                        RecoveryDiscoveryEvidence.from_error(exc, policy.digest, policy.target.digest)
+                    )
+                except (OSError, ValueError) as record_error:
+                    # Never let a recording problem mask the discovery error.
+                    exc.add_note(f"Recovery evidence could not be recorded: {record_error}")
             raise
         if not (cancel and cancel()):
             self._record_recovery_evidence(RecoveryDiscoveryEvidence.from_result(result, policy.digest))
@@ -720,11 +724,14 @@ class WorkflowService:
         path = Path(DEFAULT_RECOVERY_EVIDENCE_PATH)
         data: Any = None
         load_error: Optional[str] = None
-        if path.exists() or path.is_symlink():
-            try:
+        try:
+            if path.exists() or path.is_symlink():
+                for ancestor in path.parents:
+                    if ancestor.is_symlink():
+                        raise ValueError("Recovery evidence path contains a symlink boundary")
                 data = self._read_private_json(path, "Recovery discovery evidence")
-            except ValueError as exc:
-                load_error = str(exc)
+        except (OSError, ValueError) as exc:
+            load_error = str(exc)
         return assess_recovery_evidence(
             data, policy_digest=policy.digest, target_digest=policy.target.digest, load_error=load_error
         )

@@ -163,15 +163,37 @@ def test_unreadable_evidence_is_reported_without_trusting_it() -> None:
 
 
 def test_evidence_redacts_tokens_and_bounds_diagnostics() -> None:
+    long_text = "word " * 100 + "session=abc AssetToken: xyz AT: tok osrecovery.apple.com/x?y=1 /home/me/private\x00end"
     result = RecoveryDiscoveryResult(
         RecoveryState.FAILED, TARGET, None, "b" * 64,
-        ("cookie session=abc AssetToken=xyz https://osrecovery.apple.com/x\\x00" + "y" * 500,) * 6,
+        ("cookie session=abc AssetToken=xyz https://osrecovery.apple.com/x\x00", long_text) * 3,
     )
     evidence = RecoveryDiscoveryEvidence.from_result(result, POLICY.digest, NOW)
     assert len(evidence.diagnostics) == 4
     text = " ".join(evidence.diagnostics)
-    assert "abc" not in text and "xyz" not in text and "apple.com" not in text
+    assert "abc" not in text and "xyz" not in text and "apple.com" not in text and "\x00" not in text
+    assert max(len(item) for item in evidence.diagnostics) >= 235
     assert all(len(item) <= 240 for item in evidence.diagnostics)
+    tail = " ".join(RecoveryDiscoveryEvidence.from_result(
+        RecoveryDiscoveryResult(RecoveryState.FAILED, TARGET, None, "b" * 64, (long_text[400:],)), POLICY.digest, NOW
+    ).diagnostics)
+    for secret in ("abc", "xyz", "tok", "apple.com", "/home/me"):
+        assert secret not in tail
+
+
+def test_diagnostic_cleaning_is_stable_at_the_truncation_boundary() -> None:
+    message = "x" * 239 + " " + "y" * 10
+    evidence = RecoveryDiscoveryEvidence.from_error(Exception(message), POLICY.digest, POLICY.target.digest, NOW)
+    assert evidence.diagnostics == ("x" * 239,)
+    result = RecoveryDiscoveryResult(RecoveryState.FAILED, TARGET, None, "b" * 64, (message,))
+    assert RecoveryDiscoveryEvidence.from_result(result, POLICY.digest, NOW).diagnostics == ("x" * 239,)
+
+
+def test_impossible_dates_are_ignored_not_crashing() -> None:
+    forged = _record()
+    forged["observed_at"] = "2026-02-30T00:00:00Z"
+    readiness = _assess(forged)
+    assert readiness.state == "blocked" and "ignored" in readiness.summary
 
 
 def test_workflow_records_current_discovery_and_preflight_uses_it(
@@ -230,6 +252,43 @@ def test_workflow_ignores_evidence_with_broad_permissions(
     _isolated_recovery_evidence.chmod(0o644)
     readiness = service.recovery_readiness()
     assert readiness.state == "blocked" and "ignored" in readiness.summary
+
+
+def test_cli_resolve_shows_the_gate_after_a_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing(_self: Orchestrator) -> RecoveryDiscoveryResult:
+        raise ArtifactDownloadError("Recovery discovery failed: HTTPS returned HTTP 405 [/red]")
+
+    monkeypatch.setattr(Orchestrator, "discover_recovery", failing)
+    resolved = CliRunner().invoke(cli, ["recovery", "resolve"])
+    assert resolved.exit_code != 0
+    assert "Preflight exact_recovery: externally_blocked" in resolved.output
+    assert "HTTP 405" in resolved.output
+
+
+def test_recording_failure_does_not_mask_the_discovery_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = WorkflowService()
+
+    def failing(_self: Orchestrator) -> RecoveryDiscoveryResult:
+        raise ArtifactDownloadError("Recovery discovery failed: HTTPS returned HTTP 405")
+
+    def broken(_evidence: RecoveryDiscoveryEvidence) -> None:
+        raise ValueError("private workspace contains a symlink boundary")
+
+    monkeypatch.setattr(Orchestrator, "discover_recovery", failing)
+    monkeypatch.setattr(service, "_record_recovery_evidence", broken)
+    with pytest.raises(ArtifactDownloadError, match="HTTP 405"):
+        service.discover_recovery()
+
+
+def test_unreadable_evidence_directory_is_reported_as_blocked(
+    monkeypatch: pytest.MonkeyPatch, _isolated_recovery_evidence: Path
+) -> None:
+    def denied(_self: Path) -> bool:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "exists", denied)
+    readiness = WorkflowService().recovery_readiness()
+    assert readiness.state == "blocked" and "denied" in readiness.summary
 
 
 def test_cli_resolve_and_status_show_evidence_derived_gate(monkeypatch: pytest.MonkeyPatch) -> None:

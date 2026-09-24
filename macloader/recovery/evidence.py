@@ -33,13 +33,20 @@ _KEYS = {
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _PRODUCT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_SECRET_RE = re.compile(r"(?i)(session=|assettoken=|cookie|https?://)\S*")
+_SECRET_RE = re.compile(
+    r"(?i)(?:https?://\S*|\b(?:session|assettoken|cookie|set-cookie|AT|CT)\s*[:=]\s*\S*"
+    r"|\S*\b(?:osrecovery\.apple\.com|cdn-apple\.com)\S*|(?<![\w.])/\S+)"
+)
 
 
 def _clean_diagnostic(text: str) -> str:
-    """Bound one diagnostic and drop tokens, cookies and URLs."""
+    """Bound one diagnostic and drop tokens, cookies, Apple URLs and local paths.
+
+    The result is idempotent: truncation happens before the final strip, so a
+    cleaned diagnostic always passes the record's own redaction check.
+    """
     printable = "".join(character if " " <= character <= "~" else " " for character in str(text))
-    return _SECRET_RE.sub("<redacted>", printable).strip()[:MAX_DIAGNOSTIC_CHARS]
+    return _SECRET_RE.sub("<redacted>", printable).strip()[:MAX_DIAGNOSTIC_CHARS].strip()
 
 
 def _timestamp(value: datetime) -> str:
@@ -65,6 +72,10 @@ class RecoveryDiscoveryEvidence:
             raise ValueError("Recovery evidence schema is unsupported")
         if not _TIMESTAMP_RE.fullmatch(self.observed_at):
             raise ValueError("Recovery evidence timestamp is malformed")
+        try:
+            self.observed_datetime()
+        except ValueError as exc:
+            raise ValueError("Recovery evidence timestamp is not a real date") from exc
         if not _DIGEST_RE.fullmatch(self.policy_digest) or not _DIGEST_RE.fullmatch(self.target_digest):
             raise ValueError("Recovery evidence policy or target digest is malformed")
         if self.outcome not in _OUTCOMES:
