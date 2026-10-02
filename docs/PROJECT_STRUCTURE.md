@@ -1,79 +1,34 @@
-# Project Structure
+# Project structure
 
-This is the intended **starting shape**, not a requirement to create every Python module before it has real behaviour.
+This is the checked-in structure, not a proposed module map. Use [Architecture](ARCHITECTURE.md) for the responsibilities and [Project status](PROJECT_STATUS.md) for current readiness.
 
 ```text
 Libre_Core-MacLoader/
-├── START_HERE.md
-├── README.md
-├── pyproject.toml                  # agent creates during v0.0.1
-├── LICENSE                         # choose/confirm before publishing
-├── .gitignore
-│
+├── README.md, START_HERE.md, pyproject.toml
 ├── macloader/
-│   ├── domain/
-│   ├── detection/
-│   ├── database/
-│   │   └── data/
-│   │       ├── models/
-│   │       ├── components/
-│   │       └── macos/
-│   ├── compatibility/
-│   ├── dependencies/
-│   ├── opencore/
-│   ├── acpi/
-│   │   └── sources/
-│   ├── recovery/
-│   ├── usb/
-│   ├── ui/
-│   └── diagnostics/
-│
-├── tests/
-│   ├── fixtures/
-│   │   ├── t480/
-│   │   ├── t480s/
-│   │   └── unsupported/
-│   ├── unit/
-│   ├── integration/
-│   └── golden/
-│
-├── docs/
-│   ├── ENGINEERING_SPEC_V0.1.md
-│   ├── PROJECT_STRUCTURE.md
-│   ├── ARCHITECTURE.md
-│   ├── SUPPORT_MATRIX.md
-│   ├── RESEARCH_LEDGER.md
-│   ├── HARDWARE_ACCEPTANCE.md
-│   └── DECISIONS.md
-│
-├── prompts/
-│   └── CODEX_MASTER_PROMPT_V0.0.1-V0.0.3.md
-│
-└── workspace/
+│   ├── app.py, config.py, orchestrator.py
+│   ├── domain/             typed hardware, evidence, plans, config, contracts
+│   ├── detection/          Linux, Windows, fixture, normalization, sanitization
+│   ├── database/data/      YAML policy, schemas, profiles, tools, dependencies
+│   ├── compatibility/      model matching and compatibility reports
+│   ├── configuration/      schema, migration, persistence and evaluation
+│   ├── workflow/           shared CLI/TUI workflow services
+│   ├── dependencies/       resolution, downloads, archive safety and cache
+│   ├── build/              EFI, config and ACPI generation/validation
+│   ├── toolchain/          trusted tool acquisition and selection
+│   ├── recovery/           discovery, acquisition and verification
+│   ├── removable/          device adapters, media planning and writer guards
+│   ├── identity/           private SMBIOS identity lifecycle
+│   ├── evidence/           ACPI and USB evidence models
+│   ├── diagnostics/        logging and diagnostics
+│   └── ui/                 Click CLI and Textual TUI
+├── tests/                  unit/integration tests and sanitized fixtures
+├── docs/                   status, design, research, safety and acceptance
+├── prompts/                archived development prompts and handoffs
+├── tools/                  T480s evidence collection scripts
+└── workspace/              ignored local state; not shipped or committed
 ```
 
-## Relationship to Libre_Core-AutoLoader
+`workspace/` is excluded from Git except for `.gitkeep`. Configuration snapshots, private evidence and identities, tool/download caches, generated EFI, and media images belong in the configured user workspace rather than this checkout.
 
-MacLoader is a **sibling**, not a fork.
-
-Codex should inspect AutoLoader for reusable patterns, especially:
-
-- packaging conventions;
-- CLI/TUI style;
-- hardware detection abstractions;
-- model/database separation;
-- orchestration patterns;
-- logging;
-- tests;
-- host/USB workflow concepts.
-
-Do not mechanically copy:
-
-- firmware flashing modules;
-- ROM logic;
-- firmware model records;
-- Coreboot/Libreboot-specific state;
-- firmware safety assumptions;
-- project history.
-
-If a generic utility is genuinely worth sharing, first copy/adapt it into MacLoader with provenance documented. Only consider a shared library after duplication becomes real rather than hypothetical.
+MacLoader remains a sibling project to Libre_Core-AutoLoader. Its current implementation is native to this repository; the earlier design notes about candidate reuse are historical and do not imply a shared runtime dependency.

@@ -1,5 +1,7 @@
 # Research Ledger
 
+This is a dated evidence archive. Each item records its own observation date and scope; historical test counts, tool states, and upstream responses are not a live readiness report. See [Project status](PROJECT_STATUS.md) for the current checkout review.
+
 Use one section per meaningful Hackintosh/platform decision.
 
 ---

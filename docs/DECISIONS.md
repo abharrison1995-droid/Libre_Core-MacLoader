@@ -8,14 +8,14 @@ Use schema-driven Textual menus and Click commands over shared Orchestrator serv
 
 The eight approved defaults are:
 
-1. Sequoia first on the user's reference T480s; exact version/build and hardware scope still require concrete confirmation.
+1. Sequoia first on the reference T480s. The current candidate is machine type 20L8 / BIOS N22ET85W 1.62 / Sequoia 15.0 build 24A335; optional variants do not inherit its qualification.
 2. Reviewed experimental choices require explicit acknowledgement and all applicable evidence, validation and media gates.
 3. Advanced controls expose reviewed presets and bounded values only.
 4. Unknown optional devices remain visibly unsupported; proceeding requires a reviewed safe installation policy. Unknown critical hardware blocks.
 5. Recovery target mismatches block progression and require explicit reselection.
 6. Deliberate machine-associated identity reuse, protected local storage and separate private backup; no identity secrets in shareable configurations.
 7. Historical policy replay is deferred; saved configurations are re-evaluated against current policy.
-8. Windows qualification first, Linux second; Textual installed by default. Media writing remains disabled on each host until its adapter is qualified.
+8. Windows physical-media qualification first, Linux second; Textual installed by default. Linux software preparation does not change that order. Media writing remains disabled on each host until its adapter is physically qualified.
 
 These decisions must not be requested again absent a material proposed change. They do not authorize destructive media operations without the existing fresh target confirmation, nor do they promote any machine to SUPPORTED. Detection, confirmation, evidence completeness, software validation and physical acceptance remain distinct.
 

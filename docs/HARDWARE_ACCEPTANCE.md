@@ -2,7 +2,9 @@
 
 ## ThinkPad T480s Reference Machine
 
-**State:** Pending Physical Acceptance (Host is non-ThinkPad `AX16Pro`; testing verified via sanitized fixtures).
+**Candidate:** ThinkPad T480s 20L8 / BIOS N22ET85W 1.62 / Sequoia 15.0 build 24A335.
+
+**State:** No physical acceptance is recorded. Fixture/software verification does not count as physical acceptance; see [current project status](PROJECT_STATUS.md) and the [first-install runbook](T480S_FIRST_INSTALL_RUNBOOK.md).
 
 Before storing a live probe as a test fixture, sanitize:
 - system serial number (`serial_number`);
@@ -20,13 +22,13 @@ Before storing a live probe as a test fixture, sanitize:
 - [ ] Installed macOS boots from generated OpenCore EFI
 - [ ] Intel UHD 620 graphics acceleration (Metal & QE/CI)
 - [ ] Native display resolution & backlight brightness control
-- [ ] Keyboard backlighting & hotkeys
+- [ ] Keyboard and hotkeys (backlight only if present)
 - [ ] Trackpad multitouch gestures
 - [ ] TrackPoint pointing & physical buttons
 - [ ] Battery status and power management reporting
 - [ ] Internal Realtek ALC257 speakers and headphone jack
 - [ ] Internal microphone
-- [ ] Intel Gigabit Ethernet (I219-LM)
+- [ ] Intel Gigabit Ethernet (reference evidence: I219-V)
 - [ ] Intel Wi-Fi (AC 8265) connectivity
 - [ ] Intel Bluetooth pairing & audio
 - [ ] USB 3.0 Type-A ports

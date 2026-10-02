@@ -1,43 +1,34 @@
-# Support Matrix
+# Support and qualification matrix
 
-> This file describes **MacLoader-verified support**, not everything that may be possible in the wider Hackintosh community.
+This matrix distinguishes implemented software policy from physical acceptance. A YAML record, fixture, generated EFI, successful structural check, or `ocvalidate` result does not establish hardware support. See [Project status](PROJECT_STATUS.md) for the latest observed blockers.
 
-## Status Meanings
+## Status meanings
 
-- `SUPPORTED` — Passed defined MacLoader physical hardware acceptance suite.
-- `CONDITIONAL` — Usable with a documented limitation or required configuration/workaround.
-- `EXPERIMENTAL` — Implemented and researched but not yet fully physically accepted.
-- `BLOCKED` — Known incompatible or deliberately unsupported by MacLoader.
-- `UNKNOWN` — Insufficient evidence to determine compatibility.
+- `SUPPORTED` — the defined physical acceptance suite passed for the exact machine, BIOS, OS build, and configuration.
+- `EXPERIMENTAL` — a reviewed software profile or compatibility path exists, but physical acceptance is incomplete.
+- `CONDITIONAL` — a reviewed limitation or workaround applies; it does not itself mean physical acceptance.
+- `BLOCKED` — MacLoader deliberately prevents progression for the relevant evidence/policy state.
+- `UNKNOWN` — current evidence is insufficient.
 
----
+## Model and target scope
 
-## Supported Laptop Models
+| Scope | Software available | Current qualification |
+|---|---|---|
+| ThinkPad T480s 20L8, BIOS N22ET85W 1.62, Sequoia 15.0 build 24A335 | Reviewed experimental profile, configuration workflow, EFI build/validation path | `EXPERIMENTAL`; exact Recovery is externally blocked; physical media and machine acceptance are pending. |
+| Other T480s machine types or BIOS versions | Model and compatibility policy records | Not inherited from the 20L8 candidate; no physical acceptance claim. |
+| ThinkPad T480 20L5/20L6 | Compatibility policy and software fixtures | No reviewed T480 EFI candidate in the current guided profile set; not physically accepted. |
+| Sonoma or Tahoe | Compatibility/dependency policy notes remain in the repository | No exact selectable release in the current guided release catalog; no current EFI or physical qualification claim. Tahoe is macOS 26. |
+| Other PCs | Detection may identify hardware, but policy is conservative | No supported installation profile. |
 
-| Model | Machine Types | Sonoma (14.x) | Sequoia (15.x) | Tahoe (16.x) | Physical Acceptance |
-|---|---|---|---|---|---|
-| **Lenovo ThinkPad T480s** | `20L7`, `20L8` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Pending (Fixture verified) |
-| **Lenovo ThinkPad T480** | `20L5`, `20L6` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Pending (Fixture verified) |
-| **ThinkPad X1 Carbon 6th** | `20KH`, `20KG` | `BLOCKED` | `BLOCKED` | `BLOCKED` | Deliberately out of scope for v0.1 |
-| **Non-Lenovo PCs** | *Any* | `BLOCKED` | `BLOCKED` | `BLOCKED` | Unsupported |
+## Current release and device gates
 
----
+| Area | Current state |
+|---|---|
+| Exact target | Sequoia 15.0 / build 24A335 is frozen for the first candidate. No substitute target is accepted implicitly. |
+| Toolchain | Catalog-pinned OpenCore 1.0.7, `ocvalidate`, iASL, and macserial can be verified and acquired. Current observed local toolchain state is recorded in [Project status](PROJECT_STATUS.md). |
+| EFI | Profile-driven generation and validation are implemented. A software-valid EFI is not evidence of physical boot. |
+| Recovery | Discovery does not authenticate the product-to-build relationship for 24A335; acquisition must remain blocked without exact authenticated evidence. |
+| USB media | Device inspection and non-destructive planning are implemented. Production physical writing remains disabled until host/backend qualification and a sacrificial-device campaign pass. |
+| Physical acceptance | No picker, Recovery, install, installed-boot, or complete hardware acceptance record exists for this candidate. |
 
-## Component Matrix
-
-| Category | Component / Device | Identifier(s) | Sonoma | Sequoia | Tahoe | Notes |
-|---|---|---|---|---|---|---|
-| **CPU** | Intel Core 8th Gen (KBL-R) | i5-8250U, i5-8350U, i7-8550U, i7-8650U | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Native 4C/8T support |
-| **iGPU** | Intel UHD Graphics 620 | `8086:5917`, `8086:3ea0` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Requires WhateverGreen |
-| **dGPU** | Nvidia GeForce MX150 | `10de:1d10`, `10de:1d12` | `CONDITIONAL` | `CONDITIONAL` | `CONDITIONAL` | Must be disabled via SSDT / `-wegnoegpu` |
-| **Audio** | Realtek ALC257 | `10ec:0257`, `8086:9d71` | `EXPERIMENTAL` | `EXPERIMENTAL` | `CONDITIONAL` | AppleHDA removed in Tahoe |
-| **Ethernet** | Intel I219-LM / I219-V | `8086:15d7`, `8086:15d8` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Supported via IntelMausi |
-| **Wi-Fi** | Intel AC 8265 / 9560 / AX200 | `8086:24fd`, `8086:2526`, `8086:2723` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | OpenIntelWireless; No native AirDrop |
-| **Bluetooth** | Intel Bluetooth Controller | `8087:0a2b`, `8087:0aaa` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | IntelBluetoothFirmware + BlueToolFixup |
-| **Storage** | Samsung PM981 / PM981a | `144d:a808`, `144d:a809` | `CONDITIONAL` | `CONDITIONAL` | `CONDITIONAL` | Requires NVMeFix; power stability warning |
-| **Storage** | Standard NVMe / SATA SSD | PCI Class `0108` / `0106` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Standard native storage |
-| **Touchscreen** | ELAN / Synaptics Touchscreen | `04f3:*`, I2C Bus | `EXPERIMENTAL` | `EXPERIMENTAL` | `CONDITIONAL` | VoodooI2C + VoodooI2CHID |
-| **Trackpad/TrackPoint** | ThinkPad UltraNav | SynPS/2, TPPS/2 | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | VoodooPS2Controller / VoodooRMI |
-| **Thunderbolt** | Intel JHL6240 (Alpine Ridge) | `8086:15bf`, `8086:15d3` | `EXPERIMENTAL` | `EXPERIMENTAL` | `EXPERIMENTAL` | Thunderbolt 3 Controller |
-
-> Note: Do not promote any component to `SUPPORTED` until the physical acceptance checklist is executed on physical hardware.
+No row is currently `SUPPORTED`. Update this matrix only from evidence recorded for the exact tested scope; do not generalize acceptance across BIOS versions, machine types, OS builds, or optional hardware.

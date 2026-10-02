@@ -4,13 +4,13 @@
 
 This runbook is for the reference ThinkPad T480s machine type **20L8**, BIOS **N22ET85W 1.62**, with the frozen target **macOS Sequoia 15.0, build 24A335**. Do not change the target without a separate user decision.
 
-The source tree currently has no private machine ACPI capture, selected real SMBIOS identity, exact verified Recovery payload, or physically qualified USB writer. Apple Recovery discovery returned HTTP 405 over HTTPS; the Apple `AP` field supplies a product identifier and does not prove a macOS build. Software and disposable-image results cannot close those gates. **No physical media campaign or first boot is ready to start yet.** The next Recovery artifact needed is an Apple-authoritative authenticated binding to build 24A335 or an Apple-signed Recovery payload independently bound to that build.
+No private machine ACPI capture, selected real SMBIOS identity, or exact verified Recovery payload is checked into this checkout; neither platform has a physically qualified USB writer. On 2026-10-02, `macloader toolchain status --json` reported a verified Linux x86_64 toolchain (OpenCore/`ocvalidate` 1.0.7, iASL 20260408, macserial 2.1.8). `macloader preflight --json` without a selected configuration returned `blocked`; that invocation did not establish configuration-bound ACPI, USB, identity, or dependency readiness in the per-user workspace. Apple Recovery discovery returned HTTPS 405; the Apple `AP` field supplies a product identifier and does not prove a macOS build. Software and disposable-image results cannot close these gates. **No physical media campaign or first boot is ready to start yet.** The next Recovery evidence needed is an Apple-authoritative authenticated binding to build 24A335 or an Apple-signed Recovery payload independently bound to that build.
 
 The earlier [reference evidence note](T480S_REFERENCE_EVIDENCE_2026-09-10.md) is historical. Its raw ACPI files and other private captures are absent from this checkout, so its measurements and firmware observations are not current evidence for this installation.
 
 ## Before a preparation session
 
-Use Linux as the first preparation host. Install MacLoader and acquire the catalog-pinned tools:
+Use Linux as the first software-preparation host. Physical media qualification still follows the accepted Windows-first, Linux-second order in [ADR-007](DECISIONS.md#adr-007--guided-t480s-configuration-workflow). Install MacLoader and acquire the catalog-pinned tools:
 
 ```bash
 python -m pip install -e ".[dev]"
