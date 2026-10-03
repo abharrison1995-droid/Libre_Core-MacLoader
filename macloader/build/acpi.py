@@ -12,6 +12,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -403,7 +404,7 @@ class AcpiProcessor:
             return
         try:
             pid = getattr(process, "pid", None)
-            if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            if sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
             else:
                 process.terminate()
@@ -411,12 +412,12 @@ class AcpiProcessor:
         except (OSError, subprocess.TimeoutExpired):
             try:
                 pid = getattr(process, "pid", None)
-                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                if sys.platform == "win32" and isinstance(pid, int) and pid > 0:
                     subprocess.run(
                         ["taskkill", "/T", "/F", "/PID", str(pid)],
                         capture_output=True, check=False,
                     )
-                elif os.name != "nt" and isinstance(pid, int) and pid > 0:
+                elif sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 else:
                     process.kill()

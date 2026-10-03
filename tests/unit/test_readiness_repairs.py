@@ -828,7 +828,7 @@ def test_windows_external_cleanup_terminates_process_tree_after_timeout(
 
     commands: list[list[str]] = []
     with monkeypatch.context() as patch:
-        patch.setattr(os, "name", "nt")
+        patch.setattr(sys, "platform", "win32")
         patch.setattr(subprocess, "run", lambda args, **kwargs: commands.append(args))
         for cleanup in (AcpiProcessor._terminate_process, EfiBuilder._terminate_process):
             process = WindowsProcess()
