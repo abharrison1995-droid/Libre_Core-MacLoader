@@ -140,3 +140,22 @@ def test_quit_between_worker_scheduling_and_entry_preserves_cancellation(tmp_pat
             assert observed == [True]
             assert app._exit_after_work and exits == [False]
     asyncio.run(exercise())
+
+
+def test_late_selection_message_after_unmount_is_harmless(tmp_path: Path) -> None:
+    from textual.widgets import Select
+    app = GuidedApp(AutoloaderService(root=tmp_path))
+    app._choices = ("USB A", "USB B", "USB C")
+    selector = Select[str]([], id="media-selection")
+    app.on_select_changed(Select.Changed(selector, "USB A"))
+    assert not app._busy
+
+    async def empty_screen() -> None:
+        app = GuidedApp(AutoloaderService(root=tmp_path))
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._choices = ("USB A", "USB B", "USB C")
+            await app.query_one("#choice-one").remove()
+            app.on_select_changed(Select.Changed(selector, "USB A"))
+    asyncio.run(empty_screen())

@@ -2,7 +2,7 @@
 from typing import Optional
 
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Footer, Header, Select, Static
 
@@ -112,7 +112,12 @@ class GuidedApp(App[bool]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "media-selection" and len(self._choices) > 2:
-            self.query_one("#choice-one", Button).disabled = self._busy or not (isinstance(event.value, str) and event.value in self._choices)
+            try:
+                buttons = list(self.query("#choice-one").results(Button))
+            except ScreenStackError:
+                return
+            if buttons:
+                buttons[0].disabled = self._busy or not (isinstance(event.value, str) and event.value in self._choices)
 
     def action_quit(self) -> None:
         if self._busy:

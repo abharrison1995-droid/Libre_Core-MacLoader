@@ -223,7 +223,7 @@ status page. The two pre-existing owner documentation edits remain uncommitted a
 preserved; they are not bundled into implementation commits. The previously
 corrected owner layout-86 YAML was integrated separately at cbc0a05.
 
-Final local integration gate: 585 tests passed, 79.49% branch coverage; native and
+Final local integration gate: 586 tests passed, 79.50% branch coverage; native and
 Windows-target mypy passed (140 files); wheel and sdist built and their
 outside-checkout smoke checks passed. The explicit real pinned-tool reference
 EFI/ocvalidate test also passed (1 test). Hosted verification follows below.
@@ -232,3 +232,11 @@ The final scoped reviewer caught and rechecked a worker-entry cancellation race.
 Cancellation now resets on the UI thread before scheduling, never at worker
 entry; a regression quits between scheduling and entry and verifies the cancel
 signal survives. Recheck disposition: **ship**.
+
+Corrected candidate run 37139038655 exposed a Windows/Python 3.11 late
+Select message after screen unmount. The handler now ignores a missing native
+button during teardown; a direct unmounted-message regression covers this
+lifecycle boundary. Publication again remained blocked until all cells pass.
+The teardown regression covers both no screen stack and an existing screen with
+its button removed. Scoped recheck found no visual or choice regression. Final
+hosted run links will be retained in draft PR #1.
