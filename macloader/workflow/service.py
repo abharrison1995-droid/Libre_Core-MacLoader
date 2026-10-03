@@ -66,9 +66,14 @@ class WorkflowState:
 class WorkflowService:
     """Own persistence and semantic transitions; presentation layers stay thin."""
 
-    def __init__(self, orchestrator: Optional[Orchestrator] = None, store: Optional[ConfigurationStore] = None):
+    def __init__(self, orchestrator: Optional[Orchestrator] = None, store: Optional[ConfigurationStore] = None, private_root: Optional[Path] = None):
         self.orchestrator = orchestrator or Orchestrator()
         self.store = store or ConfigurationStore(DEFAULT_WORKSPACE_DIR / "configurations")
+        self.private_root = Path(private_root) if private_root else DEFAULT_PRIVATE_DIR
+        self.acpi_dir = self.private_root / "acpi" if private_root else DEFAULT_ACPI_DIR
+        self.identity_dir = self.private_root / "identities" if private_root else DEFAULT_IDENTITY_DIR
+        if private_root:
+            self.orchestrator.builder.identity_store_dir = self.identity_dir
 
     def create(self, fixture: Optional[Path] = None, sanitize: bool = False) -> tuple[UserConfiguration, HardwareSnapshot]:
         snapshot = self.orchestrator.probe_hardware(fixture_path=fixture, sanitize=sanitize)
@@ -88,7 +93,7 @@ class WorkflowService:
             raise ValueError("resume snapshot does not match the configuration binding")
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration.configuration_id):
             raise ValueError("configuration ID is not safe for private snapshot storage")
-        root = DEFAULT_PRIVATE_DIR / "snapshots"
+        root = self.private_root / "snapshots"
         self._ensure_private_directory(root)
         destination = root / f"{configuration.configuration_id}.json"
         payload = snapshot.to_json(indent=2) + "\n"
@@ -98,7 +103,7 @@ class WorkflowService:
     def resume_snapshot(self, configuration_id: str) -> HardwareSnapshot:
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration_id):
             raise ValueError("configuration ID is not safe for private snapshot storage")
-        path = DEFAULT_PRIVATE_DIR / "snapshots" / f"{configuration_id}.json"
+        path = self.private_root / "snapshots" / f"{configuration_id}.json"
         data = self._read_private_json(path, "resume snapshot")
         snapshot = HardwareSnapshot.from_dict(data)
         configuration = self.load(configuration_id)
@@ -131,10 +136,10 @@ class WorkflowService:
                 raise ValueError("ACPI capture changed while being imported")
             table_data.append((path, data, metadata))
 
-        self._ensure_private_directory(DEFAULT_ACPI_DIR)
+        self._ensure_private_directory(self.acpi_dir)
         capture_id = uuid.uuid4().hex
-        final_root = DEFAULT_ACPI_DIR / capture_id
-        staging_path = Path(tempfile.mkdtemp(prefix=".capture-", dir=DEFAULT_ACPI_DIR))
+        final_root = self.acpi_dir / capture_id
+        staging_path = Path(tempfile.mkdtemp(prefix=".capture-", dir=self.acpi_dir))
         staging_root: Optional[Path] = staging_path
         try:
             if os.name != "nt":
@@ -188,7 +193,7 @@ class WorkflowService:
         toolchain = TrustedToolchainLoader().provision()
         if toolchain.identity_tool_path is None:
             raise IdentityServiceError("Trusted macserial is unavailable; provision the pinned toolchain first")
-        identities = IdentityService(DEFAULT_IDENTITY_DIR, Path(toolchain.identity_tool_path))
+        identities = IdentityService(self.identity_dir, Path(toolchain.identity_tool_path))
         private = identities.store(identities.generate(allow_real=True))
         updated = self.set_identity_reference(configuration, private.storage_ref)
         return updated, private.storage_ref
@@ -198,7 +203,7 @@ class WorkflowService:
         configuration: UserConfiguration,
         storage_ref: str,
     ) -> UserConfiguration:
-        private = IdentityService(DEFAULT_IDENTITY_DIR).reuse(IdentityReference("0.1", storage_ref, redacted=True))
+        private = IdentityService(self.identity_dir).reuse(IdentityReference("0.1", storage_ref, redacted=True))
         return self.set_identity_reference(configuration, private.storage_ref)
 
     def preflight(
@@ -269,7 +274,7 @@ class WorkflowService:
             identity_ok = False
             if configuration.identity_ref is not None:
                 try:
-                    IdentityService(DEFAULT_IDENTITY_DIR).reuse(configuration.identity_ref)
+                    IdentityService(self.identity_dir).reuse(configuration.identity_ref)
                     identity_ok = True
                 except IdentityServiceError:
                     identity_ok = False

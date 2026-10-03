@@ -38,12 +38,51 @@ console = Console()
 err_console = Console(stderr=True)
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(__version__, prog_name="macloader")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose debug logging.")
-def cli(verbose: bool) -> None:
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool) -> None:
     """Libre_Core MacLoader — ThinkPad OpenCore & macOS provisioning engine."""
     setup_logging(verbose=verbose)
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(autoload_cmd)
+
+
+@cli.command("autoload")
+@click.option("--status", "status_only", is_flag=True, help="Detect/resume and show the next guided step without executing it.")
+@click.option("--terminal", is_flag=True, help="Use text prompts instead of the Textual interface.")
+def autoload_cmd(status_only: bool, terminal: bool) -> None:
+    """Prepare this laptop through the guided autoloader."""
+    from macloader.autoloader.models import ActionKind
+    from macloader.autoloader.service import AutoloaderService
+    service = AutoloaderService()
+    if not status_only and not terminal:
+        from macloader.ui.guided import GuidedApp
+        if GuidedApp(service).run():
+            from macloader.ui.tui import WorkflowApp
+            WorkflowApp(service=service.workflow, config_id=service.configuration.configuration_id if service.configuration else None).run()
+        return
+    try:
+        action = service.start()
+        if status_only:
+            console.print(service.review_summary(), markup=False)
+            console.print(action.message, markup=False)
+            return
+        while True:
+            action = service.advance_until_blocked()
+            console.print(service.review_summary(), markup=False)
+            console.print(action.message, markup=False)
+            if action.kind != ActionKind.HUMAN or not action.choices:
+                return
+            for index, choice in enumerate(action.choices, 1):
+                console.print(f"{index}. {choice}", markup=False)
+            selection = click.prompt("Choose", type=click.IntRange(1, len(action.choices)))
+            service.perform_choice(action.choices[selection - 1])
+    except Exception as exc:
+        if isinstance(exc, (click.Abort, click.ClickException)):
+            raise
+        raise click.ClickException("Preparation could not complete. Saved work is preserved; open Engineering diagnostics or retry.") from exc
 
 
 @cli.command("probe")

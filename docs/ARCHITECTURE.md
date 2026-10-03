@@ -76,3 +76,7 @@ Session writes use protected atomic files and compare-and-swap revisions, follow
 The service advances only registered safe handlers and stops at structured human actions, blockers, cancellation or no progress. Later phases supply capture/build/Recovery/media handlers. The initial engine cannot prepare media and never offers internal installation. Physical facts and destructive decisions cannot be passed as automatic handlers.
 
 The synthetic `t480s_20l8_162_synthetic.json` regression input is explicitly not a live capture, firmware evidence or hardware acceptance. It preserves topology but has no serial, UUID, MAC or storage serial. No real reference fixture has been created.
+
+### Guided clients
+
+`macloader.ui.guided.GuidedApp` renders `NextAction` and submits named semantic choices to `AutoloaderService`. It owns presentation, cancellation and worker dispatch only. The default CLI invokes this guided client; Engineering opens after the guided event loop exits, avoiding nested Textual applications. Campaign snapshots and engineering resume use the same WorkflowService private snapshot store. Guided diagnostics expose internal codes through Engineering, never private paths or identity values in ordinary status.
