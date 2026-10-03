@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import os
+import sys
 import plistlib
 from pathlib import Path
 import subprocess
@@ -170,6 +172,7 @@ def test_efi_process_cleanup_kills_when_termination_fails() -> None:
     assert process.killed is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group signals; Windows tree cleanup has separate coverage")
 def test_external_cleanup_terminates_and_kills_the_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,8 +268,8 @@ def test_archive_extraction_honors_operation_cancellation(tmp_path: Path) -> Non
 
 def test_long_running_validation_boundaries_honor_cancellation(tmp_path: Path) -> None:
     with pytest.raises(BuildPlanError, match="cancelled"):
-        AcpiProcessor(Path("/bin/sh"), "0" * 64, tmp_path / "work")._run(
-            ["-c", "sleep 10"], tmp_path / "diagnostic.txt", cancel=lambda: True
+        AcpiProcessor(Path(sys.executable), "0" * 64, tmp_path / "work")._run(
+            ["-c", "import time; time.sleep(10)"], tmp_path / "diagnostic.txt", cancel=lambda: True
         )
     (tmp_path / "payload").write_bytes(b"payload")
     with pytest.raises(BuildPlanError, match="cancelled"):
@@ -779,6 +782,7 @@ def test_strict_media_boundary_requires_matching_published_artifacts(tmp_path: P
         RemovableMediaWriter._validate_published_artifacts(source, bindings, require_all=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not Windows ACLs")
 def test_identity_reuse_rejects_broad_permissions_after_validating_content(tmp_path: Path) -> None:
     service = IdentityService(tmp_path)
     stored = service.store(service.fake_identity())
@@ -798,3 +802,36 @@ def test_tui_apply_target_is_clickable_at_supported_small_sizes(t480s_baseline_f
                 assert app._draft is not None
 
     asyncio.run(exercise())
+
+
+def test_windows_external_cleanup_terminates_process_tree_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WindowsProcess:
+        pid = 1234
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.waits = 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float = 0.0) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("tool", timeout)
+            return -9
+
+    commands: list[list[str]] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "nt")
+        patch.setattr(subprocess, "run", lambda args, **kwargs: commands.append(args))
+        for cleanup in (AcpiProcessor._terminate_process, EfiBuilder._terminate_process):
+            process = WindowsProcess()
+            cleanup(process)  # type: ignore[arg-type]
+            assert process.terminated
+    assert commands == [["taskkill", "/T", "/F", "/PID", "1234"]] * 2

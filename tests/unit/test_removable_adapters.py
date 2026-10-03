@@ -252,7 +252,7 @@ def test_writer_invalidates_after_post_write_cancellation(valid_source: Path) ->
 
 
 def test_linux_is_disabled_until_explicitly_advertised() -> None:
-    adapter = LinuxRemovableAdapter()
+    adapter = LinuxRemovableAdapter(platform="linux")
     assert adapter.status.to_dict() == {
         "platform": "linux",
         "advertised": False,
@@ -264,7 +264,7 @@ def test_linux_is_disabled_until_explicitly_advertised() -> None:
 
 def test_linux_advertised_discovery_remains_nonqualified() -> None:
     device = RemovableDevice("linux:serial:1", "USB", 1024, False, True, False, serial="1")
-    adapter = LinuxRemovableAdapter(advertised=True, enumerator=lambda: [device])
+    adapter = LinuxRemovableAdapter(platform="linux", advertised=True, enumerator=lambda: [device])
     assert adapter.status.qualified is False
     assert "qualification" in adapter.status.reason
     assert adapter.enumerate() == [device]
@@ -305,7 +305,7 @@ def test_linux_discovery_uses_stable_by_id_and_rejects_system_internal_and_mount
             return "8:2\n"
         raise AssertionError(f"unexpected discovery command {args[0]}")
 
-    adapter = LinuxRemovableAdapter(advertised=True, runner=runner, by_id_root=by_id)
+    adapter = LinuxRemovableAdapter(platform="linux", advertised=True, runner=runner, by_id_root=by_id)
     internal, usb = adapter.enumerate()
     assert internal.device_id == "linux:by-id:wwn-0xINTERNAL001"
     assert internal.is_system_disk is True and internal.is_removable is False
@@ -316,7 +316,7 @@ def test_linux_discovery_uses_stable_by_id_and_rejects_system_internal_and_mount
 
 
 def test_linux_unqualified_adapter_cannot_enter_physical_write_path(valid_source: Path) -> None:
-    adapter = LinuxRemovableAdapter(advertised=True, enumerator=lambda: [])
+    adapter = LinuxRemovableAdapter(platform="linux", advertised=True, enumerator=lambda: [])
     device = RemovableDevice("linux:by-id:usb-MAKER_USB001-0:0", "USB", 64_000_000, False, True, False, serial="USB001")
     plan = RemovableMediaWriter().dry_run(device, 1, source_dir=valid_source, bindings=QUALIFIED)
     with pytest.raises(UnsafeRemovableTarget, match="not physically qualified"):
@@ -360,6 +360,7 @@ def test_linux_backend_rechecks_identity_before_block_device_access(tmp_path: Pa
         LinuxBlockDeviceBackend._by_id_root = original
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux root and fcntl locking preconditions")
 def test_linux_backend_lock_preconditions_and_command_failures_are_redacted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -382,6 +383,7 @@ def test_linux_backend_lock_preconditions_and_command_failures_are_redacted(
     assert "secret-device" not in str(failure.value)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux directory fsync semantics")
 def test_linux_backend_flush_eject_and_sync_helpers_use_safe_temp_paths(
     tmp_path: Path,
 ) -> None:
