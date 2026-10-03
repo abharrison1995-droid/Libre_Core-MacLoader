@@ -106,3 +106,22 @@ this cannot enable an unqualified adapter. Explicit target selection is followed
 by a fresh erase decision; neither is saved as reusable consent. A persisted
 journal reports possible destructive I/O even if readiness fails. Windows-first
 writer qualification and safe eject are required before the guided writer runs.
+
+### Guided terminal UI preservation and evidence
+
+The guided media and first-boot extension preserves native Textual components,
+the inherited theme, explicit stage/action text and the Engineering exit. The
+consumer uses `Select` for three or more semantic choices and explicit buttons
+for the first-boot result. `VerticalScroll` and native keyboard focus bring
+alternatives into view at 80×24 and 100×35 terminal sizes. Policy, target/media
+bindings, erase consent and checkpoint semantics remain service-owned; the UI
+submits the offered semantic choice.
+
+The final scoped terminal UI review accepted the production-copy captures in
+`/tmp/macloader-guided-final-review`: expanded and selected USB menus, erase
+confirmation and first boot at both sizes, plus the focused first-boot failure
+alternative at 80×24. The nine PNGs were inspected against `macloader/ui/guided.py`.
+Capture rendering substituted installed DejaVu Sans Mono for unavailable Fira
+Code. These are synthetic UI scenarios, not physical hardware or boot evidence;
+no web detector ran. This ordinary extension establishes no new visual system
+and creates no PRODUCT.md, DESIGN.md or design sidecar.

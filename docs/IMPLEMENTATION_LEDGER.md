@@ -162,3 +162,37 @@ physical USB firmware correlation.
 P11 local gate: 571 tests passed, 79.22% branch coverage; native and Windows-target
 mypy passed (137 files); wheel and sdist outside-checkout smoke passed. P10 hosted
 push/PR CI was green at cc4cb50 (37136315619/37136318628).
+
+### P12 — Reviewed upstream candidate automation (2026-10-03)
+
+Added `maintenance/upstream.py` and the scheduled/manual/report-only branch
+workflow. Sources derive from existing catalogs; no separate upstream registry.
+Stable authoritative release assets, hashes, bounded acquisition and matching
+source license notices are required. Candidates use an isolated catalog overlay
+and the existing Database/DAG. OpenCore/ACPICA/tools produce separate migration
+reports. Only one independent candidate is proposed at a time.
+
+Actual candidate archives now feed the deterministic EFI harness when explicitly
+enabled; the matching pinned validator really executes. Full four-cell CI,
+canonical coverage and wheel/sdist gates precede the verified report/draft PR.
+No auto-merge or production catalog change exists. Existing proposal branches are
+preserved. Scheduled publication requires GitHub's Actions-PR setting; the
+schedule activates after merging the workflow to the default branch. Branch
+verification and default manual runs are report-only.
+
+Live report found verified WhateverGreen 1.7.1, VirtualSMC 1.3.8, AppleALC 1.9.8;
+OpenCore 1.0.8 and ACPICA 20260930 require versioned migrations. The first real
+WhateverGreen overlay passed verified full dependency acquisition, deterministic
+EFI generation and real matching OpenCore 1.0.7 ocvalidate locally (1 test passed,
+6.82s). Synthetic ACPI/identity/route seams remain explicitly nonphysical; no
+boot claim. Full base test gate prior to final workflow assertions: 580 tests,
+79.31% branch coverage, native/Windows mypy 140 files passed.
+
+P11 hosted push/PR CI was green at b8710ca (37136780533/37136783767).
+
+P12 local gate: 581 tests passed, 79.31% branch coverage; native and Windows-target
+mypy passed (140 files); wheel/sdist outside-checkout smoke passed. The scoped
+Impeccable review returned **ship** for the native USB selection, erase and
+first-boot UI at 80×24/100×35, after recapturing complete production copy and
+expanded/selected targets. Its documenter appended preservation evidence to
+Architecture. Screenshots are synthetic; no physical result is recorded.

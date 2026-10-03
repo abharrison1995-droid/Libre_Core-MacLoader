@@ -70,7 +70,8 @@ def test_profiled_builder_consumes_generated_map_and_binds_manifest(tmp_path: Pa
     from macloader.build.config import load_reviewed_profile
     service = ready(tmp_path)
     assert service.configuration is not None and service.snapshot is not None
-    db = Database()
+    data_root = os.environ.get("MACLOADER_CANDIDATE_DATA_DIR")
+    db = Database(data_root) if data_root else Database()
     preliminary = ConfigurationService(db).evaluate(service.configuration, service.snapshot).plan
     resolver = DependencyResolver(db)
     initial = resolver.resolve(preliminary)
@@ -81,6 +82,11 @@ def test_profiled_builder_consumes_generated_map_and_binds_manifest(tmp_path: Pa
         artifact = spec.get_artifact(ArtifactVariant.RELEASE)
         assert artifact is not None
         archive = tmp_path / f'{dep.dependency_id}.zip'
+        if os.environ.get("MACLOADER_VERIFY_CANDIDATE_ASSETS") == "1":
+            from macloader.dependencies.downloader import Downloader
+            Downloader(timeout=120).download_artifact(artifact, archive)
+            archives[dep.dependency_id] = archive
+            continue
         with zipfile.ZipFile(archive, 'w') as z:
             for component in spec.subcomponents:
                 name = f'Release/{component}'
