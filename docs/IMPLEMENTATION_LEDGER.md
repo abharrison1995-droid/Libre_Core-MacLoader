@@ -44,3 +44,5 @@ P1 implementation adds `database/campaigns.py` and the single `t480s-20l8-n22et8
 P1 hosted verification: commit `7eb54b1` passed push/PR Actions runs 37128102659 / 37128104746, all required cells.
 
 P2 software implementation adds observation projection/reconciliation, component and panel candidate matching, Linux EDID preferred timing, Windows WMI preferred timing and HDAUDIO codec/subsystem detection, plus optional evidence input scopes. Local checks: 501 passed, 79.31% branch coverage; native and Windows-platform mypy clean across 113 files. Missing touch proof stays unknown: neither EDID nor complete OS input inventory alone proves that touch hardware is absent. New source metadata contains no raw EDID, monitor instance identifier or serial. Physical evidence is still absent.
+
+P3 in progress: private HMAC-bound sessions, automatic configuration create/resume, a shared NextAction engine, CAS session revisions and safe-action journal are implemented. Capture/build/Recovery/media handlers are subsequent phase work. Regression input `t480s_20l8_162_synthetic.json` is explicitly synthetic and cannot establish physical acceptance.
