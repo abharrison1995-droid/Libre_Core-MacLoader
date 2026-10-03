@@ -78,10 +78,13 @@ def autoload_cmd(status_only: bool, terminal: bool, readiness: bool = False) -> 
             console.print(service.review_summary(), markup=False)
             console.print(action.message, markup=False)
             return
+        last_message = ""
         while True:
             action = service.advance_until_blocked()
-            console.print(service.review_summary(), markup=False)
-            console.print(action.message, markup=False)
+            message = service.review_summary() + "\n" + action.message
+            if message != last_message:
+                console.print(message, markup=False)
+                last_message = message
             if action.code == "USB_WAITING":
                 import time
                 time.sleep(0.5)
@@ -95,7 +98,8 @@ def autoload_cmd(status_only: bool, terminal: bool, readiness: bool = False) -> 
     except Exception as exc:
         if isinstance(exc, (click.Abort, click.ClickException)):
             raise
-        raise click.ClickException("Preparation could not complete. Saved work is preserved; open Engineering diagnostics or retry.") from exc
+        from macloader.evidence.acpi_capture import CaptureError
+        raise click.ClickException(str(exc) if isinstance(exc, CaptureError) else service.failure_message()) from exc
 
 
 @cli.command("probe")

@@ -14,6 +14,8 @@ on:
       - '.github/workflows/upstream-candidates.yml'
       - 'macloader/maintenance/**'
       - 'tests/unit/test_upstream_updates.py'
+      - 'tests/unit/test_cli.py'
+      - 'tests/unit/test_autoloader_build.py'
 
 permissions:
   contents: read

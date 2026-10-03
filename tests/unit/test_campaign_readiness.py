@@ -85,3 +85,23 @@ def test_ci_gate_uses_exact_actual_jobs_and_rejects_dirty_code(tmp_path: Path, m
     assert not hosted_ci_gate(tmp_path).passed
     dirty = True
     assert not hosted_ci_gate(tmp_path).passed
+
+
+def test_placeholder_dmi_identity_and_broken_inputs_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = candidate()
+    snapshot.uuid = '00000000-0000-0000-0000-000000000000'
+    snapshot.serial_number = 'SYNTHETIC-STABLE-SERIAL'
+    assert AutoloaderService._private_machine_material(snapshot) == 'SYNTHETIC-STABLE-SERIAL'
+    snapshot.uuid = 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF'
+    assert AutoloaderService._private_machine_material(snapshot) == 'SYNTHETIC-STABLE-SERIAL'
+    snapshot.uuid = 'not-a-uuid'
+    assert AutoloaderService._private_machine_material(snapshot) == 'SYNTHETIC-STABLE-SERIAL'
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material='test')
+    monkeypatch.setattr(service, '_calculate_next_action', lambda: (_ for _ in ()).throw(OSError('private-path')))
+    assert service.next_action().code == 'GUIDED_STATE_INVALID'
+    assert 'private-path' not in service.next_action().message
+    assert service.session is not None
+    service.session.actions.append(dict(stage='write', destructive='may-have-occurred'))
+    assert 'may already have occurred' in service.failure_message()
+    assert service.public_status()['destructive_operation_may_have_occurred'] is True

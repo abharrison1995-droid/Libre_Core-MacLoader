@@ -251,11 +251,10 @@ class WorkflowService:
         if configuration is None:
             add("configuration", "missing", "No saved configuration is selected.", "Run `macloader config new`, then set and review the exact target.")
         else:
+            requested = self.orchestrator.recovery_service.target()
             exact_target = configuration.target is not None and (
-                configuration.target.product_id == "sequoia"
-                and configuration.target.version == "15.0"
-                and configuration.target.build == "24A335"
-            )
+                configuration.target.product_id, configuration.target.version, configuration.target.build
+            ) == (requested.product_id, requested.version, requested.build)
             add(
                 "exact_target", "ready" if exact_target else "missing",
                 "Configuration selects Sequoia 15.0 build 24A335." if exact_target else "Configuration does not select the frozen Sequoia 15.0/24A335 target.",
@@ -263,7 +262,9 @@ class WorkflowService:
             )
         if snapshot is None:
             add("machine_snapshot", "missing", "No matching local hardware snapshot is available.", "Resume with the private saved snapshot or provide the matching fixture.")
-        elif configuration is None or snapshot.snapshot_id != configuration.hardware_snapshot_id:
+        elif configuration is None:
+            add("machine_snapshot", "missing", "No configuration is selected to assess the observed snapshot binding.", "Launch Guided Autoloader to create or resume the matching campaign.")
+        elif snapshot.snapshot_id != configuration.hardware_snapshot_id:
             add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
         else:
             campaign = self.orchestrator.db.candidate_campaign(snapshot)

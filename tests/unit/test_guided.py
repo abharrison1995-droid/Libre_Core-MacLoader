@@ -82,3 +82,36 @@ def test_default_entrypoint_opens_guided_surface(tmp_path: Path, monkeypatch: py
     result = CliRunner().invoke(cli, [])
     assert result.exit_code == 0, result.output
     assert opened == [True]
+
+
+def test_multiple_usb_choices_require_selection_and_busy_quit_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from textual.widgets import Button, Select
+    async def exercise() -> None:
+        service = AutoloaderService(root=tmp_path)
+        service.start(candidate(), private_material='test')
+        choices = ('Example USB A · 16 GiB · USB abcd0001', 'Example USB B · 32 GiB · USB abcd0002', 'Example USB C · 64 GiB · USB abcd0003')
+        action = NextAction(Stage.MEDIA, ActionKind.HUMAN, 'Select exact USB', choices=choices)
+        monkeypatch.setattr(service, 'next_action', lambda: action)
+        monkeypatch.setattr(service, 'advance_until_blocked', lambda **kwargs: action)
+        selected: list[str] = []
+        def choose(choice: str, **kwargs):  # type: ignore[no-untyped-def]
+            selected.append(choice)
+            return action
+        monkeypatch.setattr(service, 'perform_choice', choose)
+        app = GuidedApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            button = app.query_one('#choice-one', Button)
+            assert button.disabled
+            app.query_one('#media-selection', Select).value = choices[2]
+            await pilot.pause()
+            assert not button.disabled
+            await pilot.click('#choice-one')
+            await app.workers.wait_for_complete()
+            assert selected == [choices[2]]
+            app._busy = True
+            app.action_quit()
+            assert app._cancelled and app._exit_after_work
+            app._busy = False
+    asyncio.run(exercise())

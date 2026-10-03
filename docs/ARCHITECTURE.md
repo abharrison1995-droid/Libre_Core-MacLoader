@@ -73,7 +73,7 @@ Windows monitor fields follow Microsoft's [WMI source modes](https://learn.micro
 
 Session writes use protected atomic files and compare-and-swap revisions, following existing workflow/configuration storage. Configuration publication precedes session pointer publication; an interrupted initial creation may leave an unused draft, which guided lookup ignores. Each safe action is journaled before execution. Restart marks unfinished attempts interrupted and recomputes prerequisites from configuration/evidence. Campaign/policy changes invalidate acknowledgements and downstream artifacts.
 
-The service advances only registered safe handlers and stops at structured human actions, blockers, cancellation or no progress. Later phases supply capture/build/Recovery/media handlers. The initial engine cannot prepare media and never offers internal installation. Physical facts and destructive decisions cannot be passed as automatic handlers.
+The service advances only registered safe handlers and stops at structured human actions, blockers, cancellation or no progress. The P3 engine initially lacked preparation handlers; P5–P10 now supply capture/build/Recovery/private media preparation and first-boot reports. Physical writes remain disabled until adapter qualification, and the engine never offers internal installation. Physical facts and destructive decisions cannot be passed as automatic handlers.
 
 The synthetic `t480s_20l8_162_synthetic.json` regression input is explicitly not a live capture, firmware evidence or hardware acceptance. It preserves topology but has no serial, UUID, MAC or storage serial. No real reference fixture has been created.
 

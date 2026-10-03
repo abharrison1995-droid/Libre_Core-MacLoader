@@ -27,6 +27,7 @@ class GuidedApp(App[bool]):
         self._cancelled = False
         self._busy = False
         self._choices: tuple[str, ...] = ()
+        self._exit_after_work = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -74,7 +75,7 @@ class GuidedApp(App[bool]):
             button = self.query_one(f"#{identifier}", Button)
             button.display = index < len(self._choices) and (len(self._choices) <= 2 or index == 0)
             button.label = "Select this USB" if len(self._choices) > 2 else self._choices[index] if index < len(self._choices) else ""
-            button.disabled = self._busy
+            button.disabled = self._busy or (len(self._choices) > 2 and not (isinstance(selector.value, str) and selector.value in self._choices))
         self.query_one("#retry-guided", Button).disabled = self._busy
         self.query_one("#open-engineering", Button).disabled = self._busy
 
@@ -104,6 +105,19 @@ class GuidedApp(App[bool]):
         finally:
             self._busy = False
             self.call_from_thread(self._render_status, error)
+            if self._exit_after_work:
+                self.call_from_thread(self.exit, False)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "media-selection" and len(self._choices) > 2:
+            self.query_one("#choice-one", Button).disabled = self._busy or not (isinstance(event.value, str) and event.value in self._choices)
+
+    def action_quit(self) -> None:
+        if self._busy:
+            self._cancelled = True
+            self._exit_after_work = True
+        else:
+            self.exit(False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if self._busy:

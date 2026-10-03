@@ -415,8 +415,11 @@ def test_cli_config_set_ack_export_import_migrate_and_evidence(
     evidence = runner.invoke(cli, ["evidence", "import", configuration_id, str(usb_path), "--kind", "usb", "--json"])
     assert evidence.exit_code == 0, evidence.output
 
+    # CLI semantics must not depend on the CI runner's physical disk inventory.
+    from macloader.removable.adapters import WindowsRemovableAdapter
+    monkeypatch.setattr(workflow_service_module, "current_adapter", lambda: WindowsRemovableAdapter(runner=lambda _query: "[]", platform="win32"))
     listed = runner.invoke(cli, ["usb", "list", "--json"])
-    assert listed.exit_code == 0
+    assert listed.exit_code == 0, listed.output
     assert json.loads(listed.output)["writes_enabled"] is False
     planned = runner.invoke(cli, [
         "usb", "plan", "--device-id", "USB-1", "--model", "Disposable", "--capacity-bytes", "16000000000",

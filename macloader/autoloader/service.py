@@ -47,14 +47,24 @@ class AutoloaderService:
 
     @staticmethod
     def _private_machine_material(snapshot: HardwareSnapshot) -> str:
-        for field in (snapshot.uuid, snapshot.serial_number):
-            if field and "REDACTED" not in field.upper() and field.strip().lower() not in {"unknown", "none", "default string", "to be filled by o.e.m."}:
-                return field.strip()
+        import uuid
+        import re
+        if snapshot.uuid:
+            try:
+                identifier = uuid.UUID(snapshot.uuid.strip())
+                if identifier.int not in {0, (1 << 128) - 1}:
+                    return snapshot.uuid.strip()
+            except ValueError:
+                pass
+        field = snapshot.serial_number
+        placeholders = {"unknown", "none", "default string", "to be filled by o.e.m.", "system serial number", "123456789", "0"}
+        if field and "REDACTED" not in field.upper() and field.strip().lower() not in placeholders:
+            return field.strip()
         if os.name != "nt":
             path = Path("/etc/machine-id")
             if path.is_file():
                 value = path.read_text().strip()
-                if value and len(value) == 32:
+                if re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32:
                     return "linux-os:" + value
         raise ValueError("A private stable machine binding is unavailable")
 
@@ -119,6 +129,13 @@ class AutoloaderService:
         return self.next_action()
 
     def next_action(self) -> NextAction:
+        try:
+            return self._calculate_next_action()
+        except Exception:
+            return NextAction(Stage.HARDWARE, ActionKind.BLOCKED,
+                "Saved inputs could not be reconciled. Your work is preserved; open Engineering diagnostics before continuing.", "GUIDED_STATE_INVALID")
+
+    def _calculate_next_action(self) -> NextAction:
         if self._blocker:
             return self._blocker
         if self.session is None or self.configuration is None or self.snapshot is None or self.match is None:
@@ -134,7 +151,13 @@ class AutoloaderService:
         if self.match.unknown == ("panel.touch",):
             return NextAction(Stage.HARDWARE, ActionKind.HUMAN, "Software could not prove whether the detected FHD panel supports touch. Confirm non-touch only if you can physically establish it; missing touch data is not proof.", "PANEL_TOUCH_UNKNOWN", ("Confirm non-touch panel", "Touch panel or unsure"))
         if self.match.unknown:
-            return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "Some required hardware facts could not be proven. MacLoader has preserved the session and needs focused evidence collection.", "HARDWARE_UNKNOWN")
+            labels = {"panel.resolution": "built-in panel resolution", "panel.touch": "panel touch capability",
+                "graphics.dgpus": "complete graphics inventory", "graphics.igpu": "integrated graphics identity",
+                "audio.codec": "audio codec", "audio.subsystem": "audio subsystem", "wifi.identity": "Wi-Fi identity",
+                "bluetooth.identity": "Bluetooth identity", "ethernet.identity": "Ethernet identity", "cpu.identity": "processor identity",
+                "storage.identity": "storage identity", "input.topology": "keyboard/trackpad topology", "usb_controllers.identity": "USB controllers"}
+            missing = ", ".join(labels.get(field, "a required component") for field in self.match.unknown)
+            return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, f"MacLoader could not establish {missing}. Your session is preserved; open Engineering diagnostics for focused evidence collection.", "HARDWARE_UNKNOWN")
         for kind, stage in (("acpi", Stage.ACPI), ("usb", Stage.USB)):
             records = [record for record in self.configuration.evidence if record.kind == kind]
             if not any(record.completeness == EvidenceCompleteness.COMPLETE or (kind == "usb" and record.completeness == EvidenceCompleteness.PARTIAL and record.physical_port_evidence and all("logical USB-C correlation unresolved" in check for check in record.unresolved_checks)) for record in records):
@@ -238,7 +261,7 @@ class AutoloaderService:
                 self.workflow._write_private_json(diagnostic, json.dumps({"exception": type(exc).__name__, "detail": str(exc), "stage": action.stage.value}))
                 record["diagnostic_ref"] = str(diagnostic)
                 self._save_session()
-                self._blocker = NextAction(action.stage, ActionKind.BLOCKED, str(exc) if isinstance(exc, CaptureError) else "Preparation could not complete this step. No destructive operation occurred; saved inputs are preserved. Open diagnostics or retry.", str(record["code"]))
+                self._blocker = NextAction(action.stage, ActionKind.BLOCKED, str(exc) if isinstance(exc, CaptureError) else self.failure_message(), str(record["code"]))
                 return self._blocker
             record["completed_at"] = datetime.now(timezone.utc).isoformat()
             if self.next_action() == action:
@@ -628,6 +651,12 @@ class AutoloaderService:
                 f"Detected: {graphics}; {audio}; {network}\n"
                 f"Target: {campaign.release.product_name} {campaign.release.version} ({campaign.release.build})\n"
                 "Reviewed profile is experimental and has not been physically accepted.")
+
+    def failure_message(self) -> str:
+        possible = self.session is not None and any(a.get("destructive") in {"may-have-occurred", "performed"} for a in self.session.actions)
+        if possible:
+            return "Preparation could not complete. A USB write may already have occurred; treat that USB as unready until full readback and eject succeed. Saved sources are preserved; open Engineering diagnostics or retry."
+        return "Preparation could not complete. No destructive operation occurred; saved inputs are preserved. Open Engineering diagnostics or retry."
 
     def public_status(self) -> dict[str, object]:
         return {"machine": "Lenovo ThinkPad T480s" if self.session else "Unmatched machine",

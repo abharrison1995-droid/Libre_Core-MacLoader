@@ -1,5 +1,4 @@
 """Sanitize a supplied live capture for regression; never physical evidence."""
-from dataclasses import replace
 from macloader.detection.sanitize import sanitize_hardware_snapshot, _sanitize_data_structure
 from macloader.domain.hardware import HardwareSnapshot
 

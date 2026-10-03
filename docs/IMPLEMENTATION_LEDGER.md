@@ -196,3 +196,34 @@ Impeccable review returned **ship** for the native USB selection, erase and
 first-boot UI at 80×24/100×35, after recapturing complete production copy and
 expanded/selected targets. Its documenter appended preservation evidence to
 Architecture. Screenshots are synthetic; no physical result is recorded.
+
+### Final integration hardening (2026-10-03)
+
+Reject all-zero/all-ones/malformed DMI UUIDs and known placeholder serials before
+private campaign binding; retain existing valid identifier formats. Unexpected
+saved-state failures become safe structured blockers. Failure copy preserves
+historical possible destructive I/O instead of promising nothing happened.
+Unknown component messages use plain hardware names. Terminal USB polling no
+longer repeats unchanged summaries. Quit during a worker requests cancellation
+and waits for its guarded boundary; 3+ target selection stays disabled until an
+actual choice is selected. Native focus/scroll/theme remain unchanged.
+
+Corrected the earlier no-configuration preflight wording: an unassessed snapshot
+binding is missing, not a mismatch. Exact-target logic now references the existing
+Recovery policy instead of scattered version constants. CLI unit discovery now
+injects a Windows adapter result rather than querying a CI runner's real disks;
+real adapter behavior remains covered by dedicated provider tests. The first
+candidate workflow failed closed on that Windows/Python 3.11 test and skipped
+publication (37137988988). Three other candidate cells passed their complete
+real-acquisition/EFI/validator/package gates. Standard P12 push/PR CI was green at
+1ca4417 (37137988982/37137991401). A full corrected hosted candidate run is required.
+
+README now makes Guided Autoloader the default and links a dedicated implementation
+status page. The two pre-existing owner documentation edits remain uncommitted and
+preserved; they are not bundled into implementation commits. The previously
+corrected owner layout-86 YAML was integrated separately at cbc0a05.
+
+Final local integration gate: 584 tests passed, 79.48% branch coverage; native and
+Windows-target mypy passed (140 files); wheel and sdist built and their
+outside-checkout smoke checks passed. The explicit real pinned-tool reference
+EFI/ocvalidate test also passed (1 test). Hosted verification follows below.

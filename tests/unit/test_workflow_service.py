@@ -329,3 +329,12 @@ def test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture(
     corrupt_table.write_bytes(b"bad")
     with pytest.raises(Exception, match="truncated"):
         service.import_acpi_capture(configuration, exact_snapshot, capture)
+
+
+def test_preflight_unselected_configuration_does_not_claim_snapshot_mismatch(tmp_path: Path) -> None:
+    from tests.unit.test_autoloader import candidate
+    service = WorkflowService(store=ConfigurationStore(tmp_path))
+    report = service.preflight(None, candidate())
+    checks = {item['id']: item for item in report['checks']}
+    assert checks['machine_snapshot']['state'] == 'missing'
+    assert 'No configuration' in checks['machine_snapshot']['summary']
