@@ -97,3 +97,12 @@ def test_candidate_matching_requires_observed_panel_and_codec_subsystem(t480s_ba
     assert "panel.touch" in match_campaign(observed, db).mismatches
     observed.wifi = []
     assert not match_campaign(observed, db).ready
+
+
+def test_reviewed_campaign_accepts_detected_i219_v_reference_variant() -> None:
+    from tests.unit.test_autoloader import candidate
+    snapshot = candidate()
+    snapshot.ethernet[0].pci.device_id = "15d8"
+    from macloader.configuration.campaign_match import match_campaign
+    from macloader.database.loader import get_database
+    assert match_campaign(snapshot, get_database()).ready

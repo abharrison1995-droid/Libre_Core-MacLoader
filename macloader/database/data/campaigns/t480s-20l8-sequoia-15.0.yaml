@@ -1,6 +1,6 @@
 schema_version: "1"
 campaign_id: t480s-20l8-n22et85w-162-sequoia
-revision: "1"
+revision: "2"
 model_id: thinkpad-t480s
 machine_type: "20L8"
 bios_binding: N22ET85W-1.62
@@ -15,7 +15,7 @@ recovery_policy_id: recovery-apple-2026-09
 required_components:
   graphics: [intel-uhd-620]
   audio: [realtek-alc257]
-  ethernet: [intel-i219-lm]
+  ethernet: [intel-i219-lm, intel-i219-v]
   wifi: [intel-ac-8265, intel-ac-9260-9560]
   bluetooth: [intel-bluetooth]
 required_evidence: [acpi, usb]

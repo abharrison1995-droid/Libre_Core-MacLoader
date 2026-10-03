@@ -62,3 +62,7 @@ WorkflowService.collect_acpi verifies snapshot identity and affected hardware sc
 Correction: TABLE_NAMES formerly required DSDT + twelve SSDTs despite its eleven-SSDT policy description. The real historical report records eleven SSDTs; the thirteen-table research result was software build evidence, not current physical evidence. The filename set now requires DSDT + eleven SSDTs, with an independent count regression and strict signature checks. Earlier private thirteen-table imports need recollection; no legacy artifact is grandfathered as valid.
 
 P4 commit 8e32a7f passed both hosted CI runs (37129969242, 37129971264). P5 local gates: 532 tests passed; branch coverage 79.05%; native and Windows-stub mypy clean across 123 files. The narrow helper and Windows process boundary are mocked in CI; no host elevation, real capture or physical claim occurred.
+
+### Campaign Ethernet correction
+
+Historical sanitized reference documentation records Intel I219-V, while the first campaign composition linked only I219-LM. Existing component policy reviews both variants through the same IntelMausi path. Campaign revision 2 now links both existing component records; actual detection chooses compatibility, and unknown devices still block. A regression checks I219-V. This broadens the explicit reviewed Intel variant set without importing historical observations as current physical evidence. P5 commit 14b4bbf passed both hosted runs 37130481261 and 37130483618.
