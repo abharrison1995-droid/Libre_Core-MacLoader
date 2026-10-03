@@ -70,7 +70,7 @@ def test_guided_cli_status_hides_identifiers(tmp_path: Path, monkeypatch: pytest
     result = CliRunner().invoke(cli, ["autoload", "--status"])
     assert result.exit_code == 0, result.output
     assert "24A335" in result.output
-    assert "Firmware-table collection" in result.output
+    assert "Collect firmware tables" in result.output
     assert service.configuration is not None and service.configuration.configuration_id not in result.output
 
 

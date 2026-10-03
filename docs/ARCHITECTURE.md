@@ -80,3 +80,7 @@ The synthetic `t480s_20l8_162_synthetic.json` regression input is explicitly not
 ### Guided clients
 
 `macloader.ui.guided.GuidedApp` renders `NextAction` and submits named semantic choices to `AutoloaderService`. It owns presentation, cancellation and worker dispatch only. The default CLI invokes this guided client; Engineering opens after the guided event loop exits, avoiding nested Textual applications. Campaign snapshots and engineering resume use the same WorkflowService private snapshot store. Guided diagnostics expose internal codes through Engineering, never private paths or identity values in ordinary status.
+
+### Firmware capture providers
+
+AcpiCaptureProvider returns bounded table bytes to WorkflowService.collect_acpi, which owns private storage and existing import metadata. Linux uses kernel `/sys/firmware/acpi/tables`; optional elevation runs fixed isolated standard-library code with no writable target or caller path. Windows provisions only the catalog-pinned [ACPICA 20260408 release](https://github.com/open-acpica/acpica/releases/tag/20260408) tool. Capture checks current private machine binding and scoped hardware/BIOS before attaching evidence. Raw table bytes and subprocess output never enter ordinary logs or guided status. The packaged ACPICA notice accompanies binary provisioning.

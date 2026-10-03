@@ -71,6 +71,7 @@ class ToolchainRecord:
     ocvalidate: ToolRecord
     acpi_compiler: ToolRecord
     identity_tool: ToolRecord
+    firmware_capture: Optional[ToolRecord] = None
 
     @property
     def digest(self) -> str:
@@ -86,6 +87,7 @@ class ToolchainRecord:
             "ocvalidate": self.ocvalidate.__dict__,
             "acpi_compiler": self.acpi_compiler.__dict__,
             "identity_tool": self.identity_tool.__dict__,
+            "firmware_capture": self.firmware_capture.__dict__ if self.firmware_capture else None,
         })
 
 
@@ -152,6 +154,7 @@ def _load_catalog(path: Path) -> tuple[str, tuple[ToolchainRecord, ...]]:
             ocvalidate=_tool_record(_required(raw, "ocvalidate", "record"), "ocvalidate"),
             acpi_compiler=_tool_record(_required(raw, "acpi_compiler", "record"), "acpi_compiler"),
             identity_tool=_tool_record(_required(raw, "identity_tool", "record"), "identity_tool"),
+            firmware_capture=_tool_record(raw["firmware_capture"], "firmware_capture") if "firmware_capture" in raw else None,
         ))
     return policy, tuple(records)
 
@@ -368,7 +371,7 @@ class TrustedToolchainLoader:
             pass
         record = self.record()
         self._assert_safe_root(create=True)
-        selected = (record.sample_plist, record.ocvalidate, record.acpi_compiler, record.identity_tool)
+        selected = (record.sample_plist, record.ocvalidate, record.acpi_compiler, record.identity_tool) + ((record.firmware_capture,) if record.firmware_capture else ())
         archive_sources: dict[tuple[str, str], tuple[str, str]] = {}
         for item in selected:
             source = urlparse(item.source_url)
@@ -442,7 +445,7 @@ class TrustedToolchainLoader:
             # Validate executable architecture and version while all files are
             # still quarantined in staging. A bad platform asset must not leave
             # a misleading partial toolchain in the user's workspace.
-            for item in (record.ocvalidate, record.acpi_compiler, record.identity_tool):
+            for item in selected[1:]:
                 self._run_version(staged_files[item.file_name], item)
             try:
                 schema = plistlib.loads(staged_files[record.sample_plist.file_name].read_bytes())
@@ -496,6 +499,10 @@ class TrustedToolchainLoader:
         validator = self._verify_file(record.ocvalidate)
         compiler = self._verify_file(record.acpi_compiler)
         identity = self._verify_file(record.identity_tool)
+        if record.firmware_capture:
+            capture = self._verify_file(record.firmware_capture)
+            if require_executable_checks:
+                self._run_version(capture, record.firmware_capture)
         if require_executable_checks:
             validator_banner = self._run_version(validator, record.ocvalidate)
             compiler_banner = self._run_version(compiler, record.acpi_compiler)

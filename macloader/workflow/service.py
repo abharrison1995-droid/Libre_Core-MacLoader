@@ -10,7 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Tuple
 import uuid
 
 from macloader.configuration.migrations import import_configuration
@@ -44,6 +44,10 @@ MAX_IMPORT_DEPTH = 32
 MAX_IMPORT_NODES = 10000
 MAX_IMPORT_STRING = 8192
 PRIVATE_IDENTITY_CONFIRMATION = "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INSTALLATION"
+
+
+if TYPE_CHECKING:
+    from macloader.evidence.acpi_capture import AcpiCaptureProvider
 
 
 @dataclass(frozen=True)
@@ -179,6 +183,32 @@ class WorkflowService:
         finally:
             if staging_root is not None and staging_root.exists():
                 shutil.rmtree(staging_root, ignore_errors=True)
+
+    def collect_acpi(self, configuration: UserConfiguration, snapshot: HardwareSnapshot,
+                     provider: "AcpiCaptureProvider", current_snapshot: Callable[[], HardwareSnapshot],
+                     cancel: Optional[Callable[[], bool]] = None) -> UserConfiguration:
+        """Capture privately and reuse the strict import/evidence boundary."""
+        from macloader.evidence.acpi_capture import CaptureError, validate_capture
+        from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+        cancelled = cancel or (lambda: False)
+        scope = EVIDENCE_SCOPES["acpi"]
+        initial = scope_digest(snapshot, scope)
+        tables = validate_capture(provider.capture(cancelled))
+        observed = current_snapshot()
+        if observed.snapshot_id != snapshot.snapshot_id or scope_digest(observed, scope) != initial:
+            raise CaptureError("ACPI_MACHINE_CHANGED", "Machine or BIOS changed during capture; nothing was accepted.")
+        if cancelled():
+            raise CaptureError("CANCELLED", "Firmware capture paused.")
+        self._ensure_private_directory(self.acpi_dir)
+        with tempfile.TemporaryDirectory(prefix=".direct-", dir=self.acpi_dir) as temporary:
+            source = Path(temporary)
+            for name, data in tables.items():
+                path = source / name
+                path.write_bytes(data)
+                self._protect_private_file(path)
+            updated, record = self.import_acpi_capture(configuration, snapshot, source)
+        record = replace(record, input_scope=scope, input_digest=initial)
+        return self.add_evidence(updated, record)
 
     def generate_private_identity(
         self,

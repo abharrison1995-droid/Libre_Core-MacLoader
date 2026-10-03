@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -29,7 +30,8 @@ class AutoloaderService:
         self.snapshot: Optional[HardwareSnapshot] = None
         self.configuration: Optional[UserConfiguration] = None
         self.match: Optional[CampaignMatch] = None
-        self.handlers: dict[Stage, Callable[[], None]] = {}
+        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi}
+        self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
         self.identity_root = self.root / "identities"
         self.workflow.orchestrator.builder.identity_store_dir = self.identity_root
@@ -153,6 +155,7 @@ class AutoloaderService:
 
     def advance_until_blocked(self, cancel: Optional[Callable[[], bool]] = None) -> NextAction:
         """Run only registered safe operations; recompute prerequisites after each."""
+        self._cancel = cancel or (lambda: False)
         for _ in range(32):
             action = self.next_action()
             if action.kind != ActionKind.AUTOMATIC:
@@ -173,11 +176,12 @@ class AutoloaderService:
             self._save_session()
             try:
                 handler()
-            except Exception:
+            except Exception as exc:
+                from macloader.evidence.acpi_capture import CaptureError
                 record["state"] = "failed"
-                record["code"] = "AUTOMATIC_ACTION_FAILED"
+                record["code"] = exc.code if isinstance(exc, CaptureError) else "AUTOMATIC_ACTION_FAILED"
                 self._save_session()
-                self._blocker = NextAction(action.stage, ActionKind.BLOCKED, "Preparation could not complete this step. No destructive operation occurred; saved inputs are preserved. Open diagnostics or retry.", "AUTOMATIC_ACTION_FAILED")
+                self._blocker = NextAction(action.stage, ActionKind.BLOCKED, str(exc) if isinstance(exc, CaptureError) else "Preparation could not complete this step. No destructive operation occurred; saved inputs are preserved. Open diagnostics or retry.", str(record["code"]))
                 return self._blocker
             record["completed_at"] = datetime.now(timezone.utc).isoformat()
             if self.next_action() == action:
@@ -188,6 +192,33 @@ class AutoloaderService:
             record["state"] = "complete"
             self._save_session()
         raise RuntimeError("Guided action limit exceeded")
+
+    def _capture_acpi(self) -> None:
+        from macloader.evidence.acpi_capture import CaptureError, LinuxElevatedAcpiCaptureProvider, WindowsAcpiCaptureProvider
+        from macloader.toolchain.loader import TrustedToolchainLoader
+        if self.snapshot is None or self.configuration is None:
+            raise ValueError("No bound machine")
+        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+            raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect this host’s firmware. No host tables were read.")
+        def current() -> HardwareSnapshot:
+            raw = self.workflow.orchestrator.probe_hardware()
+            if self.session is None or self.store.machine_binding(self._private_machine_material(raw)) != self.session.machine_binding:
+                raise CaptureError("ACPI_MACHINE_CHANGED", "Machine binding changed during capture; nothing was accepted.")
+            observed = sanitize_hardware_snapshot(raw)
+            return replace(observed, snapshot_id=self.session.snapshot_id)
+        if os.name != "nt":
+            updated = self.workflow.collect_acpi(self.configuration, self.snapshot, LinuxElevatedAcpiCaptureProvider(), current, self._cancel)
+        else:
+            loader = TrustedToolchainLoader()
+            loader.provision()
+            tool = loader.record().firmware_capture
+            if tool is None:
+                raise CaptureError("ACPI_TOOL_MISSING", "The trusted firmware capture tool is unavailable for this host.")
+            self.workflow._ensure_private_directory(self.root)
+            with tempfile.TemporaryDirectory(prefix=".capture-", dir=self.root) as temporary:
+                provider = WindowsAcpiCaptureProvider(loader._verify_file(tool), tool.sha256, Path(temporary))
+                updated = self.workflow.collect_acpi(self.configuration, self.snapshot, provider, current, self._cancel)
+        self.save_configuration(updated)
 
     def _save_session(self) -> None:
         if self.session is None:
