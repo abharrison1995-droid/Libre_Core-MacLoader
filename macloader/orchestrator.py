@@ -268,6 +268,8 @@ class Orchestrator:
         expected_acpi_evidence_digest: Optional[str] = None,
         cancel: Optional[Callable[[], bool]] = None,
         identity_reference: Optional[IdentityReference] = None,
+        private_usb_evidence: Optional[Path] = None,
+        hardware_snapshot: Optional[HardwareSnapshot] = None,
     ) -> EfiBuildResult:
         if dep_set.plan_digest != plan.canonical_digest():
             raise ArtifactDownloadError("Dependency lock is bound to a different BuildPlan")
@@ -290,6 +292,8 @@ class Orchestrator:
             expected_acpi_evidence_digest=expected_acpi_evidence_digest,
             cancel=cancel,
             identity_reference=identity_reference,
+            private_usb_evidence=private_usb_evidence,
+            hardware_snapshot=hardware_snapshot,
         )
 
     @staticmethod

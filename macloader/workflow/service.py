@@ -78,6 +78,7 @@ class WorkflowService:
         self.identity_dir = self.private_root / "identities" if private_root else DEFAULT_IDENTITY_DIR
         if private_root:
             self.orchestrator.builder.identity_store_dir = self.identity_dir
+            self.orchestrator.builder.private_work_root = self.private_root / "acpi-build"
 
     def create(self, fixture: Optional[Path] = None, sanitize: bool = False) -> tuple[UserConfiguration, HardwareSnapshot]:
         snapshot = self.orchestrator.probe_hardware(fixture_path=fixture, sanitize=sanitize)
@@ -660,6 +661,8 @@ class WorkflowService:
                 private_acpi_capture=private_acpi_capture,
                 expected_acpi_evidence_digest=expected_evidence_digest,
                 identity_reference=configuration.identity_ref,
+                private_usb_evidence=self.orchestrator.configuration_service._evidence_source(next((r.private_ref for r in configuration.evidence if r.kind == "usb"), "")),
+                hardware_snapshot=snapshot,
                 cancel=cancel,
                 ocvalidate_path=ocvalidate_path,
                 ocvalidate_sha256=ocvalidate_sha256,
@@ -727,6 +730,25 @@ class WorkflowService:
         expected_acpi_digest = AcpiProcessor.capture_evidence_digest(
             evidence_source.parent, acpi_record.bios_binding, snapshot.snapshot_id
         )
+        from macloader.evidence.usb import UsbEvidenceSession
+        from macloader.evidence.usb_capture import collect_firmware_usb_addresses
+        from macloader.build.usb_map import generate_usb_map
+        usb_record = next((r for r in configuration.evidence if r.kind == "usb"), None)
+        campaign = self.orchestrator.db.candidate_campaign(snapshot)
+        if usb_record is None or campaign is None or not toolchain.acpi_compiler_path or not toolchain.acpi_compiler_sha256:
+            raise ValueError("Recovery binding requires current generated USB map evidence")
+        usb_source = self.orchestrator.configuration_service._evidence_source(usb_record.private_ref)
+        if usb_source is None:
+            raise ValueError("Recovery binding requires safe private USB evidence")
+        usb = UsbEvidenceSession.from_dict(self._read_private_json(usb_source, "USB evidence"))
+        addresses = collect_firmware_usb_addresses(evidence_source.parent, Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256, self.private_root / "usb-binding", lambda: False)
+        usb_map = generate_usb_map(usb, campaign.evidence_policy["usb_capture"], snapshot_id=snapshot.snapshot_id,
+            bios_binding=campaign.bios_binding, smbios=configuration.selected_options().get("profile.smbios", ""),
+            first_route=campaign.profile.usb.first_install_route, addresses=addresses,
+            controller_slots={p.pci_slot for p in snapshot.usb_controllers if p.pci_slot})
+        expected_evidence = (expected_acpi_digest, usb_record.digest, usb_map.digest)
+        if usb.to_evidence_record().digest != usb_record.digest or manifest.evidence_digests != expected_evidence:
+            raise ValueError("Recovery binding has stale USB source or generated map digests")
         expected_build_digest = canonical_json_digest({
             "plan_digest": state.evaluation.plan.canonical_digest(),
             "dependency_digest": dependencies.canonical_digest(),
@@ -738,7 +760,7 @@ class WorkflowService:
                 reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
             ),
             "acpi_digest": manifest.acpi_digest,
-            "evidence_digests": [expected_acpi_digest],
+            "evidence_digests": list(expected_evidence),
             "usb_policy_state": manifest.usb_policy_state,
             "usb_first_install_route": manifest.usb_first_install_route,
             "schema_version": manifest.schema_version,
@@ -754,7 +776,7 @@ class WorkflowService:
             expected_profile_digest=effective_profile_digest(
                 reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
             ),
-            expected_evidence_digests=(expected_acpi_digest,),
+            expected_evidence_digests=expected_evidence,
             expected_identity_reference=(
                 configuration.identity_ref.storage_ref if configuration.identity_ref is not None else None
             ),

@@ -36,7 +36,7 @@ class AutoloaderService:
         self.snapshot: Optional[HardwareSnapshot] = None
         self.configuration: Optional[UserConfiguration] = None
         self.match: Optional[CampaignMatch] = None
-        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi}
+        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
@@ -140,7 +140,7 @@ class AutoloaderService:
                                   ("Collect firmware tables." if stage in self.handlers else "Firmware-table collection is not available in this prototype yet. Use Engineering to import existing evidence.")
                                   if kind == "acpi" else "Identify this laptop’s physical USB ports by moving the test device when prompted.",
                                   "ACPI_CAPTURE_REQUIRED" if kind == "acpi" else "USB_PHYSICAL_EVIDENCE_REQUIRED")
-        for stage, artifact in ((Stage.TOOLS, "tools"), (Stage.DEPENDENCIES, "dependencies")):
+        for stage, artifact in ((Stage.TOOLS, "tools"),):
             if artifact not in self.session.artifacts:
                 return NextAction(stage, ActionKind.AUTOMATIC if stage in self.handlers else ActionKind.BLOCKED, "Prepare verified tools and dependencies.", "SOFTWARE_PREPARATION_REQUIRED")
         identity_valid = False
@@ -160,6 +160,8 @@ class AutoloaderService:
             return NextAction(Stage.ACCEPTANCE, ActionKind.HUMAN, "Review and accept the experimental T480s prototype configuration.", choices=("Accept prototype",))
         if evaluation.has_blockers:
             return NextAction(Stage.BUILD, ActionKind.BLOCKED, "Configuration validation needs attention. No destructive operation occurred; your evidence and private identity are preserved.", "CONFIGURATION_BLOCKED")
+        if "dependencies" not in self.session.artifacts:
+            return NextAction(Stage.DEPENDENCIES, ActionKind.AUTOMATIC, "Acquire and verify the reviewed dependencies.")
         if "efi" not in self.session.artifacts:
             return NextAction(Stage.BUILD, ActionKind.AUTOMATIC if Stage.BUILD in self.handlers else ActionKind.BLOCKED, "Build and validate the EFI.", "EFI_BUILD_REQUIRED")
         return NextAction(Stage.RECOVERY_MODE, ActionKind.BLOCKED, "Resolve Recovery for the frozen target. Qualification requires proof of the exact build; no installation is authorized.", "RECOVERY_REQUIRED")
@@ -203,6 +205,10 @@ class AutoloaderService:
                 from macloader.evidence.acpi_capture import CaptureError
                 record["state"] = "failed"
                 record["code"] = exc.code if isinstance(exc, CaptureError) else "AUTOMATIC_ACTION_FAILED"
+                diagnostic = self.root / "diagnostics" / f"{self.session.session_id}-{len(self.session.actions)}.json"
+                self.workflow._ensure_private_directory(diagnostic.parent)
+                self.workflow._write_private_json(diagnostic, json.dumps({"exception": type(exc).__name__, "detail": str(exc), "stage": action.stage.value}))
+                record["diagnostic_ref"] = str(diagnostic)
                 self._save_session()
                 self._blocker = NextAction(action.stage, ActionKind.BLOCKED, str(exc) if isinstance(exc, CaptureError) else "Preparation could not complete this step. No destructive operation occurred; saved inputs are preserved. Open diagnostics or retry.", str(record["code"]))
                 return self._blocker
@@ -215,6 +221,57 @@ class AutoloaderService:
             record["state"] = "complete"
             self._save_session()
         raise RuntimeError("Guided action limit exceeded")
+
+    def _record_artifact(self, kind: str, **metadata: str) -> None:
+        if self.configuration is None or self.session is None:
+            raise ValueError("No active campaign")
+        self.session.artifacts[kind] = {"input_digest": self.configuration.semantic_digest, **metadata}
+        self._save_session()
+
+    def _prepare_tools(self) -> None:
+        from macloader.toolchain.loader import TrustedToolchainLoader
+        if self._cancel():
+            raise ValueError("Cancelled")
+        tools = TrustedToolchainLoader().provision()
+        self._record_artifact("tools", digest=tools.digest)
+
+    def _prepare_dependencies(self) -> None:
+        if self.configuration is None or self.snapshot is None:
+            raise ValueError("No active campaign")
+        state, dependencies = self.workflow.resolve_dependencies(self.configuration, self.snapshot, cancel=self._cancel)
+        if state.evaluation.has_blockers or not dependencies.is_complete:
+            raise ValueError("Dependencies are blocked by current configuration")
+        self.workflow.orchestrator.fetch_dependencies(dependencies, offline=False, plan=state.evaluation.plan, cancel=self._cancel)
+        self._record_artifact("dependencies", digest=dependencies.canonical_digest())
+
+    def _build_efi(self) -> None:
+        from macloader.evidence.acpi_capture import CaptureError
+        if self.configuration is None or self.snapshot is None or self.session is None:
+            raise ValueError("No active campaign")
+        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+            raise CaptureError("SYNTHETIC_BUILD_DISABLED", "Synthetic fixtures cannot produce a production installation EFI. Use the deterministic test harness.")
+        parent = self.root / "builds" / self.session.session_id
+        self.workflow._ensure_private_directory(parent)
+        output = parent / self.configuration.semantic_digest
+        # Crash after publication: validate and adopt only if current bindings match.
+        if output.exists():
+            from macloader.domain.contracts import BuildManifest
+            from macloader.toolchain.loader import TrustedToolchainLoader
+            manifest = BuildManifest.from_dict(self.workflow._read_private_json(output / "manifest.json", "EFI manifest"))
+            tools = TrustedToolchainLoader().select()
+            self.workflow.derive_recovery_binding(self.configuration, self.snapshot, tools, manifest, output)
+            self._record_artifact("efi", path=str(output), digest=manifest.build_digest)
+            return
+        result = self.workflow.build_efi_preview(self.configuration, self.snapshot, output, offline=False, cancel=self._cancel)
+        if result.validation.status != "VALID":
+            raise ValueError("EFI validation failed")
+        # Published identity-bearing files remain inside the protected campaign tree.
+        for directory in [result.output_dir, *[p for p in result.output_dir.rglob("*") if p.is_dir()]]:
+            self.workflow._ensure_private_directory(directory)
+        for path in result.output_dir.rglob("*"):
+            if path.is_file():
+                self.workflow._protect_private_file(path)
+        self._record_artifact("efi", path=str(result.output_dir), digest=result.manifest.build_digest)
 
     @staticmethod
     def _usb_platform() -> str:
@@ -326,6 +383,10 @@ class AutoloaderService:
     def save_configuration(self, configuration: UserConfiguration) -> None:
         self.workflow.save_revision(configuration)
         self.configuration = self.workflow.load(configuration.configuration_id)
+        if self.session is not None:
+            self.session.artifacts = {key: artifact for key, artifact in self.session.artifacts.items() if artifact.get("input_digest") == self.configuration.semantic_digest}
+            self.session.checkpoints.clear()
+            self._save_session()
 
     def _reusable_identities(self) -> tuple[str, ...]:
         refs = []

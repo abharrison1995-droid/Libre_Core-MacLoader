@@ -164,7 +164,7 @@ class SchemaDrivenConfigGenerator:
         executable = leaf.removesuffix(".kext")
         return {
             "Arch": "Any", "BundlePath": bundle_path, "Comment": "P4 reviewed dependency",
-            "Enabled": True, "ExecutablePath": f"Contents/MacOS/{executable}",
+            "Enabled": True, "ExecutablePath": "" if leaf == "MacLoaderUSBMap.kext" else f"Contents/MacOS/{executable}",
             "MaxKernel": "", "MinKernel": "8.0.0", "PlistPath": "Contents/Info.plist",
         }
 
