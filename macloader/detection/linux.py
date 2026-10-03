@@ -15,6 +15,7 @@ from macloader.detection.normalize import (
 )
 from macloader.domain.hardware import (
     AudioInfo,
+    DisplayInfo,
     CpuInfo,
     GpuInfo,
     HardwareSnapshot,
@@ -341,11 +342,16 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                 if content:
                     codec_name = None
                     codec_id_match = None
+                    subsystem_id = None
                     for line in content.splitlines():
                         if line.startswith("Codec:"):
                             codec_name = line.split(":", 1)[1].strip()
                         elif line.startswith("Address:"):
                             pass
+                        elif "Subsystem Id:" in line:
+                            match = re.search(r"0x([0-9a-fA-F]{8})", line)
+                            if match:
+                                subsystem_id = match.group(1)[:4].lower() + ":" + match.group(1)[4:].lower()
                         elif "Vendor Id:" in line:
                             codec_id_match = re.search(r"0x([0-9a-fA-F]{8})", line)
                     if codec_name:
@@ -361,6 +367,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
                                 codec_name=codec_name,
                                 codec_vendor_id=vendor_id,
                                 codec_device_id=device_id,
+                                codec_subsystem_id=subsystem_id,
                             )
                         )
 
@@ -519,6 +526,27 @@ class LinuxHardwareProvider(BaseHardwareProvider):
 
         return input_list
 
+    def probe_displays(self, inputs: List[InputDeviceInfo]) -> List[DisplayInfo]:
+        from macloader.detection.display import edid_panel
+        displays: List[DisplayInfo] = []
+        for connector in self._iter_dir_safe(self.sys_root / "class" / "drm", "display"):
+            if not any(token in connector.name for token in ("-eDP-", "-LVDS-")):
+                continue
+            if self._read_file(connector / "status", "display") != "connected":
+                continue
+            try:
+                with (connector / "edid").open("rb") as handle:
+                    panel = edid_panel(handle.read(4097))
+            except OSError:
+                panel = None
+            displays.append(DisplayInfo(
+                name=panel[0] if panel else "Internal panel",
+                resolution=panel[1] if panel else None,
+                touch_capability=True if any(i.kind == "touchscreen" for i in inputs) else None,
+                source="linux-drm-edid" if panel else "linux-drm-connector",
+            ))
+        return displays
+
     def probe_thunderbolt(self, pci_devices: List[PciDevice]) -> ThunderboltInfo:
         """Check for Thunderbolt controller presence."""
         tb_dir = self.sys_root / "bus" / "thunderbolt" / "devices"
@@ -582,6 +610,7 @@ class LinuxHardwareProvider(BaseHardwareProvider):
         storage = self.probe_storage(pci_devices)
         input_devices = self.probe_input_devices()
         thunderbolt = self.probe_thunderbolt(pci_devices)
+        displays = self.probe_displays(input_devices)
 
         # Check if raise_on_error was requested
         if self.raise_on_error and self.source_errors:
@@ -684,5 +713,6 @@ class LinuxHardwareProvider(BaseHardwareProvider):
             usb_devices=usb_devices,
             thunderbolt=thunderbolt,
             input_devices=input_devices,
+            displays=displays,
             raw_evidence=raw_evidence,
         )

@@ -40,3 +40,7 @@ The owner's layout-86 correction is preserved in commit `cbc0a05`, with a defaul
 2026-10-03: P0 final audio regression commit `cbc0a050c651a72c8370b3e1dd5c44f02e330144` passed hosted Actions run 37127761753. This is the P0 known-green baseline including the owner's layout-86 correction.
 
 P1 implementation adds `database/campaigns.py` and the single `t480s-20l8-n22et85w-162-sequoia` composition record. Linked policies/component matching rules are provenance-bound; drift and ambiguous selectors fail closed. Configuration policy lookup supports a referenced policy ID and profile search spans the existing profile registry. ACPI import and preflight use firmware candidate lookup. Component reconciliation and autoloader orchestration are still pending P2/P3.
+
+P1 hosted verification: commit `7eb54b1` passed push/PR Actions runs 37128102659 / 37128104746, all required cells.
+
+P2 software implementation adds observation projection/reconciliation, component and panel candidate matching, Linux EDID preferred timing, Windows WMI preferred timing and HDAUDIO codec/subsystem detection, plus optional evidence input scopes. Local checks: 501 passed, 79.31% branch coverage; native and Windows-platform mypy clean across 113 files. Missing touch proof stays unknown: neither EDID nor complete OS input inventory alone proves that touch hardware is absent. New source metadata contains no raw EDID, monitor instance identifier or serial. Physical evidence is still absent.

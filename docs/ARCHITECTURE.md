@@ -56,3 +56,13 @@ Recovery and removable-media readiness are separate from EFI build readiness. Ex
 `Database.candidate_campaign(snapshot)` checks vendor, product, exact machine type and normalized BIOS. This is only firmware candidate selection; complete component/observation reconciliation is a separate prerequisite. It does not establish physical acceptance. ACPI import and machine preflight use this lookup rather than independent machine/BIOS literals. Campaigns remain experimental.
 
 New campaigns receive separate versioned composition records. Graphics injection, layout values, dependency pins and logical USB routes stay in their existing reviewed records.
+
+## Observation reconciliation
+
+`configuration/observations.py` projects a sanitized snapshot into existing `HardwareObservation` and `HardwareConfirmation` contracts. Consistent high-confidence observations are accepted automatically; missing/low-confidence facts remain unresolved and conflicting sources cannot be accepted. Observations carry source, provider version, time, snapshot fact digest and BIOS provenance. Repeated unchanged probes preserve their original observation provenance.
+
+`configuration/campaign_match.py` requires the referenced component identities, reviewed panel scope and audio codec subsystem, complete dGPU inventory and observed CPU/storage/input/USB topology. Firmware candidate selection alone cannot unlock it. Display EDID/WMI reports preferred panel resolution, not absence of a touchscreen; missing touch proof stays unknown.
+
+`EvidenceRecord` adds optional `input_scope` and `input_digest` fields. Legacy records load without them and become stale conservatively on hardware changes. Scoped records bind only their declared fact groups; BIOS changes invalidate firmware/USB evidence, while storage changes preserve independent USB/ACPI scopes. Full machine snapshot binding is still required. Evidence from another snapshot is not silently rebound. Reconciliation must run after private machine-session binding and before configuration evaluation.
+
+Windows monitor fields follow Microsoft's [WMI source modes](https://learn.microsoft.com/en-us/windows/win32/wmicoreprov/wmimonitorlistedsupportedsourcemodes) and [display connection enums](https://github.com/MicrosoftDocs/sdk-api/blob/docs/sdk-api-src/content/wingdi/ne-wingdi-displayconfig_video_output_technology.md). Linux panel timing uses the connector EDID described in [kernel EDID documentation](https://kernel.org/doc/html/latest/admin-guide/edid.html). Raw EDID and monitor instance identifiers are not persisted.

@@ -52,6 +52,10 @@ class ConfigurationService:
             policy_version=self.policy.policy_version,
         )
 
+    def reconcile(self, draft: UserConfiguration, snapshot: HardwareSnapshot) -> UserConfiguration:
+        from macloader.configuration.observations import reconcile_configuration
+        return reconcile_configuration(draft, snapshot)
+
     def evaluate(self, draft: UserConfiguration, snapshot: HardwareSnapshot) -> ConfigurationEvaluation:
         issues: List[ConfigurationIssue] = []
         if draft.policy_version and draft.policy_version != self.policy.policy_version:
@@ -216,6 +220,11 @@ class ConfigurationService:
 
     def _validate_evidence(self, draft: UserConfiguration, snapshot: HardwareSnapshot, issues: List[ConfigurationIssue]) -> None:
         for record in draft.evidence:
+            from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+            if record.completeness == EvidenceCompleteness.STALE or (
+                record.input_scope and (record.input_scope != EVIDENCE_SCOPES.get(record.kind) or scope_digest(snapshot, record.input_scope) != record.input_digest)
+            ):
+                issues.append(self._issue("EVIDENCE_STALE", f"evidence.{record.kind}", "Machine evidence changed and must be collected again.", "Recollect affected evidence."))
             if record.machine_snapshot_id != snapshot.snapshot_id:
                 issues.append(self._issue("EVIDENCE_SNAPSHOT_MISMATCH", f"evidence.{record.kind}", "Evidence belongs to a different hardware snapshot.", "Capture or import evidence from the active snapshot."))
             if snapshot.bios_version and normalize_bios_binding(record.bios_binding) != normalize_bios_binding(snapshot.bios_version):
