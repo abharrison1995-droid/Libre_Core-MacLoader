@@ -280,7 +280,7 @@ def test_linux_discovery_uses_stable_by_id_and_rejects_system_internal_and_mount
     by_id = tmp_path / "by-id"
     by_id.mkdir()
     (by_id / "wwn-0xINTERNAL001").symlink_to(internal_node)
-    (by_id / "usb-MAKER_MODEL_SERIAL001-0:0").symlink_to(usb_node)
+    (by_id / "usb-MAKER_MODEL_SERIAL001-0-0").symlink_to(usb_node)
     payload = {"blockdevices": [
         {
             "name": "sda", "path": str(internal_node), "type": "disk", "size": 500_000_000,
@@ -309,7 +309,7 @@ def test_linux_discovery_uses_stable_by_id_and_rejects_system_internal_and_mount
     internal, usb = adapter.enumerate()
     assert internal.device_id == "linux:by-id:wwn-0xINTERNAL001"
     assert internal.is_system_disk is True and internal.is_removable is False
-    assert usb.device_id == "linux:by-id:usb-MAKER_MODEL_SERIAL001-0:0"
+    assert usb.device_id == "linux:by-id:usb-MAKER_MODEL_SERIAL001-0-0"
     assert usb.is_removable is True and usb.is_system_disk is False and usb.mounted is False
     assert adapter.status.qualified is False
     assert "sacrificial" in adapter.status.reason

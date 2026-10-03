@@ -426,8 +426,12 @@ class TrustedToolchainLoader:
                 payloads[item.file_name] = (data, 0o700 if item is not record.sample_plist else 0o600)
 
             staged_files: dict[str, Path] = {}
+            verified_root = staging / "verified"
+            verified_root.mkdir(mode=0o700)
             for file_name, (data, mode) in payloads.items():
-                temporary = staging / f"{file_name}.verified"
+                # Keep the catalog executable suffix: Windows uses it to
+                # dispatch PE binaries and command scripts during quarantine.
+                temporary = verified_root / file_name
                 with temporary.open("xb") as handle:
                     handle.write(data)
                     handle.flush()
