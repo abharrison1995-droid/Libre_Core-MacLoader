@@ -44,7 +44,7 @@ def test_unknown_panel_is_focused_hardware_blocker(tmp_path: Path) -> None:
     snapshot = candidate()
     snapshot.displays[0].touch_capability = None
     service = AutoloaderService(root=tmp_path)
-    assert service.start(snapshot, private_material="test").code == "HARDWARE_UNKNOWN"
+    assert service.start(snapshot, private_material="test").code == "PANEL_TOUCH_UNKNOWN"
     assert service.match is not None and service.match.unknown == ("panel.touch",)
 
 

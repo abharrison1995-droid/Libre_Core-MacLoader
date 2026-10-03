@@ -65,11 +65,14 @@ class HardwareConfirmation:
     action: str
     effective_value: str
     reason: str
+    input_scope: Tuple[str, ...] = ()
+    input_digest: str = ""
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "field_path": self.field_path, "action": self.action,
             "effective_value": self.effective_value, "reason": self.reason,
+            "input_scope": list(self.input_scope), "input_digest": self.input_digest,
         }
 
 
@@ -281,6 +284,7 @@ def _confirmation_from_dict(data: Any) -> HardwareConfirmation:
     return HardwareConfirmation(
         field_path=str(data["field_path"]), action=str(data["action"]),
         effective_value=str(data["effective_value"]), reason=str(data["reason"]),
+        input_scope=tuple(str(v) for v in data.get("input_scope", [])), input_digest=str(data.get("input_digest", "")),
     )
 
 

@@ -138,3 +138,27 @@ P10 local gate: 567 tests passed, 79.19% branch coverage; native and Windows-tar
 mypy passed (134 files); wheel and sdist outside-checkout smoke passed. P9 hosted
 push/PR CI was green at 0bff097 (37134038810/37134041856). Physical first boot was
 not attempted.
+
+### P11 — Reference-fixture privacy and read-only readiness gate (2026-10-03)
+
+Added live-capture-to-regression sanitization (no actual reference capture was
+supplied), explicitly non-evidence fixture guards, and `autoload --readiness`.
+Readiness uses exact actual GitHub jobs rather than historical test counts or a
+caller-supplied ready flag; dirty software, missing jobs or unknown evidence block.
+The report never authorizes writes/installation. Owner documentation edits remain
+outside implementation commits.
+
+Connected the remaining unknown-panel seam to existing HardwareConfirmation with
+optional scope/digest fields, backward-readable for old records. Only unknown
+panel touch can receive the focused physical non-touch confirmation; positive
+observations always prevail and machine/BIOS/panel drift invalidates it. Other
+required unknown facts remain blocked for focused provider/evidence work.
+
+P11 real fixture and physical results remain external/unperformed; the synthetic
+fixture is not renamed or promoted. Hardware acceptance documents exact missing
+gates, including Windows-first writer qualification and unavailable Windows
+physical USB firmware correlation.
+
+P11 local gate: 571 tests passed, 79.22% branch coverage; native and Windows-target
+mypy passed (137 files); wheel and sdist outside-checkout smoke passed. P10 hosted
+push/PR CI was green at cc4cb50 (37136315619/37136318628).

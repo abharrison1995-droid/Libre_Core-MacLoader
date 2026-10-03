@@ -115,7 +115,7 @@ class AutoloaderService:
             self.store.save(session, previous)
         self.session, self.snapshot = session, safe
         self.configuration = self.workflow.load(session.configuration_id)
-        self.match = match_campaign(safe, self.workflow.orchestrator.db)
+        self.match = match_campaign(safe, self.workflow.orchestrator.db, self.configuration)
         return self.next_action()
 
     def next_action(self) -> NextAction:
@@ -131,6 +131,8 @@ class AutoloaderService:
             return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "This session has engineering policy changes. Saved work is preserved; review those changes before using the guided prototype.", "POLICY_SELECTION_DRIFT")
         if self.match.mismatches:
             return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "Detected hardware differs from the reviewed campaign. Your session is preserved; resolve the hardware mismatch in diagnostics.", "HARDWARE_MISMATCH")
+        if self.match.unknown == ("panel.touch",):
+            return NextAction(Stage.HARDWARE, ActionKind.HUMAN, "Software could not prove whether the detected FHD panel supports touch. Confirm non-touch only if you can physically establish it; missing touch data is not proof.", "PANEL_TOUCH_UNKNOWN", ("Confirm non-touch panel", "Touch panel or unsure"))
         if self.match.unknown:
             return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "Some required hardware facts could not be proven. MacLoader has preserved the session and needs focused evidence collection.", "HARDWARE_UNKNOWN")
         for kind, stage in (("acpi", Stage.ACPI), ("usb", Stage.USB)):
@@ -387,7 +389,7 @@ class AutoloaderService:
         from macloader.evidence.acpi_capture import CaptureError
         if self.configuration is None or self.snapshot is None or self.session is None:
             raise ValueError("No active campaign")
-        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+        if (self.snapshot.raw_evidence.get("synthetic_fixture") or self.snapshot.raw_evidence.get("fixture_is_not_evidence")):
             raise CaptureError("SYNTHETIC_BUILD_DISABLED", "Synthetic fixtures cannot produce a production installation EFI. Use the deterministic test harness.")
         parent = self.root / "builds" / self.session.session_id
         self.workflow._ensure_private_directory(parent)
@@ -426,7 +428,7 @@ class AutoloaderService:
         from macloader.domain.contracts import canonical_json_digest
         if self.snapshot is None or self.configuration is None or self.session is None or self.match is None or self.match.campaign is None:
             raise ValueError("No active campaign")
-        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+        if (self.snapshot.raw_evidence.get("synthetic_fixture") or self.snapshot.raw_evidence.get("fixture_is_not_evidence")):
             raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect physical USB evidence from this host.")
         if self._usb_platform() == "win32":
             raise CaptureError("USB_PROVIDER_UNAVAILABLE", "Windows physical-to-firmware USB correlation is not yet qualified. Use the Linux collector or Engineering evidence import; no port number will be guessed.")
@@ -495,7 +497,7 @@ class AutoloaderService:
         from macloader.toolchain.loader import TrustedToolchainLoader
         if self.snapshot is None or self.configuration is None:
             raise ValueError("No bound machine")
-        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+        if (self.snapshot.raw_evidence.get("synthetic_fixture") or self.snapshot.raw_evidence.get("fixture_is_not_evidence")):
             raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect this host’s firmware. No host tables were read.")
         current = self._current_bound_snapshot
         if os.name != "nt":
@@ -553,6 +555,16 @@ class AutoloaderService:
             self.session.artifacts.pop("qualification_attempt", None)
             self.session.artifacts.pop("recovery", None)
             self._record_artifact("recovery_choice", mode=self.session.recovery_mode, campaign_digest=self.session.campaign_digest)
+        elif action.stage == Stage.HARDWARE:
+            if choice == "Touch panel or unsure":
+                self._blocker = NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "The reviewed campaign requires a proven non-touch panel. Your session is saved; obtain focused display evidence before continuing.", "PANEL_SCOPE_UNPROVEN")
+                return self._blocker
+            from macloader.configuration.observations import scope_digest
+            from macloader.domain.configuration import HardwareConfirmation
+            scope = ("machine", "bios", "panel")
+            confirmation = HardwareConfirmation("panel.touch", "human-confirmed", "[false]", "Deliberate physical non-touch confirmation", scope, scope_digest(self.snapshot, scope))
+            self.save_configuration(replace(self.configuration, confirmations=tuple(c for c in self.configuration.confirmations if c.field_path != "panel.touch") + (confirmation,), acknowledgements=()))
+            self.match = match_campaign(self.snapshot, self.workflow.orchestrator.db, self.configuration)
         elif action.stage == Stage.FIRST_BOOT:
             from macloader.autoloader.first_boot import record_checkpoint
             if self.session is None:
@@ -585,7 +597,7 @@ class AutoloaderService:
                     raise IdentityServiceError("Existing identity selection changed")
                 private = IdentityService(self.identity_root).reuse(IdentityReference("0.1", refs[0], True))
             else:
-                if self.snapshot.raw_evidence.get("synthetic_fixture"):
+                if (self.snapshot.raw_evidence.get("synthetic_fixture") or self.snapshot.raw_evidence.get("fixture_is_not_evidence")):
                     raise IdentityServiceError("Synthetic fixtures cannot create a real private identity")
                 from macloader.toolchain.loader import TrustedToolchainLoader
                 selection = TrustedToolchainLoader().provision()

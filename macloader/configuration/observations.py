@@ -121,7 +121,10 @@ def reconcile_configuration(draft: UserConfiguration, snapshot: HardwareSnapshot
     return replace(
         draft, hardware_snapshot_id=snapshot.snapshot_id,
         hardware_snapshot_digest=canonical_json_digest(data),
-        observations=result.observations, confirmations=result.confirmations,
+        observations=result.observations, confirmations=result.confirmations + tuple(
+            c for c in draft.confirmations if c.action == "human-confirmed" and c.field_path == "panel.touch"
+            and c.input_scope == ("machine", "bios", "panel") and c.input_digest == scope_digest(snapshot, c.input_scope)
+            and hardware_facts(snapshot)[c.field_path] is None),
         evidence=tuple(evidence), acknowledgements=() if changed else draft.acknowledgements,
         recovery=None if changed else draft.recovery,
     )

@@ -3,7 +3,9 @@ from dataclasses import dataclass
 import re
 from typing import TYPE_CHECKING, Optional
 
-from macloader.configuration.observations import hardware_facts
+from macloader.configuration.observations import hardware_facts, scope_digest
+from macloader.domain.configuration import UserConfiguration
+import json
 from macloader.domain.hardware import HardwareSnapshot
 
 if TYPE_CHECKING:
@@ -22,11 +24,17 @@ class CampaignMatch:
         return self.campaign is not None and not self.unknown and not self.mismatches
 
 
-def match_campaign(snapshot: HardwareSnapshot, db: "Database") -> CampaignMatch:
+def match_campaign(snapshot: HardwareSnapshot, db: "Database", configuration: Optional[UserConfiguration] = None) -> CampaignMatch:
     candidate = db.candidate_campaign(snapshot)
     if candidate is None:
         return CampaignMatch(None, mismatches=("machine/firmware",))
     facts = hardware_facts(snapshot)
+    if configuration is not None and facts["panel.touch"] is None:
+        confirmations = [c for c in configuration.confirmations if c.field_path == "panel.touch"
+            and c.action == "human-confirmed" and c.input_scope == ("machine", "bios", "panel")
+            and c.input_digest == scope_digest(snapshot, c.input_scope)]
+        if len(confirmations) == 1 and confirmations[0].effective_value == "[false]":
+            facts["panel.touch"] = json.loads(confirmations[0].effective_value)
     unknown: list[str] = []
     mismatches: list[str] = []
     fields = {"graphics": "graphics.igpu", "audio": "audio.codec", "wifi": "wifi.identity",

@@ -51,13 +51,14 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 
 @cli.command("autoload")
 @click.option("--status", "status_only", is_flag=True, help="Detect/resume and show the next guided step without executing it.")
+@click.option("--readiness", is_flag=True, help="Report physical-campaign gates without preparing or writing media.")
 @click.option("--terminal", is_flag=True, help="Use text prompts instead of the Textual interface.")
-def autoload_cmd(status_only: bool, terminal: bool) -> None:
+def autoload_cmd(status_only: bool, terminal: bool, readiness: bool = False) -> None:
     """Prepare this laptop through the guided autoloader."""
     from macloader.autoloader.models import ActionKind
     from macloader.autoloader.service import AutoloaderService
     service = AutoloaderService()
-    if not status_only and not terminal:
+    if not status_only and not terminal and not readiness:
         from macloader.ui.guided import GuidedApp
         if GuidedApp(service).run():
             from macloader.ui.tui import WorkflowApp
@@ -65,6 +66,14 @@ def autoload_cmd(status_only: bool, terminal: bool) -> None:
         return
     try:
         action = service.start()
+        if readiness:
+            from macloader.autoloader.readiness import campaign_readiness
+            report = campaign_readiness(service)
+            console.print("First-boot gate: " + ("READY" if report["ready_for_first_boot"] else "BLOCKED"))
+            for gate in report["gates"]:
+                console.print(f"{'PASS' if gate['passed'] else 'BLOCKED'} · {gate['name']}: {gate['detail']}", markup=False)
+            console.print("Experimental; internal installation is not authorized.")
+            return
         if status_only:
             console.print(service.review_summary(), markup=False)
             console.print(action.message, markup=False)
