@@ -117,3 +117,24 @@ P8 hosted push/PR CI was green at e76a24c (runs 37133597691/37133600655).
 P9 local gate: 564 tests passed, 79.15% branch coverage (79% required);
 native and Windows-target mypy passed (132 files); wheel and sdist smoke passed
 outside checkout. Physical writer qualification remains an external campaign gate.
+
+### P10 — First-boot procedure and explicit reports (2026-10-03)
+
+`autoloader/first_boot.py` generates Lenovo F12 instructions from the campaign
+and the current proven physical USB route. Seven deliberate checkpoints cover
+picker, Recovery selection, utilities, no erase, no installation, shutdown/reboot
+and existing-OS bootability. Results are bound to configuration/campaign/media;
+upstream changes clear them. Failed checkpoints remain failed until explicitly
+repeated. Resume never infers a physical result. EFI and signed Recovery are
+reverified before instructions. The terminal state is **reported smoke results**,
+not support, exact-build qualification or installation authority.
+
+Before a guided write, current bound laptop facts are probed again; any change
+requires reconciliation. No real boot/write/identity was performed in this phase.
+Tests use explicit disposable/synthetic seams and exercise all reports,
+failure/retry, missing route proof and downstream invalidation.
+
+P10 local gate: 567 tests passed, 79.19% branch coverage; native and Windows-target
+mypy passed (134 files); wheel and sdist outside-checkout smoke passed. P9 hosted
+push/PR CI was green at 0bff097 (37134038810/37134041856). Physical first boot was
+not attempted.

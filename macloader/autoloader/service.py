@@ -36,7 +36,7 @@ class AutoloaderService:
         self.snapshot: Optional[HardwareSnapshot] = None
         self.configuration: Optional[UserConfiguration] = None
         self.match: Optional[CampaignMatch] = None
-        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery, Stage.MEDIA: self._prepare_media}
+        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery, Stage.MEDIA: self._prepare_media, Stage.FIRST_BOOT: self._prepare_first_boot}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
@@ -177,7 +177,13 @@ class AutoloaderService:
         if "media_source" not in self.session.artifacts or self.media.source is None:
             return NextAction(Stage.MEDIA, ActionKind.AUTOMATIC, "Verify and prepare private USB source files. No device is written.")
         if "media_write" in self.session.artifacts:
-            return NextAction(Stage.FIRST_BOOT, ActionKind.BLOCKED, "USB readback and eject are recorded. First-boot checkpoints are required.", "FIRST_BOOT_REQUIRED")
+            from macloader.autoloader.first_boot import checkpoint_binding, next_checkpoint
+            if self.match.campaign is None:
+                raise ValueError("No current campaign")
+            binding = checkpoint_binding(self.configuration.semantic_digest, self.session.campaign_digest, self.session.artifacts["media_write"]["digest"])
+            if self.session.artifacts.get("first_boot", {}).get("binding") != binding:
+                return NextAction(Stage.FIRST_BOOT, ActionKind.AUTOMATIC, "Prepare current first-boot instructions; no boot result is inferred.")
+            return next_checkpoint(self.session.checkpoints, self._first_boot_instructions())
         if not self.media.qualified:
             return NextAction(Stage.MEDIA, ActionKind.BLOCKED, "Preparation is saved. ADR-007 requires a physically qualified Windows writer with full readback and safe eject before a USB can be erased.", "WRITER_UNQUALIFIED")
         if self.media.selected is not None:
@@ -315,10 +321,38 @@ class AutoloaderService:
             SmokeRecoveryService(campaign.smoke_recovery_policy), self.configuration.semantic_digest, campaign.digest)
         self._record_artifact("media_source", path=str(destination), digest=record.digest)
 
+    def _first_boot_instructions(self) -> str:
+        from macloader.autoloader.first_boot import instructions
+        from macloader.evidence.usb import UsbEvidenceSession
+        if self.configuration is None or self.match is None or self.match.campaign is None:
+            raise ValueError("No current campaign")
+        evidence = next(r for r in self.configuration.evidence if r.kind == "usb")
+        usb = UsbEvidenceSession.from_dict(self.workflow._read_private_json(Path(evidence.private_ref), "USB evidence"))
+        if usb.to_evidence_record().digest != evidence.digest:
+            raise ValueError("Physical USB evidence changed")
+        return instructions(self.match.campaign, usb)
+
+    def _prepare_first_boot(self) -> None:
+        from macloader.autoloader.first_boot import checkpoint_binding
+        if self.session is None or self.configuration is None:
+            raise ValueError("No campaign")
+        write = self.session.artifacts["media_write"]
+        if write.get("readback") != "complete" or write.get("eject") != "complete" or write.get("purpose") != "picker-recovery-smoke-only":
+            raise ValueError("Media readiness is unproven")
+        self._prepare_media()  # Reverify EFI and signed Recovery before instructions.
+        self._first_boot_instructions()
+        self.session.checkpoints.clear()
+        binding = checkpoint_binding(self.configuration.semantic_digest, self.session.campaign_digest, write["digest"])
+        self._record_artifact("first_boot", binding=binding, provenance="human-reported-not-hardware-acceptance")
+
     def _write_media(self) -> None:
         if self.session is None:
             raise ValueError("No campaign")
         self._current_efi_manifest()
+        from macloader.configuration.observations import hardware_facts
+        from macloader.evidence.acpi_capture import CaptureError
+        if self.snapshot is None or hardware_facts(self._current_bound_snapshot()) != hardware_facts(self.snapshot):
+            raise CaptureError("HARDWARE_CHANGED", "Laptop hardware changed since preparation. No write was authorized; restart to reconcile the observations.")
         def mark_started() -> None:
             assert self.session is not None
             self.session.actions.append(dict(stage="write", state="destructive-boundary", destructive="may-have-occurred"))
@@ -519,6 +553,12 @@ class AutoloaderService:
             self.session.artifacts.pop("qualification_attempt", None)
             self.session.artifacts.pop("recovery", None)
             self._record_artifact("recovery_choice", mode=self.session.recovery_mode, campaign_digest=self.session.campaign_digest)
+        elif action.stage == Stage.FIRST_BOOT:
+            from macloader.autoloader.first_boot import record_checkpoint
+            if self.session is None:
+                raise ValueError("No campaign")
+            record_checkpoint(self.session.checkpoints, choice)
+            self._save_session()
         elif action.stage == Stage.MEDIA:
             if choice == "Find USB devices":
                 self.media.discover()
