@@ -835,3 +835,32 @@ def test_windows_external_cleanup_terminates_process_tree_after_timeout(
             cleanup(process)  # type: ignore[arg-type]
             assert process.terminated
     assert commands == [["taskkill", "/T", "/F", "/PID", "1234"]] * 2
+
+
+def test_reviewed_default_audio_flows_from_policy_to_generated_plist(
+    tmp_path: Path, t480s_baseline_fixture: Path,
+) -> None:
+    from macloader.configuration.service import ConfigurationService
+    from macloader.domain.hardware import HardwareSnapshot
+
+    snapshot = HardwareSnapshot.from_dict(json.loads(t480s_baseline_fixture.read_text()))
+    service = ConfigurationService()
+    draft = service.new_draft(snapshot)
+    release = service.policy.releases[0]
+    draft = replace(draft, target=release.target())
+    evaluation = service.evaluate(draft, snapshot)
+    assert evaluation.plan.effective_audio_layout == 86
+    sample = tmp_path / "Sample.plist"
+    sample.write_bytes(plistlib.dumps({
+        "ACPI": {}, "Booter": {}, "DeviceProperties": {}, "Kernel": {},
+        "Misc": {}, "NVRAM": {}, "PlatformInfo": {"Generic": {}}, "UEFI": {},
+    }))
+    profile = load_reviewed_profile()
+    generator = SchemaDrivenConfigGenerator(sample, hashlib.sha256(sample.read_bytes()).hexdigest())
+    config = generator.generate(
+        profile, identity=IdentityService.fake_identity(), kexts=(), drivers=(), acpi_files=(),
+        opencore_version="1.0.7", acpi_digest="", evidence_digests=(),
+        effective_options=dict(evaluation.plan.effective_option_selections),
+    )
+    assert config["DeviceProperties"]["Add"][profile.audio.device_path]["layout-id"] == (86).to_bytes(4, "little")
+    assert "alcid=86" in config["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]["boot-args"]

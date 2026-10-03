@@ -36,7 +36,7 @@ options:
     value_type: enum
     control_hint: bounded-value
     allowed_values: [layout-11, layout-86, layout-97, layout-99]
-    default: layout-11
+    default: layout-86
     applies_to_models: [thinkpad-t480s]
     applies_to_products: [sequoia]
     dependencies: []
@@ -44,8 +44,8 @@ options:
     evidence_requirements: [audio.codec]
     support_state: EXPERIMENTAL
     requires_acknowledgement: true
-    explanation: "ALC257 layout candidates are bounded by policy; choose only with matching codec evidence."
-    research_ref: "RESEARCH_LEDGER.md#research-item-003"
+    explanation: "Layout 86 is the reviewed experimental candidate for this profile; the codec match and audio behavior remain unvalidated on the target machine."
+    research_ref: "RESEARCH_LEDGER.md#research-item-011"
   - id: profile.network
     value_type: enum
     control_hint: reviewed-preset
