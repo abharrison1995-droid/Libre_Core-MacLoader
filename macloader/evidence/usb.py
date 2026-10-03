@@ -24,10 +24,14 @@ class UsbPortObservation:
     orientation: Optional[str] = None
     internal_device: bool = False
     state: UsbObservationState = UsbObservationState.OBSERVED
+    port_address: Optional[int] = None
+    namespace_path: str = ""
 
     def __post_init__(self) -> None:
         if not all(isinstance(item, str) and item.strip() for item in (self.physical_label, self.logical_port, self.connector_type, self.tested_speed, self.controller_id)):
             raise ValueError("USB physical label, logical port, connector, speed and controller are required")
+        if self.port_address is not None and (type(self.port_address) is not int or not 1 <= self.port_address <= 255):
+            raise ValueError("USB port address must be a literal firmware port number")
         if not isinstance(self.internal_device, bool):
             raise ValueError("USB internal_device must be boolean")
 
@@ -43,6 +47,7 @@ class UsbPortObservation:
             "connector_type": self.connector_type, "tested_speed": self.tested_speed,
             "controller_id": self.controller_id, "orientation": self.orientation,
             "internal_device": self.internal_device, "state": self.state.value,
+            "port_address": self.port_address, "namespace_path": self.namespace_path,
         }
 
     @classmethod
@@ -50,13 +55,14 @@ class UsbPortObservation:
         if not isinstance(data, dict):
             raise ValueError("USB port observation must be a mapping")
         required = {"physical_label", "logical_port", "connector_type", "tested_speed", "controller_id", "orientation", "internal_device", "state"}
-        if set(data) != required:
+        if not required <= set(data) or set(data) - required - {"port_address", "namespace_path"}:
             raise ValueError("USB port observation has missing or unknown fields")
         return cls(
             physical_label=str(data["physical_label"]), logical_port=str(data["logical_port"]),
             connector_type=str(data["connector_type"]), tested_speed=str(data["tested_speed"]),
             controller_id=str(data["controller_id"]), orientation=data["orientation"],
             internal_device=data["internal_device"], state=UsbObservationState(str(data["state"])),
+            port_address=data.get("port_address"), namespace_path=str(data.get("namespace_path", "")),
         )
 
 
@@ -82,9 +88,16 @@ class UsbEvidenceSession:
     def completeness(self) -> Tuple[EvidenceCompleteness, Tuple[str, ...]]:
         if not self.observations:
             return EvidenceCompleteness.MISSING, ("no physical USB port observations",)
-        labels = [item.physical_label.casefold() for item in self.observations]
-        logical = [item.logical_port.casefold() for item in self.observations]
-        if len(set(labels)) != len(labels) or len(set(logical)) != len(logical):
+        identities = [(item.physical_label.casefold(), item.tested_speed, item.orientation) for item in self.observations]
+        routes: dict[str, tuple[str, str, object]] = {}
+        conflict = False
+        for item in self.observations:
+            key = f"{item.controller_id}:{item.logical_port}"
+            value = (item.physical_label.casefold(), item.connector_type, item.port_address)
+            if key in routes and routes[key] != value:
+                conflict = True
+            routes[key] = value
+        if len(set(identities)) != len(identities) or conflict:
             return EvidenceCompleteness.CONFLICTING, ("duplicate physical or logical USB port",)
         unresolved = tuple(
             f"{item.physical_label}: physical test incomplete"

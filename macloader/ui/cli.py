@@ -73,6 +73,10 @@ def autoload_cmd(status_only: bool, terminal: bool) -> None:
             action = service.advance_until_blocked()
             console.print(service.review_summary(), markup=False)
             console.print(action.message, markup=False)
+            if action.code == "USB_WAITING":
+                import time
+                time.sleep(0.5)
+                continue
             if action.kind != ActionKind.HUMAN or not action.choices:
                 return
             for index, choice in enumerate(action.choices, 1):

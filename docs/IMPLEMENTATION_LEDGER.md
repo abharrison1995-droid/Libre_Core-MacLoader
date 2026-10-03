@@ -66,3 +66,9 @@ P4 commit 8e32a7f passed both hosted CI runs (37129969242, 37129971264). P5 loca
 ### Campaign Ethernet correction
 
 Historical sanitized reference documentation records Intel I219-V, while the first campaign composition linked only I219-LM. Existing component policy reviews both variants through the same IntelMausi path. Campaign revision 2 now links both existing component records; actual detection chooses compatibility, and unknown devices still block. A regression checks I219-V. This broadens the explicit reviewed Intel variant set without importing historical observations as current physical evidence. P5 commit 14b4bbf passed both hosted runs 37130481261 and 37130483618.
+
+## Autoloader P6 — Physical USB collector
+
+Added provider events, strict literal firmware address extraction and a resumable movement wizard using existing USB observations/session. Existing observation schema gains optional firmware address/namespace; older imports remain readable but cannot supply a generated map without address proof. Completeness supports speed companions and two orientations on the same physical connector while rejecting duplicates and conflicting reuse of a logical route. Campaign-linked evidence scope requires two USB-A speed tests, two USB-C orientation/speed sequences and proven internal camera/Bluetooth/card-reader routes; WWAN is excluded. USB-C uncertainty is preserved rather than inventing a route. The guided screen watches events without asking for JSON, controller, speed or port names. No actual port moves were performed: all event sequences in tests are synthetic.
+
+Windows provider is an explicit external capability gap: the existing read-only snapshots retain stale device nodes and do not prove socket-to-ACPI correspondence. Linux and Engineering import can proceed; Windows capture cannot claim success. Generated-map consumption is P7, not established by wizard completion alone.

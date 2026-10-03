@@ -23,3 +23,23 @@ requirements:
     completeness: complete
     requires_physical_port_evidence: true
     invalidated_by: [bios_change, usb_controller_change, snapshot_change]
+usb_capture:
+  minimum_routes: [SS01, SS02, SS03, HS07, HS08]
+  excluded_routes: [HS06]
+  internal_labels:
+    SS03: Integrated card reader
+    HS07: Intel Bluetooth
+    HS08: Integrated camera
+  steps:
+    - {label: left USB-A beside HDMI, connector: USB-A, speed: super}
+    - {label: right USB-A beside cooling vent, connector: USB-A, speed: super}
+    - {label: left USB-A beside HDMI, connector: USB-A, speed: high}
+    - {label: right USB-A beside cooling vent, connector: USB-A, speed: high}
+    - {label: USB-C charging socket, connector: USB-C, speed: super, orientation: normal}
+    - {label: USB-C charging socket, connector: USB-C, speed: super, orientation: flipped}
+    - {label: USB-C Thunderbolt socket, connector: USB-C, speed: super, orientation: normal}
+    - {label: USB-C Thunderbolt socket, connector: USB-C, speed: super, orientation: flipped}
+    - {label: USB-C charging socket, connector: USB-C, speed: high, orientation: normal}
+    - {label: USB-C charging socket, connector: USB-C, speed: high, orientation: flipped}
+    - {label: USB-C Thunderbolt socket, connector: USB-C, speed: high, orientation: normal}
+    - {label: USB-C Thunderbolt socket, connector: USB-C, speed: high, orientation: flipped}

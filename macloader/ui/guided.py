@@ -43,6 +43,12 @@ class GuidedApp(App[bool]):
     def on_mount(self) -> None:
         self._render_status()
         self._advance()
+        self.set_interval(1.0, self._poll_physical)
+
+    def _poll_physical(self) -> None:
+        if not self._busy and not self._cancelled and self.service.next_action().code == "USB_WAITING":
+            self._busy = True
+            self._advance()
 
     @staticmethod
     def _stage_label(stage: Stage) -> str:
@@ -71,7 +77,7 @@ class GuidedApp(App[bool]):
         error = ""
         try:
             if choice is not None:
-                self.service.perform_choice(choice)
+                self.service.perform_choice(choice, cancel=lambda: self._cancelled)
             else:
                 if self.service.session is None:
                     self.service.start()

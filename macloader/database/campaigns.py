@@ -31,6 +31,7 @@ class ReferenceCampaign:
     configuration_policy: ConfigurationPolicy
     evidence_policy_id: str
     evidence_policy_digest: str
+    evidence_policy: Mapping[str, Any]
     recovery_policy_id: str
     required_components: Mapping[str, tuple[str, ...]]
     required_evidence: tuple[str, ...]
@@ -93,6 +94,20 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
         _, evidence = _unique_record(db.data_dir / "evidence", "policy_version", str(raw["evidence_policy_id"]))
         if evidence.get("model_id") != model_id or evidence.get("schema_version") != "1":
             raise DatabaseValidationError("Campaign evidence policy reference disagrees")
+        capture = evidence.get("usb_capture")
+        if not isinstance(capture, dict) or set(capture) != {"minimum_routes", "excluded_routes", "internal_labels", "steps"}:
+            raise DatabaseValidationError("Campaign USB capture policy is missing")
+        if not isinstance(capture["steps"], list) or not capture["steps"]:
+            raise DatabaseValidationError("Campaign USB physical steps are missing")
+        if profile.usb.first_install_route not in capture["minimum_routes"] or set(capture["minimum_routes"]) & set(capture["excluded_routes"]):
+            raise DatabaseValidationError("Campaign USB route scope conflicts")
+        for step in capture["steps"]:
+            if not isinstance(step, dict) or not {"label", "connector", "speed"} <= set(step) or set(step) - {"label", "connector", "speed", "orientation"}:
+                raise DatabaseValidationError("Campaign USB step schema is invalid")
+            if not isinstance(step["label"], str) or not step["label"] or step["connector"] not in {"USB-A", "USB-C"} or step["speed"] not in {"high", "super"}:
+                raise DatabaseValidationError("Campaign USB step values are invalid")
+            if step["connector"] == "USB-C" and step.get("orientation") not in {"normal", "flipped"}:
+                raise DatabaseValidationError("Campaign USB-C orientation is required")
         _, recovery = _unique_record(db.data_dir / "recovery", "policy_id", str(raw["recovery_policy_id"]))
         targets = recovery.get("targets")
         if not isinstance(targets, list) or not any(
@@ -127,7 +142,7 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
         })
         result[identity] = ReferenceCampaign(
             identity, str(raw["revision"]), model_id, machine_type, bios, release, profile, policy,
-            str(raw["evidence_policy_id"]), canonical_json_digest(evidence), str(raw["recovery_policy_id"]),
+            str(raw["evidence_policy_id"]), canonical_json_digest(evidence), MappingProxyType(evidence), str(raw["recovery_policy_id"]),
             MappingProxyType(normalized), tuple(required), str(raw["support_state"]),
             str(raw["first_boot_instruction"]), raw["smoke_recovery_eligible"], digest,
         )

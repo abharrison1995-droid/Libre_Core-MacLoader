@@ -3,8 +3,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import os
 import tempfile
+import json
+import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from macloader.autoloader.models import ActionKind, AutoloaderSession, NextAction, Stage
 from macloader.autoloader.store import AutoloaderSessionStore
@@ -21,6 +23,10 @@ from macloader.domain.hardware import HardwareSnapshot
 from macloader.workflow.service import WorkflowService
 
 
+if TYPE_CHECKING:
+    from macloader.evidence.usb_capture import UsbEvidenceCollector
+
+
 class AutoloaderService:
     def __init__(self, workflow: Optional[WorkflowService] = None, root: Optional[Path] = None):
         self.root = Path(root or (DEFAULT_PRIVATE_DIR / "campaigns")).absolute()
@@ -33,6 +39,7 @@ class AutoloaderService:
         self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
+        self.usb_collector: Optional["UsbEvidenceCollector"] = None
         self.identity_root = self.root / "identities"
         self.workflow.orchestrator.builder.identity_store_dir = self.identity_root
 
@@ -54,6 +61,7 @@ class AutoloaderService:
         raw = snapshot or self.workflow.orchestrator.probe_hardware()
         candidate = self.workflow.orchestrator.db.candidate_campaign(raw)
         self._blocker = None
+        self.usb_collector = None
         self.session = None
         self.configuration = None
         self.snapshot = sanitize_hardware_snapshot(raw)
@@ -124,7 +132,10 @@ class AutoloaderService:
             return NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "Some required hardware facts could not be proven. MacLoader has preserved the session and needs focused evidence collection.", "HARDWARE_UNKNOWN")
         for kind, stage in (("acpi", Stage.ACPI), ("usb", Stage.USB)):
             records = [record for record in self.configuration.evidence if record.kind == kind]
-            if not any(record.completeness == EvidenceCompleteness.COMPLETE for record in records):
+            if not any(record.completeness == EvidenceCompleteness.COMPLETE or (kind == "usb" and record.completeness == EvidenceCompleteness.PARTIAL and record.physical_port_evidence and all("logical USB-C correlation unresolved" in check for check in record.unresolved_checks)) for record in records):
+                if kind == "usb":
+                    begun = "usb_wizard" in self.session.artifacts
+                    return NextAction(Stage.USB, ActionKind.HUMAN, self.usb_collector.instruction if self.usb_collector else "Remove external USB devices. Port checks use a USB 3 device and a USB 2 device or cable. MacLoader records the routes; you only move the device.", "USB_WAITING" if begun else "USB_PHYSICAL_EVIDENCE_REQUIRED", () if begun else ("Begin port checks",))
                 return NextAction(stage, ActionKind.AUTOMATIC if stage in self.handlers else ActionKind.BLOCKED,
                                   ("Collect firmware tables." if stage in self.handlers else "Firmware-table collection is not available in this prototype yet. Use Engineering to import existing evidence.")
                                   if kind == "acpi" else "Identify this laptop’s physical USB ports by moving the test device when prompted.",
@@ -158,6 +169,18 @@ class AutoloaderService:
         self._cancel = cancel or (lambda: False)
         for _ in range(32):
             action = self.next_action()
+            if action.code == "USB_WAITING" and not (cancel and cancel()):
+                try:
+                    if self.usb_collector is None:
+                        self._prepare_usb()
+                    self._poll_usb()
+                except Exception as exc:
+                    from macloader.evidence.acpi_capture import CaptureError
+                    self._blocker = NextAction(Stage.USB, ActionKind.BLOCKED, str(exc) if isinstance(exc, CaptureError) else "USB evidence collection could not complete. Saved observations are preserved; open Engineering diagnostics.", exc.code if isinstance(exc, CaptureError) else "USB_CAPTURE_FAILED")
+                    return self._blocker
+                if self.next_action().stage != Stage.USB:
+                    continue
+                return self.next_action()
             if action.kind != ActionKind.AUTOMATIC:
                 return action
             if cancel and cancel():
@@ -193,6 +216,80 @@ class AutoloaderService:
             self._save_session()
         raise RuntimeError("Guided action limit exceeded")
 
+    def _prepare_usb(self) -> None:
+        from macloader.evidence.usb_capture import UsbEvidenceCollector, UsbCaptureStep, LinuxUsbEventProvider, collect_firmware_usb_addresses
+        from macloader.evidence.usb import UsbEvidenceSession, UsbPortObservation
+        from macloader.evidence.acpi_capture import CaptureError
+        from macloader.domain.evidence import EvidenceConfidence
+        from macloader.toolchain.loader import TrustedToolchainLoader
+        from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+        from macloader.domain.contracts import canonical_json_digest
+        if self.snapshot is None or self.configuration is None or self.session is None or self.match is None or self.match.campaign is None:
+            raise ValueError("No active campaign")
+        if self.snapshot.raw_evidence.get("synthetic_fixture"):
+            raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect physical USB evidence from this host.")
+        if sys.platform == "win32":
+            raise CaptureError("USB_PROVIDER_UNAVAILABLE", "Windows physical-to-firmware USB correlation is not yet qualified. Use the Linux collector or Engineering evidence import; no port number will be guessed.")
+        acpi = next(r for r in self.configuration.evidence if r.kind == "acpi")
+        loader = TrustedToolchainLoader()
+        tools = loader.provision()
+        if not tools.acpi_compiler_path or not tools.acpi_compiler_sha256:
+            raise CaptureError("USB_FIRMWARE_UNAVAILABLE", "Verified firmware route tooling is unavailable.")
+        from macloader.build.acpi import AcpiProcessor
+        AcpiProcessor.capture_evidence_digest(Path(acpi.private_ref).parent, acpi.bios_binding, self.snapshot.snapshot_id)
+        addresses = collect_firmware_usb_addresses(Path(acpi.private_ref).parent, Path(tools.acpi_compiler_path), tools.acpi_compiler_sha256, self.root / "usb-private", self._cancel)
+        provider = LinuxUsbEventProvider(self.session.machine_binding, addresses)
+        policy = self.match.campaign.evidence_policy["usb_capture"]
+        binding = canonical_json_digest({"campaign": self.session.campaign_digest, "acpi": acpi.digest, "usb": scope_digest(self.snapshot, EVIDENCE_SCOPES["usb"])})
+        path = self.root / "usb" / f"{self.session.session_id}-{binding}.json"
+        self.workflow._ensure_private_directory(path.parent)
+        if path.exists():
+            progress = self.workflow._read_private_json(path, "USB wizard")
+            evidence = UsbEvidenceSession.from_dict(progress["evidence"])
+            if evidence.snapshot_id != self.snapshot.snapshot_id or evidence.bios_binding != acpi.bios_binding or evidence.private_ref != str(path.with_suffix(".evidence.json")):
+                raise CaptureError("USB_PROGRESS_INVALID", "Saved USB progress has an incompatible machine binding.")
+        else:
+            progress = None
+            internal = []
+            for event in provider.enumerate():
+                label = policy["internal_labels"].get(event.logical_port)
+                if label and event.internal and event.port_address is not None:
+                    internal.append(UsbPortObservation(label, event.logical_port, "internal", f"{event.speed_mbps}Mbps", event.controller,
+                                                       internal_device=True, port_address=event.port_address, namespace_path=event.namespace_path))
+            evidence = UsbEvidenceSession(self.snapshot.snapshot_id, acpi.bios_binding, str(path.with_suffix(".evidence.json")), "guided-usb-1", tuple(internal), EvidenceConfidence.HIGH)
+        steps = tuple(UsbCaptureStep(**step) for step in policy["steps"])
+        self.usb_collector = UsbEvidenceCollector(evidence, steps, provider,
+            lambda payload: self.workflow._write_private_json(path, json.dumps(payload)), progress)
+        self.session.artifacts["usb_wizard"] = {"input_digest": self.configuration.semantic_digest, "binding": binding}
+        self._save_session()
+
+    def _poll_usb(self) -> None:
+        from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+        if self.usb_collector is None or self.configuration is None or self.snapshot is None or self.match is None or self.match.campaign is None:
+            raise ValueError("No USB collector")
+        if not self.usb_collector.poll():
+            return
+        evidence = self.usb_collector.session
+        from macloader.evidence.acpi_capture import CaptureError
+        observed = self._current_bound_snapshot()
+        if scope_digest(observed, EVIDENCE_SCOPES["usb"]) != scope_digest(self.snapshot, EVIDENCE_SCOPES["usb"]):
+            raise CaptureError("USB_MACHINE_CHANGED", "Machine or BIOS changed during physical port checks; saved observations need recollection.")
+        policy = self.match.campaign.evidence_policy["usb_capture"]
+        routes = {o.logical_port for o in evidence.observations}
+        if not set(policy["minimum_routes"]) <= routes:
+            from macloader.evidence.acpi_capture import CaptureError
+            raise CaptureError("USB_SCOPE_INCOMPLETE", "Port movements are saved, but required internal USB routes remain unproven. Open Engineering diagnostics; no complete map was claimed.")
+        self.workflow._write_private_json(Path(evidence.private_ref), json.dumps(evidence.to_dict()))
+        record = replace(evidence.to_evidence_record(), input_scope=EVIDENCE_SCOPES["usb"], input_digest=scope_digest(self.snapshot, EVIDENCE_SCOPES["usb"]))
+        self.save_configuration(self.workflow.add_evidence(self.configuration, record))
+
+    def _current_bound_snapshot(self) -> HardwareSnapshot:
+        from macloader.evidence.acpi_capture import CaptureError
+        raw = self.workflow.orchestrator.probe_hardware()
+        if self.session is None or self.store.machine_binding(self._private_machine_material(raw)) != self.session.machine_binding:
+            raise CaptureError("MACHINE_CHANGED", "Machine binding changed during collection; nothing was accepted.")
+        return replace(sanitize_hardware_snapshot(raw), snapshot_id=self.session.snapshot_id)
+
     def _capture_acpi(self) -> None:
         from macloader.evidence.acpi_capture import CaptureError, LinuxElevatedAcpiCaptureProvider, WindowsAcpiCaptureProvider
         from macloader.toolchain.loader import TrustedToolchainLoader
@@ -200,12 +297,7 @@ class AutoloaderService:
             raise ValueError("No bound machine")
         if self.snapshot.raw_evidence.get("synthetic_fixture"):
             raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect this host’s firmware. No host tables were read.")
-        def current() -> HardwareSnapshot:
-            raw = self.workflow.orchestrator.probe_hardware()
-            if self.session is None or self.store.machine_binding(self._private_machine_material(raw)) != self.session.machine_binding:
-                raise CaptureError("ACPI_MACHINE_CHANGED", "Machine binding changed during capture; nothing was accepted.")
-            observed = sanitize_hardware_snapshot(raw)
-            return replace(observed, snapshot_id=self.session.snapshot_id)
+        current = self._current_bound_snapshot
         if os.name != "nt":
             updated = self.workflow.collect_acpi(self.configuration, self.snapshot, LinuxElevatedAcpiCaptureProvider(), current, self._cancel)
         else:
@@ -243,13 +335,16 @@ class AutoloaderService:
                     continue
         return tuple(refs)
 
-    def perform_choice(self, choice: str) -> NextAction:
+    def perform_choice(self, choice: str, cancel: Optional[Callable[[], bool]] = None) -> NextAction:
+        self._cancel = cancel or (lambda: False)
         action = self.next_action()
         if action.kind != ActionKind.HUMAN or choice not in action.choices:
             raise ValueError("This choice is not valid at the current checkpoint")
         if self.configuration is None or self.snapshot is None:
             raise ValueError("No active guided configuration")
-        if action.stage == Stage.ACCEPTANCE:
+        if action.stage == Stage.USB:
+            self._prepare_usb()
+        elif action.stage == Stage.ACCEPTANCE:
             updated = self.configuration
             policy = self.workflow.orchestrator.configuration_service.policy
             for option in policy.options.values():
@@ -280,7 +375,7 @@ class AutoloaderService:
                                              input_digest=self.configuration.semantic_digest,
                                              completed_at=datetime.now(timezone.utc).isoformat()))
             self._save_session()
-        return self.advance_until_blocked()
+        return self.advance_until_blocked(cancel=cancel)
 
     def review_summary(self) -> str:
         if self.snapshot is None or self.match is None or self.match.campaign is None:
