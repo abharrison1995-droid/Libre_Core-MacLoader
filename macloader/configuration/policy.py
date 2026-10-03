@@ -143,14 +143,14 @@ def _load_releases(data_dir: Path) -> Tuple[MacOsRelease, ...]:
 
 
 def _validate_profiles(data_dir: Path, profile_ids: List[Any], model_id: str) -> Tuple[str, ...]:
-    profile_dir = data_dir / "profiles" / "t480s"
+    profile_dir = data_dir / "profiles"
     validated: List[str] = []
     for raw_id in profile_ids:
         profile_id = str(raw_id)
         path = profile_dir / f"{profile_id.removeprefix('t480s-')}.yaml"
         if not path.is_file():
             # The catalog uses stable IDs while filenames may be descriptive.
-            matches = list(profile_dir.glob("*.yaml"))
+            matches = list(profile_dir.glob("**/*.yaml"))
             path = next((candidate for candidate in matches if _read_yaml(candidate).get("profile_id") == profile_id), path)
         if not path.is_file():
             raise DatabaseValidationError(f"Configuration profile '{profile_id}' is missing")
@@ -165,9 +165,15 @@ def _validate_profiles(data_dir: Path, profile_ids: List[Any], model_id: str) ->
     return tuple(validated)
 
 
-def load_configuration_policy(data_dir: Optional[Path] = None) -> ConfigurationPolicy:
+def load_configuration_policy(data_dir: Optional[Path] = None, *, policy_id: Optional[str] = None) -> ConfigurationPolicy:
     root = Path(data_dir) if data_dir else DEFAULT_CONFIGURATION_DIR
     path = root / "configuration" / "t480s.yaml"
+    if policy_id is not None:
+        matches = [candidate for candidate in (root / "configuration").glob("*.yaml")
+                   if _read_yaml(candidate).get("policy_version") == policy_id]
+        if len(matches) != 1:
+            raise DatabaseValidationError("Configuration policy reference is missing or ambiguous")
+        path = matches[0]
     data = _read_yaml(path)
     _require_keys(data, {"schema_version", "policy_version", "model_id", "profiles", "options"}, "T480s configuration policy")
     if data["schema_version"] != "1" or not isinstance(data["profiles"], list) or not isinstance(data["options"], list):

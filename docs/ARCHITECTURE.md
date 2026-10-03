@@ -48,3 +48,11 @@ Recovery and removable-media readiness are separate from EFI build readiness. Ex
 - Structural EFI validation is distinct from matching-tool `ocvalidate`; both are distinct from physical boot and support acceptance.
 - The default removable adapters are not physically qualified. The CLI currently exposes listing and planning, not production USB writes.
 - Identity values and raw hardware captures belong in protected per-user storage, not exported configurations or tracked output.
+
+## Reference campaign composition
+
+`Database.campaigns` loads validated `ReferenceCampaign` records from `database/data/campaigns`. A record links the existing model, exact release, reviewed EFI profile, configuration/evidence/Recovery policies and component identities. Linked content contributes to the campaign digest. Conflicting audio defaults, dangling references, firmware/target disagreement and duplicate machine selectors fail closed.
+
+`Database.candidate_campaign(snapshot)` checks vendor, product, exact machine type and normalized BIOS. This is only firmware candidate selection; complete component/observation reconciliation is a separate prerequisite. It does not establish physical acceptance. ACPI import and machine preflight use this lookup rather than independent machine/BIOS literals. Campaigns remain experimental.
+
+New campaigns receive separate versioned composition records. Graphics injection, layout values, dependency pins and logical USB routes stay in their existing reviewed records.

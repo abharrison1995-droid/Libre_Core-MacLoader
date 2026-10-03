@@ -115,11 +115,10 @@ class WorkflowService:
         """Validate and privately import this machine's raw DSDT/SSDT capture."""
         if configuration.hardware_snapshot_id != snapshot.snapshot_id:
             raise ValueError("ACPI import requires the configuration's bound hardware snapshot")
-        if snapshot.machine_type != "20L8":
-            raise ValueError("machine-bound ACPI import is currently reviewed only for ThinkPad T480s 20L8")
-        profile = load_reviewed_profile()
-        if normalize_bios_binding(snapshot.bios_version or "") != profile.bios_binding:
-            raise ValueError("ACPI capture must match the reviewed N22ET85W BIOS 1.62 profile")
+        campaign = self.orchestrator.db.candidate_campaign(snapshot)
+        if campaign is None:
+            raise ValueError("machine-bound ACPI capture must match a reviewed reference machine and BIOS")
+        profile = campaign.profile
         source = Path(source_directory).expanduser().absolute()
         self._reject_symlink_path(source)
         table_dir = source / "PRIVATE-ACPI" if (source / "PRIVATE-ACPI").is_dir() else source
@@ -231,8 +230,9 @@ class WorkflowService:
         elif configuration is None or snapshot.snapshot_id != configuration.hardware_snapshot_id:
             add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
         else:
-            supported_machine = snapshot.machine_type == "20L8"
-            bios_matches = normalize_bios_binding(snapshot.bios_version or "") == "N22ET85W-1.62"
+            campaign = self.orchestrator.db.candidate_campaign(snapshot)
+            supported_machine = campaign is not None
+            bios_matches = campaign is not None
             add("reference_machine", "ready" if supported_machine and bios_matches else "blocked",
                 "Reference ThinkPad T480s 20L8 / N22ET85W 1.62 observed." if supported_machine and bios_matches else "Observed hardware or BIOS does not match ThinkPad T480s 20L8 / N22ET85W 1.62.",
                 "Probe the reference 20L8 with BIOS N22ET85W 1.62; do not change BIOS as part of preflight." if not supported_machine or not bios_matches else "")

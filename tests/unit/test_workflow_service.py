@@ -321,7 +321,7 @@ def test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture(
     capture = _synthetic_acpi_capture(tmp_path)
 
     reference_snapshot = replace(snapshot, machine_type="20L8")
-    with pytest.raises(ValueError, match="BIOS 1.62"):
+    with pytest.raises(ValueError, match="reviewed reference machine and BIOS"):
         service.import_acpi_capture(configuration, reference_snapshot, capture)
 
     exact_snapshot = replace(reference_snapshot, bios_version="N22ET85W-1.62")

@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 import yaml
 
 from macloader.database.schema import (
@@ -13,6 +13,10 @@ from macloader.database.schema import (
 )
 from macloader.domain.dependencies import DependencySpec
 from macloader.exceptions import DatabaseNotFoundError, DatabaseValidationError
+
+if TYPE_CHECKING:
+    from macloader.database.campaigns import ReferenceCampaign
+    from macloader.domain.hardware import HardwareSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,8 @@ class Database:
         self.macos_profiles: Dict[str, MacOsSchema] = {}
         self.dependency_catalog: Optional[DependencyCatalogSchema] = None
         self._load_all()
+        from macloader.database.campaigns import load_campaigns
+        self.campaigns: Dict[str, ReferenceCampaign] = load_campaigns(self)
 
     def _load_yaml(self, path: Path) -> dict:
         try:
@@ -96,6 +102,27 @@ class Database:
                 if "macloader_dependency_set" in data:
                     self.dependency_catalog = DependencyCatalogSchema.validate_and_load(data, filename=f.name)
                     break
+
+    def candidate_campaign(self, snapshot: "HardwareSnapshot") -> Optional["ReferenceCampaign"]:
+        """Return a machine/firmware candidate; component reconciliation follows.
+
+        This lookup is never physical acceptance or complete campaign matching.
+        """
+        from macloader.build.acpi import normalize_bios_binding
+        matches = []
+        for campaign in self.campaigns.values():
+            model = self.get_model(campaign.model_id)
+            if model is None:
+                continue
+            product = f"{snapshot.product_name} {snapshot.product_version}".casefold()
+            if (snapshot.manufacturer.strip().casefold() == model.vendor.casefold()
+                    and snapshot.machine_type == campaign.machine_type
+                    and any(name.casefold() in product for name in model.product_names)
+                    and normalize_bios_binding(snapshot.bios_version or "") == campaign.bios_binding):
+                matches.append(campaign)
+        if len(matches) > 1:
+            raise DatabaseValidationError("Machine matches multiple reference campaigns")
+        return matches[0] if matches else None
 
     def get_model(self, model_id: str) -> Optional[ModelSchema]:
         return self.models.get(model_id.lower())
