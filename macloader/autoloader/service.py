@@ -216,6 +216,10 @@ class AutoloaderService:
             self._save_session()
         raise RuntimeError("Guided action limit exceeded")
 
+    @staticmethod
+    def _usb_platform() -> str:
+        return sys.platform
+
     def _prepare_usb(self) -> None:
         from macloader.evidence.usb_capture import UsbEvidenceCollector, UsbCaptureStep, LinuxUsbEventProvider, collect_firmware_usb_addresses
         from macloader.evidence.usb import UsbEvidenceSession, UsbPortObservation
@@ -228,7 +232,7 @@ class AutoloaderService:
             raise ValueError("No active campaign")
         if self.snapshot.raw_evidence.get("synthetic_fixture"):
             raise CaptureError("SYNTHETIC_CAPTURE_DISABLED", "Synthetic fixtures cannot collect physical USB evidence from this host.")
-        if sys.platform == "win32":
+        if self._usb_platform() == "win32":
             raise CaptureError("USB_PROVIDER_UNAVAILABLE", "Windows physical-to-firmware USB correlation is not yet qualified. Use the Linux collector or Engineering evidence import; no port number will be guessed.")
         acpi = next(r for r in self.configuration.evidence if r.kind == "acpi")
         loader = TrustedToolchainLoader()

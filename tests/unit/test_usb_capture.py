@@ -1,6 +1,7 @@
 """Physical event simulations are never hardware acceptance evidence."""
 from dataclasses import replace
 from pathlib import Path
+import sys
 import pytest
 
 from macloader.evidence.acpi_capture import CaptureError
@@ -107,6 +108,7 @@ def test_static_firmware_proof_cannot_execute_or_guess() -> None:
     assert not firmware_usb_addresses('Device (FAKE) { Name (_ADR, 2) }')
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Kernel sysfs topology uses POSIX-only colon filenames")
 def test_linux_provider_uses_firmware_path_and_private_token(tmp_path: Path) -> None:
     usb = tmp_path / '0000:00:14.0' / 'usb1'
     device = usb / '1-1'
@@ -192,8 +194,7 @@ def test_guided_wizard_owns_paths_and_attaches_only_completed_physical_steps(tmp
     monkeypatch.setattr('macloader.toolchain.loader.TrustedToolchainLoader.provision', lambda _: SimpleNamespace(acpi_compiler_path='synthetic', acpi_compiler_sha256='0' * 64))
     monkeypatch.setattr(service, '_current_bound_snapshot', lambda: snapshot)
     # Simulate the Linux provider on either CI host; actual Windows correlation remains blocked.
-    import macloader.autoloader.service as service_module
-    monkeypatch.setattr(service_module.sys, 'platform', 'linux')
+    monkeypatch.setattr(service, '_usb_platform', lambda: 'linux')
     service.perform_choice('Begin port checks')
     assert service.usb_collector is not None
     collector = service.usb_collector
