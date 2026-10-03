@@ -223,7 +223,12 @@ status page. The two pre-existing owner documentation edits remain uncommitted a
 preserved; they are not bundled into implementation commits. The previously
 corrected owner layout-86 YAML was integrated separately at cbc0a05.
 
-Final local integration gate: 584 tests passed, 79.48% branch coverage; native and
+Final local integration gate: 585 tests passed, 79.49% branch coverage; native and
 Windows-target mypy passed (140 files); wheel and sdist built and their
 outside-checkout smoke checks passed. The explicit real pinned-tool reference
 EFI/ocvalidate test also passed (1 test). Hosted verification follows below.
+
+The final scoped reviewer caught and rechecked a worker-entry cancellation race.
+Cancellation now resets on the UI thread before scheduling, never at worker
+entry; a regression quits between scheduling and entry and verifies the cancel
+signal survives. Recheck disposition: **ship**.

@@ -115,3 +115,28 @@ def test_multiple_usb_choices_require_selection_and_busy_quit_cancels(tmp_path: 
             assert app._cancelled and app._exit_after_work
             app._busy = False
     asyncio.run(exercise())
+
+
+def test_quit_between_worker_scheduling_and_entry_preserves_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def exercise() -> None:
+        service = AutoloaderService(root=tmp_path)
+        service.start(candidate(), private_material="test")
+        observed: list[bool] = []
+        def advance(**kwargs):  # type: ignore[no-untyped-def]
+            observed.append(kwargs["cancel"]())
+            return service.next_action()
+        monkeypatch.setattr(service, "advance_until_blocked", advance)
+        app = GuidedApp(service)
+        exits: list[bool] = []
+        monkeypatch.setattr(app, "exit", lambda result=False: exits.append(result))
+        original = app._advance
+        def schedule(choice=None):  # type: ignore[no-untyped-def]
+            app.action_quit()
+            original(choice)
+        monkeypatch.setattr(app, "_advance", schedule)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert observed == [True]
+            assert app._exit_after_work and exits == [False]
+    asyncio.run(exercise())

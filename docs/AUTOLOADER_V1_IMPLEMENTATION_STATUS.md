@@ -92,7 +92,7 @@ locally. Production pins remain unchanged. A Windows CLI test's reliance on the
 runner's real disks was discovered by hosted candidate CI and corrected through
 injection; failed CI prevented publication.
 
-Final local integration checks: **584 tests passed, 79.48% branch coverage**;
+Final local integration checks: **585 tests passed, 79.49% branch coverage**;
 native and Windows-target mypy passed for 140 files; wheel/sdist build and
 outside-checkout smoke checks passed. The explicit pinned-tool reference EFI
 and real matching ocvalidate test passed. Hosted verification is recorded in

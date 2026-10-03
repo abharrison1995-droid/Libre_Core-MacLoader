@@ -44,13 +44,17 @@ class GuidedApp(App[bool]):
 
     def on_mount(self) -> None:
         self._render_status()
-        self._advance()
+        self._start_advance()
         self.set_interval(1.0, self._poll_physical)
 
     def _poll_physical(self) -> None:
         if not self._busy and not self._cancelled and self.service.next_action().code == "USB_WAITING":
-            self._busy = True
-            self._advance()
+            self._start_advance()
+
+    def _start_advance(self, choice: Optional[str] = None) -> None:
+        self._cancelled = False
+        self._busy = True
+        self._advance(choice)
 
     @staticmethod
     def _stage_label(stage: Stage) -> str:
@@ -81,8 +85,6 @@ class GuidedApp(App[bool]):
 
     @work(thread=True, exclusive=True)
     def _advance(self, choice: Optional[str] = None) -> None:
-        self._busy = True
-        self._cancelled = False
         self.call_from_thread(self._render_status)
         error = ""
         try:
@@ -132,8 +134,7 @@ class GuidedApp(App[bool]):
                     if not isinstance(selected, str) or selected not in self._choices:
                         return
                     choice = selected
-                self._busy = True
-                self._advance(choice)
+                self._start_advance(choice)
         elif identifier == "retry-guided":
             self.action_refresh()
         elif identifier == "open-engineering":
@@ -142,8 +143,7 @@ class GuidedApp(App[bool]):
     def action_refresh(self) -> None:
         if not self._busy:
             self.service._blocker = None
-            self._busy = True
-            self._advance()
+            self._start_advance()
 
     def action_cancel(self) -> None:
         self._cancelled = True
