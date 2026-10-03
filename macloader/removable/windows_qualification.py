@@ -22,7 +22,9 @@ def backend_digest() -> str:
     digest = hashlib.sha256()
     for name in ('windows_native.py', 'windows_image.py', 'windows_qualification.py', 'adapters.py', 'writer.py'):
         digest.update(name.encode())
-        digest.update((root / name).read_bytes())
+        # Python normalizes source line endings; Git's Windows checkout and
+        # installed wheel must share the same reviewed semantic source digest.
+        digest.update((root / name).read_bytes().replace(b'\r\n', b'\n'))
     return digest.hexdigest()
 
 

@@ -109,3 +109,9 @@ Windows build/AMD64; it remains empty. The explicit sacrificial-device harness
 uses non-bootable qualification bytes and labels controlled fault injection.
 All previous machine, identity, Recovery, media-consent and support boundaries
 remain. PR #1 stays draft.
+
+Native follow-on final local checks: **660 tests passed, 80.31% branch coverage**;
+native/Windows-target mypy passed (144 files), wheel/sdist outside-checkout smoke
+and real pinned reference EFI/ocvalidate passed. Exact final hosted run links are
+retained in draft PR #1. Current read-only host is Linux MSI MS-7C02 (BIOS 3.K0),
+not a T480s; physical evidence remains absent.

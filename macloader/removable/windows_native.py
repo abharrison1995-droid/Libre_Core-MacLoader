@@ -69,6 +69,7 @@ class Win32Storage:
     def __init__(self, dll: Any = None) -> None:
         if dll is None and sys.platform != 'win32':
             raise UnsafeRemovableTarget('Native Windows storage is unavailable on this host')
+        self.native_runtime = dll is None
         self.dll: Any = dll if dll is not None else getattr(ctypes, 'WinDLL')('kernel32', use_last_error=True)
         p, u, h, b = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int32
         signatures = {
@@ -191,6 +192,8 @@ class WindowsNativeBackend:
     @property
     def production_qualified(self) -> bool:
         from macloader.removable.windows_qualification import approved_backend
+        if self.api is not None and (type(self.api) is not Win32Storage or not self.api.native_runtime):
+            return False
         return approved_backend()
 
     def _api(self) -> StorageAPI:

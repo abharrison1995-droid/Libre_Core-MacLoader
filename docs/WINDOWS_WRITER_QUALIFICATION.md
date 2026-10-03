@@ -1,7 +1,7 @@
 # Native Windows writer qualification
 
-Status: **implementation under software verification; no physical qualification or
-production approval**. ADR-007 remains Windows-first. PR #1 stays draft. The
+Status: **implementation supplied; no physical qualification or production
+approval**. Exact software verification results are recorded in draft PR #1. ADR-007 remains Windows-first. PR #1 stays draft. The
 known-green starting commit is `4dd066da20f866ddecb3844c451717a3c1c5be7d`.
 
 ## Implemented boundary
@@ -12,8 +12,10 @@ Windows. `GuidedMediaService.qualified` is unchanged. Only a reviewed packaged
 approval for the exact source digest, Windows kernel version and AMD64 platform
 can make `production_qualified` true. The approval catalog is empty.
 
-The source digest covers the backend, image generator, qualification code,
-adapter and shared writer. Editing any of these revokes matching approval. A
+The source digest normalizes CRLF to LF, so the reviewed Windows checkout and
+installed wheel share a binding; other byte changes invalidate it. It covers the
+backend, image generator, qualification code,
+adapter and shared writer. Editing any of these revokes matching approval. Injected/test APIs cannot inherit a production approval. A
 private report or CLI flag cannot grant production approval. A reviewed record
 must reference the physical report hash, review PR and all fifteen physical
 case outcomes. Tests, synthetic I/O and generated reports do not supply them.

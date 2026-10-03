@@ -648,3 +648,21 @@ def test_uefi_boot_paths_keep_canonical_short_names_and_long_aliases_do_not_coll
     image = WindowsMediaImage(image_plan(tmp_path), tmp_path)
     root_data = next(data for offset, data in image.extents if offset == image._offset(image.root))
     assert isinstance(root_data, bytes) and b'EFI        ' in root_data
+
+
+def test_reviewed_source_digest_survives_windows_line_endings_but_not_code_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = backend_digest()
+    original = Path.read_bytes
+    def windows_bytes(path: Path) -> bytes:
+        return original(path).replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    monkeypatch.setattr(Path, 'read_bytes', windows_bytes)
+    assert backend_digest() == expected
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: windows_bytes(path) + b'\r\n# changed source\r\n')
+    assert backend_digest() != expected
+
+
+def test_injected_storage_apis_cannot_inherit_native_production_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('macloader.removable.windows_qualification.approved_backend', lambda: True)
+    assert not WindowsNativeBackend(lambda: [row()], FakeAPI()).production_qualified
+    assert not WindowsNativeBackend(lambda: [row()], Win32Storage(FakeDLL())).production_qualified
+    assert WindowsNativeBackend(lambda: [row()]).production_qualified

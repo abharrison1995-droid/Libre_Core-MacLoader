@@ -274,3 +274,16 @@ EFI/ocvalidate test passed (1 test). The 72 new native/image/qualification cases
 use synthetic boundaries or disposable regular files; zero physical results.
 Hosted exact-commit standard and candidate gates are required before the harness
 can proceed; final run links are retained in draft PR #1.
+
+Approval hardening: source fingerprints normalize Git CRLF to LF for consistent
+Windows-checkout/wheel binding while rejecting other source changes. Injected
+API objects (including a Win32Storage test DLL) cannot inherit production approval.
+Final local gate: **660 tests passed, 80.31% branch coverage**, both mypy targets
+passed (144 files), wheel/sdist and outside-checkout smoke passed, and the explicit
+real reference EFI/ocvalidate test passed. The initial native commit aded8fb had
+green hosted PR matrix 37147168471 and candidate gates 37147166193; final hardening
+requires its own exact hosted verification before hardware use.
+
+Read-only current host check: Linux / MSI MS-7C02 / BIOS 3.K0, not the T480s.
+There is no native Windows or laptop physical access in this session. No physical
+case, real capture, identity decision, EFI campaign or boot result is recorded.
