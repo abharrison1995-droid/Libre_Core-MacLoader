@@ -36,7 +36,7 @@ class AutoloaderService:
         self.snapshot: Optional[HardwareSnapshot] = None
         self.configuration: Optional[UserConfiguration] = None
         self.match: Optional[CampaignMatch] = None
-        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi}
+        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
@@ -164,7 +164,14 @@ class AutoloaderService:
             return NextAction(Stage.DEPENDENCIES, ActionKind.AUTOMATIC, "Acquire and verify the reviewed dependencies.")
         if "efi" not in self.session.artifacts:
             return NextAction(Stage.BUILD, ActionKind.AUTOMATIC if Stage.BUILD in self.handlers else ActionKind.BLOCKED, "Build and validate the EFI.", "EFI_BUILD_REQUIRED")
-        return NextAction(Stage.RECOVERY_MODE, ActionKind.BLOCKED, "Resolve Recovery for the frozen target. Qualification requires proof of the exact build; no installation is authorized.", "RECOVERY_REQUIRED")
+        if "recovery" not in self.session.artifacts:
+            if self.session.recovery_mode == "smoke" and "recovery_choice" in self.session.artifacts:
+                return NextAction(Stage.RECOVERY, ActionKind.AUTOMATIC, "Acquire smoke-only Recovery. Build is unproven; Apple signature and all image chunks must verify. No installation is authorized.")
+            if "qualification_attempt" not in self.session.artifacts:
+                return NextAction(Stage.RECOVERY, ActionKind.AUTOMATIC, "Try exact Recovery qualification for Sequoia 15.0 build 24A335.")
+            choices = ("Retry exact qualification", "Smoke test only") if campaign and campaign.smoke_recovery_eligible else ("Retry exact qualification",)
+            return NextAction(Stage.RECOVERY_MODE, ActionKind.HUMAN, "Exact build 24A335 Recovery remains unproven. Smoke mode uses untrusted legacy metadata and verifies Apple-signed HTTPS payload bytes only. It permits picker/Recovery testing only; no erase or installation.", "EXACT_RECOVERY_BLOCKED", choices)
+        return NextAction(Stage.MEDIA, ActionKind.BLOCKED, "Recovery preparation is saved. A physically qualified removable-media writer is required before any USB write.", "WRITER_UNQUALIFIED")
 
     def advance_until_blocked(self, cancel: Optional[Callable[[], bool]] = None) -> NextAction:
         """Run only registered safe operations; recompute prerequisites after each."""
@@ -221,6 +228,46 @@ class AutoloaderService:
             record["state"] = "complete"
             self._save_session()
         raise RuntimeError("Guided action limit exceeded")
+
+    def _recovery_binding(self) -> str:
+        from macloader.domain.contracts import canonical_json_digest
+        if self.session is None or self.configuration is None or "efi" not in self.session.artifacts:
+            raise ValueError("No current EFI")
+        return canonical_json_digest({"configuration": self.configuration.semantic_digest,
+            "campaign": self.session.campaign_digest, "efi": self.session.artifacts["efi"]["digest"], "purpose": "first-boot-only"})
+
+    def _prepare_recovery(self) -> None:
+        from macloader.recovery.smoke import SmokeRecoveryService, VerifiedSmokeRecovery
+        from macloader.domain.recovery import RecoveryTarget
+        from macloader.evidence.acpi_capture import CaptureError
+        if self.configuration is None or self.session is None or self.match is None or self.match.campaign is None or self.configuration.target is None:
+            raise ValueError("No active target")
+        campaign = self.match.campaign
+        if self.session.recovery_mode != "smoke" or "recovery_choice" not in self.session.artifacts:
+            try:
+                result = self.workflow.discover_recovery(cancel=self._cancel)
+                state = result.state.value
+            except Exception:
+                state = "unavailable"
+            self._record_artifact("qualification_attempt", state=state)
+            return  # AP and payload signature cannot mint an exact-build Recovery lock
+        service = SmokeRecoveryService(campaign.smoke_recovery_policy)
+        destination = self.root / "recovery" / self._recovery_binding()
+        if (destination / "smoke.json").is_file():
+            record = VerifiedSmokeRecovery.from_dict(self.workflow._read_private_json(destination / "smoke.json", "smoke Recovery"))
+            target = self.configuration.target
+            if record.requested_target != RecoveryTarget(target.product_id, target.product_name, target.version, target.build):
+                raise ValueError("Smoke record requested target changed")
+            service.verify(record, destination, self._recovery_binding(), self._cancel)
+        else:
+            try:
+                target = self.configuration.target
+                requested = RecoveryTarget(target.product_id, target.product_name, target.version, target.build)
+                candidate = service.discover(requested, self._cancel)
+                record = service.acquire(candidate, self._recovery_binding(), destination, self._cancel)
+            except Exception as exc:
+                raise CaptureError("SMOKE_RECOVERY_BLOCKED", "Smoke Recovery could not meet its source, bounded-download or Apple-signature requirements. No USB was written; partial acquisition is preserved privately for retry. Exact 24A335 qualification remains unproven.") from exc
+        self._record_artifact("recovery", path=str(destination), digest=record.digest, mode="smoke")
 
     def _record_artifact(self, kind: str, **metadata: str) -> None:
         if self.configuration is None or self.session is None:
@@ -407,7 +454,14 @@ class AutoloaderService:
             raise ValueError("This choice is not valid at the current checkpoint")
         if self.configuration is None or self.snapshot is None:
             raise ValueError("No active guided configuration")
-        if action.stage == Stage.USB:
+        if action.stage == Stage.RECOVERY_MODE:
+            if self.session is None:
+                raise ValueError("No active campaign")
+            self.session.recovery_mode = "smoke" if choice == "Smoke test only" else "qualification"
+            self.session.artifacts.pop("qualification_attempt", None)
+            self.session.artifacts.pop("recovery", None)
+            self._record_artifact("recovery_choice", mode=self.session.recovery_mode, campaign_digest=self.session.campaign_digest)
+        elif action.stage == Stage.USB:
             self._prepare_usb()
         elif action.stage == Stage.ACCEPTANCE:
             updated = self.configuration

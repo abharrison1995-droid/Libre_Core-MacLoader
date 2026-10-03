@@ -28,6 +28,7 @@ class RecoveryAsset:
     sha256: str
     size_bytes: int
     session_token: Optional[str] = None
+    purpose: str = "qualification"
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,11 @@ class RecoveryAcquirer:
             raise ArtifactDownloadError("Recovery asset build is missing or empty")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset.build):
             raise ArtifactDownloadError(f"Recovery asset build contains invalid characters: {asset.build}")
-        if not validate_recovery_product_version(asset.product, asset.build, self.expected_macos):
+        if asset.purpose not in {"qualification", "picker-recovery-smoke-only"}:
+            raise ArtifactDownloadError("Recovery asset purpose is invalid")
+        if asset.purpose == "picker-recovery-smoke-only" and (asset.build != "unproven" or asset.product != "OpenCorePickerSmoke"):
+            raise ArtifactDownloadError("Smoke assets must not claim a macOS build")
+        if asset.purpose == "qualification" and not validate_recovery_product_version(asset.product, asset.build, self.expected_macos):
             raise ArtifactDownloadError(
                 f"Recovery product/build is not supported for macOS {self.expected_macos}: "
                 f"{asset.product}/{asset.build}"
@@ -471,7 +476,7 @@ class RecoveryAcquirer:
                     staged_image = downloader.download(image, staging / "image.part")
                     staged_chunklist = downloader.download(chunklist, staging / "chunklist.part")
                     verified_chunks, image_size = verify_apple_chunklist(
-                        staged_image, staged_chunklist, image.sha256, chunklist.sha256
+                        staged_image, staged_chunklist, image.sha256, chunklist.sha256, self.cancel
                     )
                     had_image = self._entry_exists(destination_directory_fd, image_destination.name)
                     had_chunklist = self._entry_exists(destination_directory_fd, chunklist_destination.name)

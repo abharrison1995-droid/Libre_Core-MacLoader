@@ -1,6 +1,6 @@
 schema_version: "1"
 campaign_id: t480s-20l8-n22et85w-162-sequoia
-revision: "2"
+revision: "3"
 model_id: thinkpad-t480s
 machine_type: "20L8"
 bios_binding: N22ET85W-1.62
@@ -22,3 +22,4 @@ required_evidence: [acpi, usb]
 support_state: EXPERIMENTAL
 first_boot_instruction: lenovo-f12-recovery-smoke
 smoke_recovery_eligible: true
+smoke_recovery_policy_id: prototype-smoke-2026.10-a

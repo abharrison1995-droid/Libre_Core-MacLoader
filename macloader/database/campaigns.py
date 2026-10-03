@@ -38,6 +38,7 @@ class ReferenceCampaign:
     support_state: str
     first_boot_instruction: str
     smoke_recovery_eligible: bool
+    smoke_recovery_policy: Mapping[str, Any]
     digest: str
 
 
@@ -58,7 +59,7 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
             "schema_version", "campaign_id", "revision", "model_id", "machine_type", "bios_binding",
             "target", "reviewed_profile_id", "configuration_policy_id", "evidence_policy_id",
             "recovery_policy_id", "required_components", "required_evidence", "support_state",
-            "first_boot_instruction", "smoke_recovery_eligible",
+            "first_boot_instruction", "smoke_recovery_eligible", "smoke_recovery_policy_id",
         }, "reference campaign")
         if raw["schema_version"] != "1" or raw["support_state"] != "EXPERIMENTAL":
             raise DatabaseValidationError("Reference campaign schema/support state is not reviewed")
@@ -115,6 +116,9 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
             for item in targets if isinstance(item, dict)
         ):
             raise DatabaseValidationError("Campaign Recovery target reference disagrees")
+        _, smoke = _unique_record(db.data_dir / "recovery", "policy_id", str(raw["smoke_recovery_policy_id"]))
+        if smoke.get("purpose") != "picker-recovery-smoke-only" or smoke.get("metadata_trust") != "untrusted" or smoke.get("query_scheme") != "http" or smoke.get("asset_scheme") != "https" or smoke.get("actual_build") != "unknown" or smoke.get("installation_authorized") is not False:
+            raise DatabaseValidationError("Smoke Recovery policy trust boundaries are invalid")
         components = raw["required_components"]
         if not isinstance(components, dict) or not components:
             raise DatabaseValidationError("Campaign component references are missing")
@@ -132,7 +136,7 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
             raise DatabaseValidationError("Campaign requires machine ACPI and physical USB evidence")
         digest = canonical_json_digest({
             "campaign": raw, "configuration": policy.source_digest, "profile": profile.source_digest,
-            "release": release.release_record_digest, "evidence": evidence, "recovery": recovery,
+            "release": release.release_record_digest, "evidence": evidence, "recovery": recovery, "smoke_recovery": smoke,
             "model": asdict(model),
             "components": {key: asdict(db.components[key]) for ids in normalized.values() for key in ids},
             "capability_profiles": [
@@ -144,6 +148,6 @@ def load_campaigns(db: "Database") -> dict[str, ReferenceCampaign]:
             identity, str(raw["revision"]), model_id, machine_type, bios, release, profile, policy,
             str(raw["evidence_policy_id"]), canonical_json_digest(evidence), MappingProxyType(evidence), str(raw["recovery_policy_id"]),
             MappingProxyType(normalized), tuple(required), str(raw["support_state"]),
-            str(raw["first_boot_instruction"]), raw["smoke_recovery_eligible"], digest,
+            str(raw["first_boot_instruction"]), raw["smoke_recovery_eligible"], MappingProxyType(smoke), digest,
         )
     return result
