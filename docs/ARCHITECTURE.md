@@ -98,3 +98,11 @@ Safe Tools → private identity decision → final experimental acceptance → d
 `build.usb_map.generate_usb_map` creates an original codeless AppleUSBHostMergeProperties injector from current USB session plus corroborated firmware `_ADR` values and normalized HardwareSnapshot controller slots. Both USB-A speed companions and reviewed internal routes must be proven, one controller must match, and the 15-port limit is enforced. The frozen P4 policy omits WWAN and Type-C routes. The builder requires source USB digest in the accepted BuildPlan, independently disassembles current firmware, emits MacLoaderUSBMap.kext, adds its codeless OpenCore Kernel entry, and binds source + generated plist digests into existing manifest evidence_digests. No new parallel map database or arbitrary plist input exists. Recovery binding regenerates/checks these same digests. References: [USBMap injector implementation](https://github.com/corpnewt/USBMap/blob/master/USBMap.py), [OpenCore 1.0.7 configuration specification](https://github.com/acidanthera/OpenCorePkg/blob/1.0.7/Docs/Configuration.tex).
 
 Configuration acceptance also checks actual raw ACPI file hashes against captured metadata, rejecting even a structurally valid table mutation; metadata alone cannot satisfy firmware acceptance. ACPI compiler work and identity-bearing EFI files reside in the protected campaign workspace. Synthetic snapshots cannot invoke the production builder through the autoloader; tests explicitly use synthetic artifacts/identity in temporary paths.
+
+Guided media preparation uses `GuidedMediaService` over `RemovableMediaWriter`.
+`MediaBindings` distinguishes exact qualification locks from smoke-only records.
+The current campaign builds a private EFI + Recovery + Apple boot-layout source;
+this cannot enable an unqualified adapter. Explicit target selection is followed
+by a fresh erase decision; neither is saved as reusable consent. A persisted
+journal reports possible destructive I/O even if readiness fails. Windows-first
+writer qualification and safe eject are required before the guided writer runs.

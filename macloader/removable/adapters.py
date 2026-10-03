@@ -238,6 +238,15 @@ class WindowsRemovableAdapter:
             require_published_artifacts=self.status.qualified and not self._synthetic_test_mode,
         )
 
+    @property
+    def guided_eject_available(self) -> bool:
+        return self.status.qualified and callable(getattr(self._backend, "safe_eject", None))
+
+    def safe_eject(self, device: RemovableDevice) -> None:
+        if not self.guided_eject_available:
+            raise UnsafeRemovableTarget("Qualified safe eject is unavailable")
+        getattr(self._backend, "safe_eject")(device)
+
     @staticmethod
     def _optional_text(value: Any) -> Optional[str]:
         if value is None:

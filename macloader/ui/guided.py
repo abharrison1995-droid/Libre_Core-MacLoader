@@ -4,7 +4,7 @@ from typing import Optional
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Header, Select, Static
 
 from macloader.autoloader.models import ActionKind, Stage
 from macloader.autoloader.service import AutoloaderService
@@ -34,6 +34,7 @@ class GuidedApp(App[bool]):
             yield Static("Identifying this laptop…", id="campaign-review", markup=False)
             yield Static("", id="stage-progress", markup=False)
             yield Static("", id="next-action", markup=False)
+            yield Select[str]([], prompt="Select the exact USB", id="media-selection")
             yield Button("", id="choice-one", variant="primary")
             yield Button("", id="choice-two")
             yield Button("Retry preparation", id="retry-guided")
@@ -61,10 +62,18 @@ class GuidedApp(App[bool]):
         self.query_one("#stage-progress", Static).update(f"Step {stages.index(action.stage) + 1} of {len(stages)} · {self._stage_label(action.stage)}")
         self.query_one("#next-action", Static).update(error or ("Preparing automatically…" if self._busy else ("Preparation paused. " if action.kind == ActionKind.BLOCKED else "") + action.message))
         self._choices = action.choices
+        selector = self.query_one("#media-selection", Select)
+        selector.display = len(self._choices) > 2
+        selector.disabled = self._busy
+        if len(self._choices) > 2:
+            current = selector.value
+            selector.set_options([(label, label) for label in self._choices])
+            if current in self._choices:
+                selector.value = current
         for index, identifier in enumerate(("choice-one", "choice-two")):
             button = self.query_one(f"#{identifier}", Button)
-            button.display = index < len(self._choices)
-            button.label = self._choices[index] if index < len(self._choices) else ""
+            button.display = index < len(self._choices) and (len(self._choices) <= 2 or index == 0)
+            button.label = "Select this USB" if len(self._choices) > 2 else self._choices[index] if index < len(self._choices) else ""
             button.disabled = self._busy
         self.query_one("#retry-guided", Button).disabled = self._busy
         self.query_one("#open-engineering", Button).disabled = self._busy
@@ -83,7 +92,15 @@ class GuidedApp(App[bool]):
                     self.service.start()
                 self.service.advance_until_blocked(cancel=lambda: self._cancelled)
         except Exception:
-            error = "Preparation could not complete. No destructive action occurred; saved work is preserved. Retry or open Engineering diagnostics."
+            from macloader.evidence.acpi_capture import CaptureError
+            import sys
+            exc = sys.exception()
+            if isinstance(exc, CaptureError):
+                error = str(exc)
+            elif self.service.public_status().get("destructive_operation_may_have_occurred"):
+                error = "USB preparation could not complete. The selected USB may have been erased and is not ready. Saved sources are preserved; open Engineering diagnostics."
+            else:
+                error = "Preparation could not complete. No destructive action occurred; saved work is preserved. Retry or open Engineering diagnostics."
         finally:
             self._busy = False
             self.call_from_thread(self._render_status, error)
@@ -95,8 +112,14 @@ class GuidedApp(App[bool]):
         if identifier in {"choice-one", "choice-two"}:
             index = 0 if identifier == "choice-one" else 1
             if index < len(self._choices):
+                choice = self._choices[index]
+                if len(self._choices) > 2:
+                    selected = self.query_one("#media-selection", Select).value
+                    if not isinstance(selected, str) or selected not in self._choices:
+                        return
+                    choice = selected
                 self._busy = True
-                self._advance(self._choices[index])
+                self._advance(choice)
         elif identifier == "retry-guided":
             self.action_refresh()
         elif identifier == "open-engineering":

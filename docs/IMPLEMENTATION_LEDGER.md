@@ -86,3 +86,34 @@ P7 gates: 558 tests passed, 79.66% branch coverage; mypy native and Windows stub
 ## Autoloader P8 — Qualification and smoke Recovery separation
 
 Exact discovery is attempted automatically, then exposes explicit Retry exact / Smoke test only choices. Qualification does not mint a lock from AP or signed bytes. The separate smoke policy references reviewed 1.0.8 protocol source, explicitly treats legacy metadata as untrusted, rejects redirects/unsafe asset schemes, uses bounded HTTPS acquisition and existing Apple chunklist/image verification. A distinct immutable smoke record cannot claim an actual build, qualify the target or authorize installation. Requested target stays 15.0/24A335. Restart re-verifies signed bytes before adopting a persisted smoke record. See ADR-008 for the explicit protocol migration and replay limitation. P7 commit 7b6e7ee passed both hosted CI runs 37132625887 and 37132628597.
+
+### P9 — Guided media contract (2026-10-03)
+
+Added `autoloader/media.py`: private, resumable source preparation; campaign-bound
+smoke verification; real OpenCore `com.apple.recovery.boot/BaseSystem` layout;
+unsafe target filtering; stable model/size/opaque identity selection; one explicit
+erase decision using the existing expiring confirmation; immediate target/source
+rechecks; full readback, failure invalidation and required safe eject. Selection
+and consent are memory-only and cannot survive restart. The journal conservatively
+records possible destructive I/O before crossing the writer boundary, including
+failed attempts and later configuration changes. Guided clients never promise
+that no write occurred after that boundary.
+
+Extended existing `MediaBindings` with an exclusive smoke purpose and separate
+smoke digest; qualification serialization and exact-lock verification remain
+unchanged. The writer re-verifies the Apple signature, campaign target, source
+bytes, boot-layout copies and policy at publication. Smoke records cannot satisfy
+qualification bindings. Disposable copying now retains root publication files.
+
+**Physical enablement remains blocked:** no qualified native Windows backend is
+supplied by this checkout, and ADR-007 Windows-first physical qualification has
+not occurred. Safe-eject availability is separately required. Linux remains
+unqualified. This phase supplies tested integration, not writer qualification;
+no physical device has been written. Disposable tests cover hot swaps, unsafe
+internal targets, corrupt source/readback, signature checks and eject.
+
+P8 hosted push/PR CI was green at e76a24c (runs 37133597691/37133600655).
+
+P9 local gate: 564 tests passed, 79.15% branch coverage (79% required);
+native and Windows-target mypy passed (132 files); wheel and sdist smoke passed
+outside checkout. Physical writer qualification remains an external campaign gate.

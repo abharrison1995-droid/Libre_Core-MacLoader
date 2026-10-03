@@ -16,7 +16,7 @@ from macloader.configuration.observations import reconcile_configuration
 from macloader.configuration.store import ConfigurationStore
 from macloader.detection.sanitize import sanitize_hardware_snapshot
 from macloader.domain.configuration import UserConfiguration
-from macloader.domain.contracts import IdentityReference
+from macloader.domain.contracts import BuildManifest, IdentityReference
 from macloader.identity.service import IdentityService, IdentityServiceError
 from macloader.domain.evidence import EvidenceCompleteness
 from macloader.domain.hardware import HardwareSnapshot
@@ -36,10 +36,12 @@ class AutoloaderService:
         self.snapshot: Optional[HardwareSnapshot] = None
         self.configuration: Optional[UserConfiguration] = None
         self.match: Optional[CampaignMatch] = None
-        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery}
+        self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery, Stage.MEDIA: self._prepare_media}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
+        from macloader.autoloader.media import GuidedMediaService
+        self.media = GuidedMediaService()
         self.identity_root = self.root / "identities"
         self.workflow.orchestrator.builder.identity_store_dir = self.identity_root
 
@@ -62,6 +64,7 @@ class AutoloaderService:
         candidate = self.workflow.orchestrator.db.candidate_campaign(raw)
         self._blocker = None
         self.usb_collector = None
+        self.media.selected = None
         self.session = None
         self.configuration = None
         self.snapshot = sanitize_hardware_snapshot(raw)
@@ -171,7 +174,17 @@ class AutoloaderService:
                 return NextAction(Stage.RECOVERY, ActionKind.AUTOMATIC, "Try exact Recovery qualification for Sequoia 15.0 build 24A335.")
             choices = ("Retry exact qualification", "Smoke test only") if campaign and campaign.smoke_recovery_eligible else ("Retry exact qualification",)
             return NextAction(Stage.RECOVERY_MODE, ActionKind.HUMAN, "Exact build 24A335 Recovery remains unproven. Smoke mode uses untrusted legacy metadata and verifies Apple-signed HTTPS payload bytes only. It permits picker/Recovery testing only; no erase or installation.", "EXACT_RECOVERY_BLOCKED", choices)
-        return NextAction(Stage.MEDIA, ActionKind.BLOCKED, "Recovery preparation is saved. A physically qualified removable-media writer is required before any USB write.", "WRITER_UNQUALIFIED")
+        if "media_source" not in self.session.artifacts or self.media.source is None:
+            return NextAction(Stage.MEDIA, ActionKind.AUTOMATIC, "Verify and prepare private USB source files. No device is written.")
+        if "media_write" in self.session.artifacts:
+            return NextAction(Stage.FIRST_BOOT, ActionKind.BLOCKED, "USB readback and eject are recorded. First-boot checkpoints are required.", "FIRST_BOOT_REQUIRED")
+        if not self.media.qualified:
+            return NextAction(Stage.MEDIA, ActionKind.BLOCKED, "Preparation is saved. ADR-007 requires a physically qualified Windows writer with full readback and safe eject before a USB can be erased.", "WRITER_UNQUALIFIED")
+        if self.media.selected is not None:
+            return NextAction(Stage.WRITE, ActionKind.HUMAN, f"Erase all data on {self.media.selected.label}? This prepares smoke-only picker/Recovery media. The internal disk is not an installation target.", "USB_ERASE_CONFIRMATION", ("Erase selected USB and prepare", "Choose another USB"), True)
+        if not self.media.selections:
+            return NextAction(Stage.MEDIA, ActionKind.HUMAN, "Connect an unmounted sacrificial USB with a stable identity. Internal disks and unsafe devices are hidden.", "MEDIA_DEVICE_REQUIRED", ("Find USB devices",))
+        return NextAction(Stage.MEDIA, ActionKind.HUMAN, "Select the exact sacrificial USB by model, size and identifying reference. Selection does not erase it.", "MEDIA_SELECT", tuple(item.label for item in self.media.selections))
 
     def advance_until_blocked(self, cancel: Optional[Callable[[], bool]] = None) -> NextAction:
         """Run only registered safe operations; recompute prerequisites after each."""
@@ -251,6 +264,7 @@ class AutoloaderService:
                 state = "unavailable"
             self._record_artifact("qualification_attempt", state=state)
             return  # AP and payload signature cannot mint an exact-build Recovery lock
+        self._current_efi_manifest()
         service = SmokeRecoveryService(campaign.smoke_recovery_policy)
         destination = self.root / "recovery" / self._recovery_binding()
         if (destination / "smoke.json").is_file():
@@ -268,6 +282,50 @@ class AutoloaderService:
             except Exception as exc:
                 raise CaptureError("SMOKE_RECOVERY_BLOCKED", "Smoke Recovery could not meet its source, bounded-download or Apple-signature requirements. No USB was written; partial acquisition is preserved privately for retry. Exact 24A335 qualification remains unproven.") from exc
         self._record_artifact("recovery", path=str(destination), digest=record.digest, mode="smoke")
+
+    def _current_efi_manifest(self) -> "BuildManifest":
+        from macloader.domain.contracts import BuildManifest
+        from macloader.toolchain.loader import TrustedToolchainLoader
+        if self.configuration is None or self.snapshot is None or self.session is None:
+            raise ValueError("No current campaign")
+        artifact = self.session.artifacts["efi"]
+        path = Path(artifact["path"])
+        manifest = BuildManifest.from_dict(self.workflow._read_private_json(path / "manifest.json", "EFI manifest"))
+        self.workflow.derive_recovery_binding(self.configuration, self.snapshot, TrustedToolchainLoader().select(), manifest, path)
+        if manifest.build_digest != artifact["digest"]:
+            raise ValueError("EFI changed after publication")
+        return manifest
+
+    def _prepare_media(self) -> None:
+        from macloader.recovery.smoke import SmokeRecoveryService, VerifiedSmokeRecovery
+        from macloader.evidence.acpi_capture import CaptureError
+        if self.configuration is None or self.session is None or self.match is None or self.match.campaign is None:
+            raise ValueError("No current campaign")
+        artifact = self.session.artifacts["recovery"]
+        if artifact.get("mode") != "smoke":
+            raise CaptureError("QUALIFICATION_MEDIA_BLOCKED", "Exact qualification media needs authenticated exact-build Recovery evidence. No version substitution is permitted.")
+        manifest = self._current_efi_manifest()
+        recovery = Path(artifact["path"])
+        record = VerifiedSmokeRecovery.from_dict(self.workflow._read_private_json(recovery / "smoke.json", "smoke Recovery"))
+        if record.digest != artifact["digest"] or record.binding_digest != self._recovery_binding():
+            raise ValueError("Recovery changed after verification")
+        destination = self.root / "media" / self._recovery_binding()
+        campaign = self.match.campaign
+        self.media.prepare(destination, Path(self.session.artifacts["efi"]["path"]), recovery, manifest, record,
+            SmokeRecoveryService(campaign.smoke_recovery_policy), self.configuration.semantic_digest, campaign.digest)
+        self._record_artifact("media_source", path=str(destination), digest=record.digest)
+
+    def _write_media(self) -> None:
+        if self.session is None:
+            raise ValueError("No campaign")
+        self._current_efi_manifest()
+        def mark_started() -> None:
+            assert self.session is not None
+            self.session.actions.append(dict(stage="write", state="destructive-boundary", destructive="may-have-occurred"))
+            self._record_artifact("media_attempt", destructive="may-have-occurred")
+        plan = self.media.write(self._cancel, mark_started)
+        self.session.actions.append(dict(stage="write", state="readback-eject-complete", destructive="performed"))
+        self._record_artifact("media_write", digest=plan.plan_digest, readback="complete", eject="complete", purpose=plan.bindings.purpose)
 
     def _record_artifact(self, kind: str, **metadata: str) -> None:
         if self.configuration is None or self.session is None:
@@ -461,6 +519,16 @@ class AutoloaderService:
             self.session.artifacts.pop("qualification_attempt", None)
             self.session.artifacts.pop("recovery", None)
             self._record_artifact("recovery_choice", mode=self.session.recovery_mode, campaign_digest=self.session.campaign_digest)
+        elif action.stage == Stage.MEDIA:
+            if choice == "Find USB devices":
+                self.media.discover()
+            else:
+                self.media.select(choice)
+        elif action.stage == Stage.WRITE:
+            if choice == "Choose another USB":
+                self.media.discover()
+            else:
+                self._write_media()
         elif action.stage == Stage.USB:
             self._prepare_usb()
         elif action.stage == Stage.ACCEPTANCE:
@@ -512,4 +580,5 @@ class AutoloaderService:
     def public_status(self) -> dict[str, object]:
         return {"machine": "Lenovo ThinkPad T480s" if self.session else "Unmatched machine",
                 "experimental": True, "action": self.next_action().to_dict(),
-                "destructive_operation_performed": False}
+                "destructive_operation_performed": any(a.get("destructive") == "performed" for a in self.session.actions) if self.session else False,
+                "destructive_operation_may_have_occurred": any(a.get("destructive") in {"may-have-occurred", "performed"} for a in self.session.actions) if self.session else False}

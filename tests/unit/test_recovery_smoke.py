@@ -90,6 +90,7 @@ def test_guided_exact_failure_requires_explicit_mode_without_target_substitution
     service._record_artifact('efi', digest='e' * 64, path=str(tmp_path / 'synthetic-efi'))
     monkeypatch.setattr(service.workflow, 'discover_recovery', lambda **kwargs: (_ for _ in ()).throw(ArtifactDownloadError('HTTP 405')))
     assert service.advance_until_blocked().stage == Stage.RECOVERY_MODE
+    monkeypatch.setattr(service, '_current_efi_manifest', lambda: None)
     monkeypatch.setattr(SmokeRecoveryService, 'discover', lambda *args: (_ for _ in ()).throw(ArtifactDownloadError('unsupported source')))
     action = service.perform_choice('Smoke test only')
     assert action.code == 'SMOKE_RECOVERY_BLOCKED'

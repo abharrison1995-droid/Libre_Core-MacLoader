@@ -15,7 +15,10 @@ import stat
 import tempfile
 import time
 from contextlib import contextmanager
-from typing import Callable, Iterator, List, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, List, Optional, Sequence
+
+if TYPE_CHECKING:
+    from macloader.recovery.smoke import VerifiedSmokeRecovery
 
 from macloader.exceptions import MacLoaderError
 from macloader.domain.contracts import BuildManifest, canonical_json_digest
@@ -77,6 +80,9 @@ class MediaBindings:
     configuration_digest: str = ""
     toolchain_digest: str = ""
     evidence_digest: str = ""
+    purpose: str = "qualification"
+    campaign_digest: str = ""
+    smoke_digest: str = ""
 
     @classmethod
     def from_published_contracts(
@@ -107,29 +113,34 @@ class MediaBindings:
             evidence_digest=canonical_json_digest(evidence.to_dict()),
         )
 
+    @classmethod
+    def from_smoke(cls, manifest: BuildManifest, record: "VerifiedSmokeRecovery", configuration_digest: str, campaign_digest: str) -> "MediaBindings":
+        manifest_digest = canonical_json_digest(manifest.to_dict())
+        expected = canonical_json_digest({"configuration": configuration_digest,
+            "campaign": campaign_digest, "efi": manifest.build_digest, "purpose": "first-boot-only"})
+        if manifest.validation_report != "VALID" or record.binding_digest != expected:
+            raise ValueError("Smoke media inputs are stale or invalid")
+        return cls(manifest_digest, "", canonical_json_digest({"manifest_digest": manifest_digest,
+            "validation_report": manifest.validation_report}), configuration_digest,
+            manifest.toolchain_digest, record.digest, "picker-recovery-smoke-only", campaign_digest, record.digest)
+
     @property
     def complete(self) -> bool:
-        return all(
-            _is_sha256(value)
-            for value in (
-                self.efi_manifest_digest,
-                self.recovery_lock_digest,
-                self.validation_digest,
-                self.configuration_digest,
-                self.toolchain_digest,
-                self.evidence_digest,
-            )
-        )
+        common = all(_is_sha256(value) for value in (self.efi_manifest_digest,
+            self.validation_digest, self.configuration_digest, self.toolchain_digest, self.evidence_digest))
+        if self.purpose == "qualification":
+            return common and _is_sha256(self.recovery_lock_digest) and not self.smoke_digest and not self.campaign_digest
+        return (common and self.purpose == "picker-recovery-smoke-only" and not self.recovery_lock_digest
+            and _is_sha256(self.smoke_digest) and _is_sha256(self.campaign_digest) and self.smoke_digest == self.evidence_digest)
 
     def to_dict(self) -> dict[str, str]:
-        return {
-            "efi_manifest_digest": self.efi_manifest_digest,
-            "recovery_lock_digest": self.recovery_lock_digest,
-            "validation_digest": self.validation_digest,
-            "configuration_digest": self.configuration_digest,
-            "toolchain_digest": self.toolchain_digest,
-            "evidence_digest": self.evidence_digest,
-        }
+        result = {"efi_manifest_digest": self.efi_manifest_digest,
+            "recovery_lock_digest": self.recovery_lock_digest, "validation_digest": self.validation_digest,
+            "configuration_digest": self.configuration_digest, "toolchain_digest": self.toolchain_digest,
+            "evidence_digest": self.evidence_digest}
+        if self.purpose != "qualification":
+            result.update(purpose=self.purpose, campaign_digest=self.campaign_digest, smoke_digest=self.smoke_digest)
+        return result
 
 
 @dataclass(frozen=True)
@@ -363,11 +374,13 @@ class DisposableImageAdapter:
             shutil.rmtree(staged_payload)
         _copy_tree_bounded(payload_root, staged_payload)
         if payload_root == Path(source_dir):
-            for name in ("EFI", "Recovery"):
-                destination = self.target_path / name
-                if destination.exists():
+            for entry in list(staged_payload.iterdir()):
+                destination = self.target_path / entry.name
+                if destination.is_dir():
                     shutil.rmtree(destination)
-                os.replace(staged_payload / name, destination)
+                elif destination.exists():
+                    destination.unlink()
+                os.replace(entry, destination)
             staged_payload.rmdir()
         else:
             if dest_efi.exists():
@@ -746,6 +759,11 @@ class RemovableMediaWriter:
         if parsed_manifest.output_digest != RemovableMediaWriter._efi_payload_digest(source_dir):
             raise UnsafeRemovableTarget("EFI payload contents do not match the published manifest")
 
+        if bindings.purpose == "picker-recovery-smoke-only":
+            RemovableMediaWriter._validate_smoke_artifacts(source_dir, bindings, parsed_manifest)
+            return
+        if bindings.purpose != "qualification":
+            raise UnsafeRemovableTarget("Unknown media purpose")
         lock_path = source_dir / "Recovery" / "recovery.lock.json"
         evidence_path = source_dir / "Recovery" / "recovery.evidence.json"
         if require_all and (
@@ -859,12 +877,39 @@ class RemovableMediaWriter:
                 raise UnsafeRemovableTarget("Recovery compatibility files do not match authoritative state")
 
     @staticmethod
+    def _validate_smoke_artifacts(source: Path, bindings: MediaBindings, manifest: BuildManifest) -> None:
+        from macloader.database.loader import get_database
+        from macloader.domain.recovery import RecoveryTarget
+        from macloader.recovery.smoke import SmokeRecoveryService, VerifiedSmokeRecovery
+        try:
+            if any((source / "Recovery" / name).exists() for name in ("recovery.lock.json", "recovery.evidence.json", "recovery.state.json")):
+                raise ValueError("Smoke media cannot contain qualification records")
+            record_path = source / "Recovery/smoke.json"
+            if record_path.is_symlink() or not record_path.is_file() or record_path.stat().st_size > 65536:
+                raise ValueError("Smoke record is missing or unsafe")
+            record = VerifiedSmokeRecovery.from_dict(json.loads(record_path.read_text()))
+            campaign = next(c for c in get_database().campaigns.values() if c.digest == bindings.campaign_digest)
+            target = campaign.release.target()
+            if record.requested_target != RecoveryTarget(target.product_id, target.product_name, target.version, target.build):
+                raise ValueError("Requested campaign target changed")
+            expected = MediaBindings.from_smoke(manifest, record, bindings.configuration_digest, campaign.digest)
+            if bindings != expected:
+                raise ValueError("Smoke provenance changed")
+            for name in ("BaseSystem.dmg", "BaseSystem.chunklist"):
+                recovery, boot = source / "Recovery" / name, source / "com.apple.recovery.boot" / name
+                if any(p.is_symlink() or not p.is_file() for p in (recovery, boot)) or _sha256_file(boot) != _sha256_file(recovery):
+                    raise ValueError("Recovery boot layout bytes changed")
+            SmokeRecoveryService(campaign.smoke_recovery_policy).verify(record, source / "Recovery", record.binding_digest)
+        except Exception as exc:
+            raise UnsafeRemovableTarget("Smoke media signature, target, layout or provenance verification failed") from exc
+
+    @staticmethod
     def _efi_payload_digest(source_dir: Path) -> str:
         """Recompute the EFI build digest, excluding the separately published Recovery payload."""
         records: list[dict[str, object]] = []
         for entry in sorted(Path(source_dir).rglob("*")):
             relative = entry.relative_to(source_dir).as_posix()
-            if relative == "manifest.json" or relative == "Recovery" or relative.startswith("Recovery/"):
+            if relative == "manifest.json" or relative.split("/")[0] in {"Recovery", "com.apple.recovery.boot"}:
                 continue
             entry_stat = os.lstat(entry)
             if stat.S_ISLNK(entry_stat.st_mode):
