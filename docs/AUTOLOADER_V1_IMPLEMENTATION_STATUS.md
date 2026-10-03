@@ -18,7 +18,7 @@ and the runbook remain historical evidence, not a current T480s capture.
 | P6 USB | Linux insertion/removal wizard, private resume, firmware literal route proof, companion/orientation checks | Genuine port movements required; Windows firmware-correlation provider unavailable; unresolved USB-C omitted |
 | P7 software preparation | Automatic trusted tools/cache/dependencies/build, actual generated USB map, structural + matching ocvalidate validation | Fixtures/validator success do not prove boot |
 | P8 Recovery | Strict exact qualification retained; explicit separate signed smoke record with full chunk verification | Exact 24A335 remains unproven; smoke uses untrusted metadata and cannot authorize installation |
-| P9 media integration | Private boot-layout source, existing guarded writer, safe target selection, fresh erase decision, full readback/eject/invalidation integration | No qualified native Windows backend supplied; ADR-007 physical qualification unperformed; production writes disabled |
+| P9 media integration | Private boot-layout source, existing guarded writer, safe target selection, fresh erase decision, full readback/eject/invalidation integration | Native Windows backend and qualification harness implemented; reviewed approval catalog empty; physical qualification unperformed; production writes disabled |
 | P10 first boot | Proven-route F12 instructions; seven bound human-reported checkpoints; explicit failure/retry | No picker/Recovery/OS-return result performed |
 | P11 fixture/gate | Synthetic regression/privacy tests, supplied-capture sanitizer, read-only actual CI/evidence readiness report | Real sanitized reference capture absent; physical gate blocked |
 | P12 maintenance | Catalog-derived release monitoring, isolated verified candidates, four-cell candidate CI and report/draft-PR gates | Schedule activates after merge; Actions PR permission needed for publication; no auto-merge |
@@ -67,9 +67,10 @@ acceptances originally proposed.
 
 The current host is not the target laptop. Do not begin a boot campaign yet.
 A real candidate capture and port evidence are needed; the fixture cannot supply
-them. The Windows-first qualified writer contract still needs an actual native
-backend, full writer qualification and safe-eject evidence before production USB
-writing can be enabled. Windows USB physical firmware correlation is also absent;
+them. The Windows-first native backend is implemented. Its full physical writer
+qualification and reviewed exact-source/Windows-build approval remain required
+before production USB writing can be enabled. See
+[Windows writer qualification](WINDOWS_WRITER_QUALIFICATION.md). Windows USB physical firmware correlation is also absent;
 Linux collection or Engineering evidence import is available. These gaps must not
 be disguised as physical successes. Exact-build qualification additionally needs
 an authenticated 24A335 relationship; smoke mode does not solve it.
@@ -97,3 +98,14 @@ native and Windows-target mypy passed for 140 files; wheel/sdist build and
 outside-checkout smoke checks passed. The explicit pinned-tool reference EFI
 and real matching ocvalidate test passed. Hosted verification is recorded in
 the implementation ledger.
+
+## Native writer qualification handoff
+
+The follow-on qualification phase adds native raw Windows I/O, deterministic
+GPT/FAT32 streaming, whole-stream readback, verified invalidation and native disk
+offline. No physical Windows run or T480s boot result has occurred. A packaged
+approval catalog binds reviewed physical evidence to exact backend source and
+Windows build/AMD64; it remains empty. The explicit sacrificial-device harness
+uses non-bootable qualification bytes and labels controlled fault injection.
+All previous machine, identity, Recovery, media-consent and support boundaries
+remain. PR #1 stays draft.

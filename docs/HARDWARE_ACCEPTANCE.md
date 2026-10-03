@@ -75,3 +75,11 @@ and unperformed live capture/USB/boot campaign. Linux capture and USB correlatio
 are implemented; the Windows USB firmware-correlation provider remains unavailable
 and must not guess routes from PnP enumeration. Engineering import remains
 available. Successful synthetic builds/ocvalidate do not resolve these gates.
+
+## Windows writer implementation versus qualification
+
+The native Windows backend and labelled sacrificial-device harness are now
+implemented; see [WINDOWS_WRITER_QUALIFICATION.md](WINDOWS_WRITER_QUALIFICATION.md).
+The source/Windows-build approval catalog is empty. No actual writer campaign,
+T480s evidence capture, installer write or picker/Recovery/OS-return result has
+been performed. Software/disposable tests remain distinct from physical evidence.

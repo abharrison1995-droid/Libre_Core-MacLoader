@@ -107,6 +107,9 @@ class GuidedMediaService:
         plan = self.selected.plan
         writer = self.adapter.writer()
         confirmation = DestructiveConfirmation.issue(plan)
+        setter = getattr(self.adapter, "set_cancel", None)
+        if callable(setter):
+            setter(cancel)
         # Journal conservatively before crossing the guarded destructive boundary.
         mark_started()
         try:
@@ -117,5 +120,7 @@ class GuidedMediaService:
             writer._invalidate(plan, 'Guided write/readback/eject failed')
             raise CaptureError('MEDIA_WRITE_FAILED', 'USB preparation failed. The selected USB may have been erased and is not ready to boot. Readback/eject did not complete; saved source files are preserved. Reconnect that USB and retry.') from exc
         finally:
+            if callable(setter):
+                setter(lambda: False)
             self.selected = None
         return plan

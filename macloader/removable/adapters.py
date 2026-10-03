@@ -35,7 +35,9 @@ class WindowsQualifiedBackend(Protocol):
     # Native backends must explicitly attest that they implement the
     # production-qualified lock/write/flush/readback contract.  Merely
     # exposing methods is not enough to enable destructive media operations.
-    production_qualified: bool
+    @property
+    def production_qualified(self) -> bool:
+        ...
 
     def lock_and_dismount(self, device: RemovableDevice) -> None:
         ...
@@ -174,7 +176,7 @@ class WindowsRemovableAdapter:
                     model=self._required_text(row.get("FriendlyName"), "model"),
                     capacity_bytes=_as_int(row.get("Size"), "capacity"),
                     is_system_disk=_as_bool(row.get("IsSystem")) or _as_bool(row.get("IsBoot")),
-                    is_removable=_as_bool(row.get("IsRemovable")) or str(row.get("BusType", "")).lower() == "usb",
+                    is_removable=_as_bool(row.get("IsRemovable")) or str(row.get("BusType", "")).lower() in {"usb", "7"},
                     mounted=mounted or str(row.get("OperationalStatus", "")).lower() == "mounted",
                     serial=serial,
                     vendor=self._optional_text(row.get("Manufacturer")),
@@ -237,6 +239,11 @@ class WindowsRemovableAdapter:
             # not carry this attestation and remain synthetic only.
             require_published_artifacts=self.status.qualified and not self._synthetic_test_mode,
         )
+
+    def set_cancel(self, cancel: Callable[[], bool]) -> None:
+        setter = getattr(self._backend, "set_cancel", None)
+        if callable(setter):
+            setter(cancel)
 
     @property
     def guided_eject_available(self) -> bool:
@@ -779,5 +786,13 @@ class LinuxRemovableAdapter:
 def current_adapter() -> WindowsRemovableAdapter | LinuxRemovableAdapter:
     """Return the host adapter without enabling unqualified writes."""
     if sys.platform == "win32":
-        return WindowsRemovableAdapter()
+        from macloader.removable.windows_native import WindowsNativeBackend
+        def inventory() -> list[dict[str, Any]]:
+            raw = WindowsRemovableAdapter._run_powershell(WindowsRemovableAdapter._powershell_query())
+            value = json.loads(raw)
+            rows = value if isinstance(value, list) else [value]
+            if not all(isinstance(row, dict) for row in rows):
+                raise UnsafeRemovableTarget("Windows native discovery returned invalid rows")
+            return rows
+        return WindowsRemovableAdapter(backend=WindowsNativeBackend(inventory))
     return LinuxRemovableAdapter(advertised=True)

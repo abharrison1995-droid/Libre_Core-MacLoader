@@ -240,3 +240,37 @@ lifecycle boundary. Publication again remained blocked until all cells pass.
 The teardown regression covers both no screen stack and an existing screen with
 its button removed. Scoped recheck found no visual or choice regression. Final
 hosted run links will be retained in draft PR #1.
+
+### Native Windows writer qualification boundary (2026-10-03)
+
+Verified starting branch/HEAD 4dd066d and draft PR #1; hosted standard and candidate
+gates remained green. Owner Project Status/runbook edits are preserved separately.
+Added windows_native.py/windows_image.py/windows_qualification.py, an empty
+packaged versioned approval catalog, qualification documentation and scoped tests.
+current_adapter connects the native implementation on Windows without granting
+qualification. Production qualification derives only from an exact reviewed
+backend-source/Windows-build/AMD64 record; local reports do not enable it.
+
+Native whole-disk descriptor/system-volume checks, volume GUID lock/dismount,
+sector-aligned raw writes, flush, complete uncached readback, verified signature
+invalidation and non-persistent confirmed native disk offline are implemented.
+Guided qualification gate is unchanged. Added cancellation propagation to native
+bounded chunks; fixed numeric USB BusType parsing exposed by the native boundary.
+
+The separate physical harness uses explicitly non-bootable qualification data,
+existing source snapshot/confirmation guards, actual exact-commit CI checks and
+private before-I/O reports. Normal and controlled injected-fault cases remain
+labelled; unperformed cases stay not-run. Physical case reporting never changes
+production approval. Approved-source edits or Windows build drift revoke matching
+approval. GPT/FAT output was independently checked using disposable regular files
+with sgdisk, read-only fsck.fat and mtools Recovery file readback. This exposed and
+fixed root volume-label/free-cluster-summary metadata before final verification.
+No physical storage I/O, real identity generation, ACPI capture or boot occurred.
+
+Native writer local software gate: **658 tests passed, 80.31% branch coverage**;
+native and Windows-target mypy passed (144 files); wheel/sdist build and both
+outside-checkout package smoke checks passed. The explicit real pinned reference
+EFI/ocvalidate test passed (1 test). The 72 new native/image/qualification cases
+use synthetic boundaries or disposable regular files; zero physical results.
+Hosted exact-commit standard and candidate gates are required before the harness
+can proceed; final run links are retained in draft PR #1.

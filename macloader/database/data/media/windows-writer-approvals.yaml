@@ -1,0 +1,5 @@
+# Add a reviewed exact backend digest / Windows build / AMD64 record only after
+# a real sacrificial-device campaign and a separate review. Local reports and
+# tests are not approval. No Windows writer is physically approved yet.
+schema: 1
+approvals: []
