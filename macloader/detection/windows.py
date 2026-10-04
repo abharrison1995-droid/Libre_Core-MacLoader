@@ -386,7 +386,8 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 ven, dev, subven, subdev, _ = self._pnp_ids(pnp)
                 pnp_pci = PciDevice(vendor_id=ven, device_id=dev, subsystem_vendor_id=subven, subsystem_device_id=subdev, device_name=name) if ven and dev and "USB" not in pnp.upper() else None
                 usb = UsbDevice(vendor_id=ven, product_id=dev, product_name=name) if ven and dev and "USB" in pnp.upper() else None
-                lower = f"{name} {dev_class}".lower()
+                service = normalize_dmi_string(row.get("Service")) or ""
+                lower = f"{name} {dev_class} {service}".lower()
                 if pnp_pci and pnp_pci.vendor_id == "8086" and pnp_pci.device_id in {"15bf", "15d3", "1576", "1578"}:
                     thunderbolt = ThunderboltInfo(present=True, controller_name=name, pci=pnp_pci)
                 if usb:
@@ -399,7 +400,10 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     else:
                         ethernet.append(NetworkInfo(name=name, kind="ethernet", pci=pnp_pci))
                 elif dev_class.lower() in {"media", "sound"} or "audio" in lower:
-                    is_codec = pnp.upper().startswith("HDAUDIO")
+                    # HDAUDIO also includes GPU display-audio functions. Those
+                    # endpoints are useful audio inventory, but are not the
+                    # machine's onboard codec or its codec subsystem identity.
+                    is_codec = pnp.upper().startswith("HDAUDIO") and "display audio" not in name.lower()
                     codec_subsystem = re.search(r"SUBSYS_([0-9a-fA-F]{8})", pnp) if is_codec else None
                     audio.append(AudioInfo(
                         name=name, pci=None if is_codec else pnp_pci,
@@ -411,7 +415,10 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 elif any(token in lower for token in ("keyboard", "trackpoint", "touchpad", "touchscreen", "mouse")):
                     kind = "keyboard" if "keyboard" in lower else "trackpoint" if "trackpoint" in lower else "touchscreen" if "touchscreen" in lower else "trackpad"
                     input_devices.append(InputDeviceInfo(name=name, bus="usb" if usb else "unknown", kind=kind, vendor_id=ven, product_id=dev))
-                elif dev_class.lower() in {"usb", "usbdevice"} and pnp_pci:
+                elif pnp_pci and (
+                    dev_class.lower() in {"usb", "usbdevice"}
+                    or ("usb" in name.lower() and "controller" in name.lower())
+                ):
                     usb_controllers.append(pnp_pci)
 
         storage: List[StorageInfo] = []
@@ -441,7 +448,12 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             required_fields=["InstanceName", "VideoOutputTechnology", "Active"], allow_empty=True,
         )
         timing_res = self._query_cim(
-            "Get-CimInstance -Namespace root/wmi WmiMonitorListedSupportedSourceModes | Select-Object InstanceName,PreferredMonitorSourceModeIndex,MonitorSourceModes | ConvertTo-Json -Depth 6",
+            "Get-CimInstance -Namespace root/wmi WmiMonitorListedSupportedSourceModes | ForEach-Object { "
+            "$modes = @($_.MonitorSourceModes | ForEach-Object { "
+            "[pscustomobject]@{ HorizontalActivePixels = $_.HorizontalActivePixels; VerticalActivePixels = $_.VerticalActivePixels } "
+            "}); [pscustomobject]@{ InstanceName = $_.InstanceName; "
+            "PreferredMonitorSourceModeIndex = $_.PreferredMonitorSourceModeIndex; MonitorSourceModes = $modes } "
+            "} | ConvertTo-Json -Depth 6",
             required_fields=["InstanceName", "PreferredMonitorSourceModeIndex", "MonitorSourceModes"], allow_empty=True,
         )
         for row in monitor_res.rows:

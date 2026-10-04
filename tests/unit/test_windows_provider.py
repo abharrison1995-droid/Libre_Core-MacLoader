@@ -377,20 +377,24 @@ def test_complete_valid_windows_hardware_snapshot_is_build_eligible(db: Database
 
 def test_pnp_inventory_keeps_rows_with_optional_names_and_ignores_missing_identity() -> None:
     pnp_rows = [
-        {"Name": None, "PNPDeviceID": r"PCI\VEN_8086&DEV_15C1&SUBSYS_225817AA", "Class": "USB"},
+        {"Name": "Intel(R) USB 3.1 eXtensible Host Controller - 1.10 (Microsoft)", "PNPDeviceID": r"PCI\VEN_8086&DEV_15C1&SUBSYS_225817AA", "Class": None, "Service": "USBXHCI"},
         {"Name": "Intel Ethernet Connection I219-V", "PNPDeviceID": r"PCI\VEN_8086&DEV_15D8&SUBSYS_225817AA", "Class": "Net"},
         {"Name": "Intel Dual Band Wireless-AC 8265", "PNPDeviceID": r"PCI\VEN_8086&DEV_24FD&SUBSYS_00108086", "Class": "Net"},
         {"Name": "Realtek Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_17AA2258", "Class": "MEDIA"},
+        {"Name": "Intel(R) Display Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_8086&DEV_280B&SUBSYS_80860101", "Class": None, "Service": "IntcDAud"},
         {"Name": "Intel Wireless Bluetooth", "PNPDeviceID": r"USB\VID_8087&PID_0A2B", "Class": "Bluetooth"},
         {"Name": "Standard PS/2 Keyboard", "PNPDeviceID": r"ACPI\PNP0303", "Class": "Keyboard"},
         {"Name": "ELAN PTP Touchpad", "PNPDeviceID": r"ACPI\ELAN0001", "Class": "Mouse"},
         {"Name": "Intel Thunderbolt Controller", "PNPDeviceID": r"PCI\VEN_8086&DEV_15BF&SUBSYS_225817AA", "Class": "System"},
-        {"Name": "Intel USB Controller", "PNPDeviceID": r"PCI\VEN_8086&DEV_9D2F&SUBSYS_225817AA", "Class": "USB"},
+        {"Name": "Intel(R) USB 3.0 eXtensible Host Controller - 1.0 (Microsoft)", "PNPDeviceID": r"PCI\VEN_8086&DEV_9D2F&SUBSYS_225817AA", "Class": None, "Service": "USBXHCI"},
         {"Name": None, "PNPDeviceID": r"ACPI\UNKNOWN0001"},
         {"Name": "Unidentified PnP entity", "PNPDeviceID": "   ", "Class": "System"},
     ]
 
+    scripts: list[str] = []
+
     def runner(script: str) -> Optional[str]:
+        scripts.append(script)
         if "Win32_ComputerSystem" in script:
             return json.dumps({"Manufacturer": "LENOVO", "Model": "20L8S4P100"})
         if "Win32_BIOS" in script:
@@ -418,6 +422,10 @@ def test_pnp_inventory_keeps_rows_with_optional_names_and_ignores_missing_identi
     assert snapshot.audio[0].codec_vendor_id == "10ec"
     assert snapshot.audio[0].codec_device_id == "0257"
     assert snapshot.audio[0].codec_subsystem_id == "17aa:2258"
+    display_audio = next(device for device in snapshot.audio if "display audio" in device.name.lower())
+    assert display_audio.codec_vendor_id is None
+    assert display_audio.codec_device_id is None
+    assert display_audio.codec_subsystem_id is None
     ethernet = snapshot.ethernet[0]
     wifi = snapshot.wifi[0]
     bluetooth = snapshot.bluetooth[0]
@@ -429,6 +437,9 @@ def test_pnp_inventory_keeps_rows_with_optional_names_and_ignores_missing_identi
     assert {device.canonical_id for device in snapshot.usb_controllers} == {"8086:15c1", "8086:9d2f"}
     assert snapshot.displays[0].resolution == "1920x1080"
     assert snapshot.displays[0].touch_capability is None
+    timing_script = next(script for script in scripts if "WmiMonitorListedSupportedSourceModes" in script)
+    assert "HorizontalActivePixels = $_.HorizontalActivePixels" in timing_script
+    assert "VerticalActivePixels = $_.VerticalActivePixels" in timing_script
 
     query_status = snapshot.raw_evidence["query_status"]["pnp"]
     assert query_status["is_complete"] is True
