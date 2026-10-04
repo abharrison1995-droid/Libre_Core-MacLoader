@@ -10,7 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Tuple
 import uuid
 
 from macloader.configuration.migrations import import_configuration
@@ -46,6 +46,10 @@ MAX_IMPORT_STRING = 8192
 PRIVATE_IDENTITY_CONFIRMATION = "GENERATE A PRIVATE SMBIOS IDENTITY FOR THIS INSTALLATION"
 
 
+if TYPE_CHECKING:
+    from macloader.evidence.acpi_capture import AcpiCaptureProvider
+
+
 @dataclass(frozen=True)
 class WorkflowState:
     """The semantic result rendered by both CLI and TUI."""
@@ -66,9 +70,15 @@ class WorkflowState:
 class WorkflowService:
     """Own persistence and semantic transitions; presentation layers stay thin."""
 
-    def __init__(self, orchestrator: Optional[Orchestrator] = None, store: Optional[ConfigurationStore] = None):
+    def __init__(self, orchestrator: Optional[Orchestrator] = None, store: Optional[ConfigurationStore] = None, private_root: Optional[Path] = None):
         self.orchestrator = orchestrator or Orchestrator()
         self.store = store or ConfigurationStore(DEFAULT_WORKSPACE_DIR / "configurations")
+        self.private_root = Path(private_root) if private_root else DEFAULT_PRIVATE_DIR
+        self.acpi_dir = self.private_root / "acpi" if private_root else DEFAULT_ACPI_DIR
+        self.identity_dir = self.private_root / "identities" if private_root else DEFAULT_IDENTITY_DIR
+        if private_root:
+            self.orchestrator.builder.identity_store_dir = self.identity_dir
+            self.orchestrator.builder.private_work_root = self.private_root / "acpi-build"
 
     def create(self, fixture: Optional[Path] = None, sanitize: bool = False) -> tuple[UserConfiguration, HardwareSnapshot]:
         snapshot = self.orchestrator.probe_hardware(fixture_path=fixture, sanitize=sanitize)
@@ -88,7 +98,7 @@ class WorkflowService:
             raise ValueError("resume snapshot does not match the configuration binding")
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration.configuration_id):
             raise ValueError("configuration ID is not safe for private snapshot storage")
-        root = DEFAULT_PRIVATE_DIR / "snapshots"
+        root = self.private_root / "snapshots"
         self._ensure_private_directory(root)
         destination = root / f"{configuration.configuration_id}.json"
         payload = snapshot.to_json(indent=2) + "\n"
@@ -98,7 +108,7 @@ class WorkflowService:
     def resume_snapshot(self, configuration_id: str) -> HardwareSnapshot:
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", configuration_id):
             raise ValueError("configuration ID is not safe for private snapshot storage")
-        path = DEFAULT_PRIVATE_DIR / "snapshots" / f"{configuration_id}.json"
+        path = self.private_root / "snapshots" / f"{configuration_id}.json"
         data = self._read_private_json(path, "resume snapshot")
         snapshot = HardwareSnapshot.from_dict(data)
         configuration = self.load(configuration_id)
@@ -115,11 +125,10 @@ class WorkflowService:
         """Validate and privately import this machine's raw DSDT/SSDT capture."""
         if configuration.hardware_snapshot_id != snapshot.snapshot_id:
             raise ValueError("ACPI import requires the configuration's bound hardware snapshot")
-        if snapshot.machine_type != "20L8":
-            raise ValueError("machine-bound ACPI import is currently reviewed only for ThinkPad T480s 20L8")
-        profile = load_reviewed_profile()
-        if normalize_bios_binding(snapshot.bios_version or "") != profile.bios_binding:
-            raise ValueError("ACPI capture must match the reviewed N22ET85W BIOS 1.62 profile")
+        campaign = self.orchestrator.db.candidate_campaign(snapshot)
+        if campaign is None:
+            raise ValueError("machine-bound ACPI capture must match a reviewed reference machine and BIOS")
+        profile = campaign.profile
         source = Path(source_directory).expanduser().absolute()
         self._reject_symlink_path(source)
         table_dir = source / "PRIVATE-ACPI" if (source / "PRIVATE-ACPI").is_dir() else source
@@ -132,10 +141,10 @@ class WorkflowService:
                 raise ValueError("ACPI capture changed while being imported")
             table_data.append((path, data, metadata))
 
-        self._ensure_private_directory(DEFAULT_ACPI_DIR)
+        self._ensure_private_directory(self.acpi_dir)
         capture_id = uuid.uuid4().hex
-        final_root = DEFAULT_ACPI_DIR / capture_id
-        staging_path = Path(tempfile.mkdtemp(prefix=".capture-", dir=DEFAULT_ACPI_DIR))
+        final_root = self.acpi_dir / capture_id
+        staging_path = Path(tempfile.mkdtemp(prefix=".capture-", dir=self.acpi_dir))
         staging_root: Optional[Path] = staging_path
         try:
             if os.name != "nt":
@@ -176,6 +185,32 @@ class WorkflowService:
             if staging_root is not None and staging_root.exists():
                 shutil.rmtree(staging_root, ignore_errors=True)
 
+    def collect_acpi(self, configuration: UserConfiguration, snapshot: HardwareSnapshot,
+                     provider: "AcpiCaptureProvider", current_snapshot: Callable[[], HardwareSnapshot],
+                     cancel: Optional[Callable[[], bool]] = None) -> UserConfiguration:
+        """Capture privately and reuse the strict import/evidence boundary."""
+        from macloader.evidence.acpi_capture import CaptureError, validate_capture
+        from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+        cancelled = cancel or (lambda: False)
+        scope = EVIDENCE_SCOPES["acpi"]
+        initial = scope_digest(snapshot, scope)
+        tables = validate_capture(provider.capture(cancelled))
+        observed = current_snapshot()
+        if observed.snapshot_id != snapshot.snapshot_id or scope_digest(observed, scope) != initial:
+            raise CaptureError("ACPI_MACHINE_CHANGED", "Machine or BIOS changed during capture; nothing was accepted.")
+        if cancelled():
+            raise CaptureError("CANCELLED", "Firmware capture paused.")
+        self._ensure_private_directory(self.acpi_dir)
+        with tempfile.TemporaryDirectory(prefix=".direct-", dir=self.acpi_dir) as temporary:
+            source = Path(temporary)
+            for name, data in tables.items():
+                path = source / name
+                path.write_bytes(data)
+                self._protect_private_file(path)
+            updated, record = self.import_acpi_capture(configuration, snapshot, source)
+        record = replace(record, input_scope=scope, input_digest=initial)
+        return self.add_evidence(updated, record)
+
     def generate_private_identity(
         self,
         configuration: UserConfiguration,
@@ -189,7 +224,7 @@ class WorkflowService:
         toolchain = TrustedToolchainLoader().provision()
         if toolchain.identity_tool_path is None:
             raise IdentityServiceError("Trusted macserial is unavailable; provision the pinned toolchain first")
-        identities = IdentityService(DEFAULT_IDENTITY_DIR, Path(toolchain.identity_tool_path))
+        identities = IdentityService(self.identity_dir, Path(toolchain.identity_tool_path))
         private = identities.store(identities.generate(allow_real=True))
         updated = self.set_identity_reference(configuration, private.storage_ref)
         return updated, private.storage_ref
@@ -199,7 +234,7 @@ class WorkflowService:
         configuration: UserConfiguration,
         storage_ref: str,
     ) -> UserConfiguration:
-        private = IdentityService(DEFAULT_IDENTITY_DIR).reuse(IdentityReference("0.1", storage_ref, redacted=True))
+        private = IdentityService(self.identity_dir).reuse(IdentityReference("0.1", storage_ref, redacted=True))
         return self.set_identity_reference(configuration, private.storage_ref)
 
     def preflight(
@@ -216,11 +251,10 @@ class WorkflowService:
         if configuration is None:
             add("configuration", "missing", "No saved configuration is selected.", "Run `macloader config new`, then set and review the exact target.")
         else:
+            requested = self.orchestrator.recovery_service.target()
             exact_target = configuration.target is not None and (
-                configuration.target.product_id == "sequoia"
-                and configuration.target.version == "15.0"
-                and configuration.target.build == "24A335"
-            )
+                configuration.target.product_id, configuration.target.version, configuration.target.build
+            ) == (requested.product_id, requested.version, requested.build)
             add(
                 "exact_target", "ready" if exact_target else "missing",
                 "Configuration selects Sequoia 15.0 build 24A335." if exact_target else "Configuration does not select the frozen Sequoia 15.0/24A335 target.",
@@ -228,11 +262,14 @@ class WorkflowService:
             )
         if snapshot is None:
             add("machine_snapshot", "missing", "No matching local hardware snapshot is available.", "Resume with the private saved snapshot or provide the matching fixture.")
-        elif configuration is None or snapshot.snapshot_id != configuration.hardware_snapshot_id:
+        elif configuration is None:
+            add("machine_snapshot", "missing", "No configuration is selected to assess the observed snapshot binding.", "Launch Guided Autoloader to create or resume the matching campaign.")
+        elif snapshot.snapshot_id != configuration.hardware_snapshot_id:
             add("machine_snapshot", "blocked", "The observed machine snapshot does not match the configuration binding.", "Load the original snapshot or create a new configuration on the reference machine.")
         else:
-            supported_machine = snapshot.machine_type == "20L8"
-            bios_matches = normalize_bios_binding(snapshot.bios_version or "") == "N22ET85W-1.62"
+            campaign = self.orchestrator.db.candidate_campaign(snapshot)
+            supported_machine = campaign is not None
+            bios_matches = campaign is not None
             add("reference_machine", "ready" if supported_machine and bios_matches else "blocked",
                 "Reference ThinkPad T480s 20L8 / N22ET85W 1.62 observed." if supported_machine and bios_matches else "Observed hardware or BIOS does not match ThinkPad T480s 20L8 / N22ET85W 1.62.",
                 "Probe the reference 20L8 with BIOS N22ET85W 1.62; do not change BIOS as part of preflight." if not supported_machine or not bios_matches else "")
@@ -269,7 +306,7 @@ class WorkflowService:
             identity_ok = False
             if configuration.identity_ref is not None:
                 try:
-                    IdentityService(DEFAULT_IDENTITY_DIR).reuse(configuration.identity_ref)
+                    IdentityService(self.identity_dir).reuse(configuration.identity_ref)
                     identity_ok = True
                 except IdentityServiceError:
                     identity_ok = False
@@ -625,6 +662,8 @@ class WorkflowService:
                 private_acpi_capture=private_acpi_capture,
                 expected_acpi_evidence_digest=expected_evidence_digest,
                 identity_reference=configuration.identity_ref,
+                private_usb_evidence=self.orchestrator.configuration_service._evidence_source(next((r.private_ref for r in configuration.evidence if r.kind == "usb"), "")),
+                hardware_snapshot=snapshot,
                 cancel=cancel,
                 ocvalidate_path=ocvalidate_path,
                 ocvalidate_sha256=ocvalidate_sha256,
@@ -692,6 +731,25 @@ class WorkflowService:
         expected_acpi_digest = AcpiProcessor.capture_evidence_digest(
             evidence_source.parent, acpi_record.bios_binding, snapshot.snapshot_id
         )
+        from macloader.evidence.usb import UsbEvidenceSession
+        from macloader.evidence.usb_capture import collect_firmware_usb_addresses
+        from macloader.build.usb_map import generate_usb_map
+        usb_record = next((r for r in configuration.evidence if r.kind == "usb"), None)
+        campaign = self.orchestrator.db.candidate_campaign(snapshot)
+        if usb_record is None or campaign is None or not toolchain.acpi_compiler_path or not toolchain.acpi_compiler_sha256:
+            raise ValueError("Recovery binding requires current generated USB map evidence")
+        usb_source = self.orchestrator.configuration_service._evidence_source(usb_record.private_ref)
+        if usb_source is None:
+            raise ValueError("Recovery binding requires safe private USB evidence")
+        usb = UsbEvidenceSession.from_dict(self._read_private_json(usb_source, "USB evidence"))
+        addresses = collect_firmware_usb_addresses(evidence_source.parent, Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256, self.private_root / "usb-binding", lambda: False)
+        usb_map = generate_usb_map(usb, campaign.evidence_policy["usb_capture"], snapshot_id=snapshot.snapshot_id,
+            bios_binding=campaign.bios_binding, smbios=configuration.selected_options().get("profile.smbios", ""),
+            first_route=campaign.profile.usb.first_install_route, addresses=addresses,
+            controller_slots={p.pci_slot for p in snapshot.usb_controllers if p.pci_slot})
+        expected_evidence = (expected_acpi_digest, usb_record.digest, usb_map.digest)
+        if usb.to_evidence_record().digest != usb_record.digest or manifest.evidence_digests != expected_evidence:
+            raise ValueError("Recovery binding has stale USB source or generated map digests")
         expected_build_digest = canonical_json_digest({
             "plan_digest": state.evaluation.plan.canonical_digest(),
             "dependency_digest": dependencies.canonical_digest(),
@@ -703,7 +761,7 @@ class WorkflowService:
                 reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
             ),
             "acpi_digest": manifest.acpi_digest,
-            "evidence_digests": [expected_acpi_digest],
+            "evidence_digests": list(expected_evidence),
             "usb_policy_state": manifest.usb_policy_state,
             "usb_first_install_route": manifest.usb_first_install_route,
             "schema_version": manifest.schema_version,
@@ -719,7 +777,7 @@ class WorkflowService:
             expected_profile_digest=effective_profile_digest(
                 reviewed_profile, dict(state.evaluation.plan.effective_option_selections)
             ),
-            expected_evidence_digests=(expected_acpi_digest,),
+            expected_evidence_digests=expected_evidence,
             expected_identity_reference=(
                 configuration.identity_ref.storage_ref if configuration.identity_ref is not None else None
             ),

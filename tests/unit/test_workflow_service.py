@@ -304,7 +304,7 @@ def test_machine_bound_acpi_import_is_private_and_public_export_redacts_paths(
     public_text = public_path.read_text(encoding="utf-8")
 
     assert record.completeness.value == "complete"
-    assert len(metadata["tables"]) == 13
+    assert len(metadata["tables"]) == 12
     assert "PRIVATE-ACPI" not in public_text
     assert str(tmp_path / "private") not in public_text
     if os.name != "nt":
@@ -321,7 +321,7 @@ def test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture(
     capture = _synthetic_acpi_capture(tmp_path)
 
     reference_snapshot = replace(snapshot, machine_type="20L8")
-    with pytest.raises(ValueError, match="BIOS 1.62"):
+    with pytest.raises(ValueError, match="reviewed reference machine and BIOS"):
         service.import_acpi_capture(configuration, reference_snapshot, capture)
 
     exact_snapshot = replace(reference_snapshot, bios_version="N22ET85W-1.62")
@@ -329,3 +329,12 @@ def test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture(
     corrupt_table.write_bytes(b"bad")
     with pytest.raises(Exception, match="truncated"):
         service.import_acpi_capture(configuration, exact_snapshot, capture)
+
+
+def test_preflight_unselected_configuration_does_not_claim_snapshot_mismatch(tmp_path: Path) -> None:
+    from tests.unit.test_autoloader import candidate
+    service = WorkflowService(store=ConfigurationStore(tmp_path))
+    report = service.preflight(None, candidate())
+    checks = {item['id']: item for item in report['checks']}
+    assert checks['machine_snapshot']['state'] == 'missing'
+    assert 'No configuration' in checks['machine_snapshot']['summary']

@@ -47,3 +47,39 @@ Before storing a live probe as a test fixture, sanitize:
 **State:** Pending Physical Acceptance (`EXPERIMENTAL` in v0.1).
 
 T480 must remain `EXPERIMENTAL` until a physical unit passes the complete acceptance suite above.
+
+## Guided v1 readiness (implementation 2026-10-03)
+
+Run `macloader autoload --readiness` on the actual candidate for a read-only gate
+report. It inspects exact-commit GitHub CI jobs, current machine match, private
+evidence/decisions, EFI byte bindings, Recovery trust mode, writer qualification,
+performed full readback/eject and the proven physical first-install route.
+Unknown/missing gates block. This report is informational and cannot grant
+writer qualification or internal-disk installation authority.
+
+The current branch supplies a synthetic 20L8/1.62 fixture for regression only.
+There is **no new live reference capture or physical result**. The helper
+`detection/reference_fixture.py` accepts a supplied live capture, removes unique
+identifiers/raw captures, fixes regression identifiers/timestamps and marks the
+result as non-evidence. Do not create the real reference fixture until such a
+capture is provided and its sanitized diff is reviewed.
+
+Where software observes panel resolution but cannot prove touch capability,
+guided mode permits one focused physical confirmation through the existing
+HardwareConfirmation contract. It is bound to machine/BIOS/panel scope and cannot
+override positive touch evidence, a conflicting observation or a changed panel.
+Unknown is never silently treated as non-touch.
+
+Physical readiness is presently blocked by the absent qualified Windows writer
+and unperformed live capture/USB/boot campaign. Linux capture and USB correlation
+are implemented; the Windows USB firmware-correlation provider remains unavailable
+and must not guess routes from PnP enumeration. Engineering import remains
+available. Successful synthetic builds/ocvalidate do not resolve these gates.
+
+## Windows writer implementation versus qualification
+
+The native Windows backend and labelled sacrificial-device harness are now
+implemented; see [WINDOWS_WRITER_QUALIFICATION.md](WINDOWS_WRITER_QUALIFICATION.md).
+The source/Windows-build approval catalog is empty. No actual writer campaign,
+T480s evidence capture, installer write or picker/Recovery/OS-return result has
+been performed. Software/disposable tests remain distinct from physical evidence.

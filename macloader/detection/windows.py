@@ -15,6 +15,8 @@ from macloader.detection.normalize import (
 )
 from macloader.domain.hardware import (
     AudioInfo,
+    DisplayInfo,
+    ThunderboltInfo,
     CpuInfo,
     GpuInfo,
     HardwareSnapshot,
@@ -225,6 +227,33 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             allow_empty=allow_empty,
         )
 
+    @staticmethod
+    def _usable_pnp_inventory(result: CimQueryResult) -> CimQueryResult:
+        """Keep PnP rows with structural identity; display names are optional."""
+        if not result.is_complete:
+            return result
+
+        rows = [
+            row for row in result.rows
+            if isinstance(row.get("PNPDeviceID"), str) and row["PNPDeviceID"].strip()
+        ]
+        if not rows:
+            return CimQueryResult(
+                execution_success=result.execution_success,
+                parse_success=False,
+                is_confirmed_empty=False,
+                rows=[],
+                raw=result.raw,
+                error_message="No PnP rows contain a usable PNPDeviceID",
+            )
+        return CimQueryResult(
+            execution_success=result.execution_success,
+            parse_success=True,
+            is_confirmed_empty=False,
+            rows=rows,
+            raw=result.raw,
+        )
+
     def _json_rows(self, script: str) -> List[Dict[str, Any]]:
         return self._query_cim(script).rows
 
@@ -341,12 +370,14 @@ class WindowsHardwareProvider(BaseHardwareProvider):
         input_devices: List[InputDeviceInfo] = []
         usb_devices: List[UsbDevice] = []
         usb_controllers: List[PciDevice] = []
+        thunderbolt = None
 
-        pnp_res = self._query_cim(
-            "Get-CimInstance Win32_PnPEntity | Select-Object Name,PNPDeviceID,Class,Service | ConvertTo-Json",
-            required_fields=["Name", "PNPDeviceID"],
+        pnp_res = self._usable_pnp_inventory(self._query_cim(
+            "Get-CimInstance Win32_PnPEntity | "
+            "Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.PNPDeviceID) } | "
+            "Select-Object Name,PNPDeviceID,Class,Service | ConvertTo-Json",
             allow_empty=False,
-        )
+        ))
         if pnp_res.rows:
             for row in pnp_res.rows:
                 name = normalize_dmi_string(row.get("Name")) or "Unknown device"
@@ -355,7 +386,10 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 ven, dev, subven, subdev, _ = self._pnp_ids(pnp)
                 pnp_pci = PciDevice(vendor_id=ven, device_id=dev, subsystem_vendor_id=subven, subsystem_device_id=subdev, device_name=name) if ven and dev and "USB" not in pnp.upper() else None
                 usb = UsbDevice(vendor_id=ven, product_id=dev, product_name=name) if ven and dev and "USB" in pnp.upper() else None
-                lower = f"{name} {dev_class}".lower()
+                service = normalize_dmi_string(row.get("Service")) or ""
+                lower = f"{name} {dev_class} {service}".lower()
+                if pnp_pci and pnp_pci.vendor_id == "8086" and pnp_pci.device_id in {"15bf", "15d3", "1576", "1578"}:
+                    thunderbolt = ThunderboltInfo(present=True, controller_name=name, pci=pnp_pci)
                 if usb:
                     usb_devices.append(usb)
                 if "bluetooth" in lower:
@@ -366,11 +400,25 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     else:
                         ethernet.append(NetworkInfo(name=name, kind="ethernet", pci=pnp_pci))
                 elif dev_class.lower() in {"media", "sound"} or "audio" in lower:
-                    audio.append(AudioInfo(name=name, pci=pnp_pci))
+                    # HDAUDIO also includes GPU display-audio functions. Those
+                    # endpoints are useful audio inventory, but are not the
+                    # machine's onboard codec or its codec subsystem identity.
+                    is_codec = pnp.upper().startswith("HDAUDIO") and "display audio" not in name.lower()
+                    codec_subsystem = re.search(r"SUBSYS_([0-9a-fA-F]{8})", pnp) if is_codec else None
+                    audio.append(AudioInfo(
+                        name=name, pci=None if is_codec else pnp_pci,
+                        codec_name=name if is_codec else None,
+                        codec_vendor_id=ven if is_codec else None,
+                        codec_device_id=dev if is_codec else None,
+                        codec_subsystem_id=(codec_subsystem.group(1)[:4] + ":" + codec_subsystem.group(1)[4:]).lower() if codec_subsystem else None,
+                    ))
                 elif any(token in lower for token in ("keyboard", "trackpoint", "touchpad", "touchscreen", "mouse")):
                     kind = "keyboard" if "keyboard" in lower else "trackpoint" if "trackpoint" in lower else "touchscreen" if "touchscreen" in lower else "trackpad"
                     input_devices.append(InputDeviceInfo(name=name, bus="usb" if usb else "unknown", kind=kind, vendor_id=ven, product_id=dev))
-                elif dev_class.lower() in {"usb", "usbdevice"} and pnp_pci:
+                elif pnp_pci and (
+                    dev_class.lower() in {"usb", "usbdevice"}
+                    or ("usb" in name.lower() and "controller" in name.lower())
+                ):
                     usb_controllers.append(pnp_pci)
 
         storage: List[StorageInfo] = []
@@ -394,6 +442,39 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 disk_pci = PciDevice(vendor_id=ven, device_id=dev, subsystem_vendor_id=subven, subsystem_device_id=subdev) if ven and dev else None
                 storage.append(StorageInfo(model=model_name, kind=kind, size_bytes=size, serial=normalize_dmi_string(row.get("SerialNumber")) or None, pci=disk_pci))
 
+        displays: List[DisplayInfo] = []
+        monitor_res = self._query_cim(
+            "Get-CimInstance -Namespace root/wmi WmiMonitorConnectionParams | Select-Object InstanceName,VideoOutputTechnology,Active | ConvertTo-Json",
+            required_fields=["InstanceName", "VideoOutputTechnology", "Active"], allow_empty=True,
+        )
+        timing_res = self._query_cim(
+            "Get-CimInstance -Namespace root/wmi WmiMonitorListedSupportedSourceModes | ForEach-Object { "
+            "$modes = @($_.MonitorSourceModes | ForEach-Object { "
+            "[pscustomobject]@{ HorizontalActivePixels = $_.HorizontalActivePixels; VerticalActivePixels = $_.VerticalActivePixels } "
+            "}); [pscustomobject]@{ InstanceName = $_.InstanceName; "
+            "PreferredMonitorSourceModeIndex = $_.PreferredMonitorSourceModeIndex; MonitorSourceModes = $modes } "
+            "} | ConvertTo-Json -Depth 6",
+            required_fields=["InstanceName", "PreferredMonitorSourceModeIndex", "MonitorSourceModes"], allow_empty=True,
+        )
+        for row in monitor_res.rows:
+            if row.get("Active") is not True or row.get("VideoOutputTechnology") not in {6, 11, 2147483648}:
+                continue
+            resolution = None
+            for timing in timing_res.rows:
+                if timing.get("InstanceName") != row.get("InstanceName"):
+                    continue
+                modes = timing.get("MonitorSourceModes")
+                index = timing.get("PreferredMonitorSourceModeIndex")
+                if isinstance(modes, list) and isinstance(index, int) and 0 <= index < len(modes):
+                    preferred = modes[index]
+                    if isinstance(preferred, dict) and type(preferred.get("HorizontalActivePixels")) is int and type(preferred.get("VerticalActivePixels")) is int:
+                        resolution = f"{preferred['HorizontalActivePixels']}x{preferred['VerticalActivePixels']}"
+            displays.append(DisplayInfo(
+                name="Internal panel", resolution=resolution,
+                touch_capability=True if any(i.kind == "touchscreen" for i in input_devices) else None,
+                source="windows-wmi-monitor",
+            ))
+
         machine_type = extract_machine_type(model, model)
         pnp_ok = pnp_res.is_complete and not pnp_res.is_confirmed_empty
 
@@ -416,6 +497,8 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             usb_controllers=usb_controllers,
             usb_devices=usb_devices,
             input_devices=input_devices,
+            displays=displays,
+            thunderbolt=thunderbolt,
             raw_evidence={
                 "os": "windows",
                 "inventory_sources": ["CIM:ComputerSystem", "CIM:BIOS", "CIM:Processor", "CIM:VideoController", "CIM:PnPEntity", "CIM:DiskDrive"],

@@ -159,9 +159,15 @@ def _provisioning_catalog(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     host, architecture = TrustedToolchainLoader.host_tuple()
     schema: dict[str, object] = {"ACPI": {}, "Kernel": {}, "PlatformInfo": {}, "UEFI": {}}
     sample = plistlib.dumps(schema)
-    validator = b"#!/bin/sh\necho 1.0.7\n"
-    identity = b"#!/bin/sh\necho 2.1.8\n"
-    compiler = b"#!/bin/sh\necho iasl version 20260408\n"
+    def script(banner: str) -> bytes:
+        if os.name == "nt":
+            return f"@echo off\r\necho {banner}\r\nexit /b 0\r\n".encode()
+        return f"#!/bin/sh\necho {banner}\n".encode()
+
+    suffix = ".cmd" if os.name == "nt" else ""
+    validator = script("1.0.7")
+    identity = script("2.1.8")
+    compiler = script("iasl version 20260408")
 
     oc_buffer = io.BytesIO()
     with zipfile.ZipFile(oc_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -196,9 +202,9 @@ def _provisioning_catalog(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
             "archive_url": oc_url,
             "archive_sha256": hashlib.sha256(oc_archive).hexdigest(),
             "sample_plist": record("Sample.plist", "1.0.7", sample, oc_url, "Docs/Sample.plist", ""),
-            "ocvalidate": record("ocvalidate", "1.0.7", validator, oc_url, "Utilities/ocvalidate/ocvalidate.linux", ""),
-            "acpi_compiler": record("iasl", "20260408", compiler, acpi_url, None, "-v"),
-            "identity_tool": record("macserial", "2.1.8", identity, oc_url, "Utilities/macserial/macserial.linux", "--version"),
+            "ocvalidate": record("ocvalidate" + suffix, "1.0.7", validator, oc_url, "Utilities/ocvalidate/ocvalidate.linux", ""),
+            "acpi_compiler": record("iasl" + suffix, "20260408", compiler, acpi_url, None, "-v"),
+            "identity_tool": record("macserial" + suffix, "2.1.8", identity, oc_url, "Utilities/macserial/macserial.linux", "--version"),
         }],
     }
     catalog_path = tmp_path / "catalog.yaml"
@@ -220,7 +226,8 @@ def test_provision_downloads_only_catalog_pins_and_selects_real_banners(tmp_path
     assert selection.ocvalidate_path is not None and Path(selection.ocvalidate_path).is_file()
     assert selection.identity_tool_path is not None and Path(selection.identity_tool_path).is_file()
     assert selection.sample_plist_path is not None and Path(selection.sample_plist_path).is_file()
-    assert (tool_root / "iasl").stat().st_mode & 0o111
+    if os.name != "nt":
+        assert (tool_root / "iasl").stat().st_mode & 0o111
 
 
 def test_provision_rejects_archive_digest_mismatch_without_publishing_tools(tmp_path: Path) -> None:
@@ -247,6 +254,7 @@ def test_provision_rejects_wrong_platform_binary_before_publishing_any_tool(tmp_
     bad_url = "https://github.com/open-acpica/acpica/releases/download/20260408/iasl"
     archives[bad_url] = windows_binary
     record = catalog["toolchains"][0]["acpi_compiler"]
+    record["file_name"] = "invalid-tool.exe"
     record["size_bytes"] = len(windows_binary)
     record["sha256"] = hashlib.sha256(windows_binary).hexdigest()
     record["source_sha256"] = hashlib.sha256(windows_binary).hexdigest()

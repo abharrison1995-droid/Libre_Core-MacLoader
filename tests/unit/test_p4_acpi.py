@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -50,7 +51,7 @@ def test_acpi_capture_requires_exact_table_set(tmp_path: Path) -> None:
     table_dir.mkdir()
     for name in TABLE_NAMES:
         (table_dir / name).write_bytes(_table("DSDT" if name == "dsdt.dat" else "SSDT"))
-    assert len(AcpiProcessor._find_tables(table_dir)) == 13
+    assert len(AcpiProcessor._find_tables(table_dir)) == 12
     (table_dir / "extra.dat").write_bytes(_table("SSDT"))
     with pytest.raises(BuildPlanError, match="exactly one DSDT"):
         AcpiProcessor._find_tables(table_dir)
@@ -92,7 +93,7 @@ else:
         )
         path = path.with_suffix(".cmd")
         path.write_text(
-            "@echo off\npython \"%~dp0fake_iasl_runner.py\" %*\n",
+            f"@echo off\n\"{sys.executable}\" \"%~dp0fake_iasl_runner.py\" %*\n",
             encoding="utf-8",
             newline="\r\n",
         )

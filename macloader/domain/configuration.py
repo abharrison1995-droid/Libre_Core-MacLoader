@@ -45,12 +45,17 @@ class HardwareObservation:
     evidence_ref: Optional[str] = None
     status: ObservationStatus = ObservationStatus.OBSERVED
     confidence: str = "unknown"
+    observed_at: str = ""
+    snapshot_digest: str = ""
+    bios_binding: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "field_path": self.field_path, "value": self.value, "source": self.source,
             "provider_version": self.provider_version, "evidence_ref": self.evidence_ref,
             "status": self.status.value, "confidence": self.confidence,
+            "observed_at": self.observed_at, "snapshot_digest": self.snapshot_digest,
+            "bios_binding": self.bios_binding,
         }
 
 
@@ -60,11 +65,14 @@ class HardwareConfirmation:
     action: str
     effective_value: str
     reason: str
+    input_scope: Tuple[str, ...] = ()
+    input_digest: str = ""
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "field_path": self.field_path, "action": self.action,
             "effective_value": self.effective_value, "reason": self.reason,
+            "input_scope": list(self.input_scope), "input_digest": self.input_digest,
         }
 
 
@@ -264,6 +272,9 @@ def _observation_from_dict(data: Any) -> HardwareObservation:
         provider_version=str(data["provider_version"]), evidence_ref=data.get("evidence_ref"),
         status=ObservationStatus(str(data.get("status", ObservationStatus.OBSERVED.value))),
         confidence=str(data.get("confidence", "unknown")),
+        observed_at=str(data.get("observed_at", "")),
+        snapshot_digest=str(data.get("snapshot_digest", "")),
+        bios_binding=str(data.get("bios_binding", "")),
     )
 
 
@@ -273,6 +284,7 @@ def _confirmation_from_dict(data: Any) -> HardwareConfirmation:
     return HardwareConfirmation(
         field_path=str(data["field_path"]), action=str(data["action"]),
         effective_value=str(data["effective_value"]), reason=str(data["reason"]),
+        input_scope=tuple(str(v) for v in data.get("input_scope", [])), input_digest=str(data.get("input_digest", "")),
     )
 
 

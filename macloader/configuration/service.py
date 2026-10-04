@@ -19,6 +19,7 @@ from macloader.domain.evidence import EvidenceCompleteness
 from macloader.domain.hardware import HardwareSnapshot
 from macloader.build.config import effective_profile_digest, load_reviewed_profile
 from macloader.build.acpi import AcpiProcessor, normalize_bios_binding
+from macloader.exceptions import BuildPlanError
 from macloader.evidence.acpi import AcpiEvidenceBundle
 from macloader.evidence.usb import UsbEvidenceSession
 
@@ -51,6 +52,10 @@ class ConfigurationService:
             option_selections=self.policy.default_selections(),
             policy_version=self.policy.policy_version,
         )
+
+    def reconcile(self, draft: UserConfiguration, snapshot: HardwareSnapshot) -> UserConfiguration:
+        from macloader.configuration.observations import reconcile_configuration
+        return reconcile_configuration(draft, snapshot)
 
     def evaluate(self, draft: UserConfiguration, snapshot: HardwareSnapshot) -> ConfigurationEvaluation:
         issues: List[ConfigurationIssue] = []
@@ -134,7 +139,7 @@ class ConfigurationService:
                     plan_evidence_digests.append(
                         AcpiProcessor.capture_evidence_digest(source.parent, record.bios_binding)
                     )
-                except (OSError, ValueError):
+                except (OSError, ValueError, BuildPlanError):
                     pass
         plan = replace(
             plan,
@@ -216,6 +221,11 @@ class ConfigurationService:
 
     def _validate_evidence(self, draft: UserConfiguration, snapshot: HardwareSnapshot, issues: List[ConfigurationIssue]) -> None:
         for record in draft.evidence:
+            from macloader.configuration.observations import EVIDENCE_SCOPES, scope_digest
+            if record.completeness == EvidenceCompleteness.STALE or (
+                record.input_scope and (record.input_scope != EVIDENCE_SCOPES.get(record.kind) or scope_digest(snapshot, record.input_scope) != record.input_digest)
+            ):
+                issues.append(self._issue("EVIDENCE_STALE", f"evidence.{record.kind}", "Machine evidence changed and must be collected again.", "Recollect affected evidence."))
             if record.machine_snapshot_id != snapshot.snapshot_id:
                 issues.append(self._issue("EVIDENCE_SNAPSHOT_MISMATCH", f"evidence.{record.kind}", "Evidence belongs to a different hardware snapshot.", "Capture or import evidence from the active snapshot."))
             if snapshot.bios_version and normalize_bios_binding(record.bios_binding) != normalize_bios_binding(snapshot.bios_version):
@@ -229,7 +239,13 @@ class ConfigurationService:
                 if record.kind == "usb":
                     actual = UsbEvidenceSession.from_dict(payload).to_evidence_record()
                 elif record.kind == "acpi":
-                    actual = AcpiEvidenceBundle.from_dict(payload).to_evidence_record()
+                    bundle = AcpiEvidenceBundle.from_dict(payload)
+                    actual = bundle.to_evidence_record()
+                    paths = AcpiProcessor._find_tables(source.parent / "PRIVATE-ACPI")
+                    expected = {table.table_name.lower(): table.sha256 for table in bundle.tables}
+                    current = {path.name.lower(): str(AcpiProcessor._validate_table(path)["sha256"]) for path in paths}
+                    if expected != current:
+                        raise ValueError("private firmware tables changed after capture")
                 else:
                     raise ValueError("unsupported evidence kind")
                 if (
@@ -240,8 +256,10 @@ class ConfigurationService:
                     or actual.private_ref != record.private_ref
                 ):
                     raise ValueError("evidence digest, source reference, snapshot, or BIOS binding does not match")
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError, BuildPlanError, json.JSONDecodeError) as exc:
                 issues.append(self._issue("EVIDENCE_SOURCE_INVALID", f"evidence.{record.kind}", f"Private evidence could not be verified: {exc}", "Re-capture the evidence with the supported collector."))
+        if not any(record.kind == "acpi" and record.completeness == EvidenceCompleteness.COMPLETE for record in draft.evidence):
+            issues.append(self._issue("ACPI_EVIDENCE_REQUIRED", "evidence.acpi", "Machine-bound firmware tables have not been collected.", "Collect this machine’s firmware tables."))
         usb_records = [record for record in draft.evidence if record.kind == "usb"]
         if not any(
             record.completeness == EvidenceCompleteness.COMPLETE

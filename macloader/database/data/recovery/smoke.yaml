@@ -1,0 +1,13 @@
+schema_version: '1'
+policy_id: prototype-smoke-2026.10-a
+purpose: picker-recovery-smoke-only
+metadata_trust: untrusted
+query_scheme: http
+asset_scheme: https
+actual_build: unknown
+installation_authorized: false
+tool:
+  project: acidanthera/OpenCorePkg
+  version: '1.0.8'
+  source: https://github.com/acidanthera/OpenCorePkg/blob/1.0.8/Utilities/macrecovery/macrecovery.py
+  digest: 3023a9b4ca79a5255d93c00f25ab5df37e6f938b729b797d9ecea56184b17aff

@@ -12,6 +12,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -22,7 +23,7 @@ from macloader.exceptions import BuildPlanError
 
 ACPI_HEADER_SIZE = 36
 MAX_ACPI_TABLE_BYTES = 64 * 1024 * 1024
-TABLE_NAMES = ("dsdt.dat", "ssdt.dat", *tuple(f"ssdt{i}.dat" for i in range(1, 12)))
+TABLE_NAMES = ("dsdt.dat", "ssdt.dat", *tuple(f"ssdt{i}.dat" for i in range(1, 11)))
 
 
 def normalize_bios_binding(value: str) -> str:
@@ -330,7 +331,7 @@ class AcpiProcessor:
         declared_length = int.from_bytes(data[4:8], "little")
         if declared_length != len(data):
             raise BuildPlanError(f"ACPI table length does not match the private capture: {Path(name).stem}")
-        if signature not in {"DSDT", "SSDT"} or sum(data) % 256 != 0:
+        if signature != ("DSDT" if Path(name).name.lower() == "dsdt.dat" else "SSDT") or sum(data) % 256 != 0:
             raise BuildPlanError(f"ACPI table signature or checksum is invalid: {Path(name).stem}")
         return {
             "name": Path(name).name.lower(),
@@ -403,7 +404,7 @@ class AcpiProcessor:
             return
         try:
             pid = getattr(process, "pid", None)
-            if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            if sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
             else:
                 process.terminate()
@@ -411,12 +412,12 @@ class AcpiProcessor:
         except (OSError, subprocess.TimeoutExpired):
             try:
                 pid = getattr(process, "pid", None)
-                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                if sys.platform == "win32" and isinstance(pid, int) and pid > 0:
                     subprocess.run(
                         ["taskkill", "/T", "/F", "/PID", str(pid)],
                         capture_output=True, check=False,
                     )
-                elif os.name != "nt" and isinstance(pid, int) and pid > 0:
+                elif sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 else:
                     process.kill()

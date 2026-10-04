@@ -525,3 +525,7 @@ P7 software and hosted distribution qualification are evidenced for this candida
 - Keep the Windows destructive backend behind the explicit sacrificial-USB checkpoint.
 - Record the exact opaque device reference, capacity, consequence and recovery route before any physical write.
 - Do not promote the machine from `EXPERIMENTAL` or alter the frozen Recovery target from this evidence.
+
+## Autoloader Recovery protocol review — 2026-10-03
+
+Official [latest release resolves to OpenCore 1.0.8](https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.8). Reviewed [pinned macrecovery source](https://github.com/acidanthera/OpenCorePkg/blob/1.0.8/Utilities/macrecovery/macrecovery.py), SHA-256 3023a9b4ca79a5255d93c00f25ab5df37e6f938b729b797d9ecea56184b17aff, downloaded from that exact upstream ref. HTTP metadata protocol and AP opacity persist; signature method 2 remains unsigned and must be rejected. A Windows client fix does not authenticate an exact 24A335 relationship. Implemented a separate versioned smoke protocol/purpose under ADR-008; frozen EFI baseline stays 1.0.7. No live Recovery acquisition or physical result was claimed in this phase. Tests use a pre-existing synthetic RSA encoding fixture and test public key; that is parser/software evidence, never Apple authentication.

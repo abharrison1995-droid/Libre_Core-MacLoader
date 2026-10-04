@@ -1,0 +1,25 @@
+schema_version: "1"
+campaign_id: t480s-20l8-n22et85w-162-sequoia
+revision: "3"
+model_id: thinkpad-t480s
+machine_type: "20L8"
+bios_binding: N22ET85W-1.62
+target:
+  product_id: sequoia
+  version: "15.0"
+  build: 24A335
+reviewed_profile_id: t480s-sequoia-p4
+configuration_policy_id: t480s-configuration-2026.09-a
+evidence_policy_id: t480s-evidence-2026.09-a
+recovery_policy_id: recovery-apple-2026-09
+required_components:
+  graphics: [intel-uhd-620]
+  audio: [realtek-alc257]
+  ethernet: [intel-i219-lm, intel-i219-v]
+  wifi: [intel-ac-8265, intel-ac-9260-9560]
+  bluetooth: [intel-bluetooth]
+required_evidence: [acpi, usb]
+support_state: EXPERIMENTAL
+first_boot_instruction: lenovo-f12-recovery-smoke
+smoke_recovery_eligible: true
+smoke_recovery_policy_id: prototype-smoke-2026.10-a

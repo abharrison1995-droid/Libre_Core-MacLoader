@@ -38,12 +38,68 @@ console = Console()
 err_console = Console(stderr=True)
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(__version__, prog_name="macloader")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose debug logging.")
-def cli(verbose: bool) -> None:
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool) -> None:
     """Libre_Core MacLoader — ThinkPad OpenCore & macOS provisioning engine."""
     setup_logging(verbose=verbose)
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(autoload_cmd)
+
+
+@cli.command("autoload")
+@click.option("--status", "status_only", is_flag=True, help="Detect/resume and show the next guided step without executing it.")
+@click.option("--readiness", is_flag=True, help="Report physical-campaign gates without preparing or writing media.")
+@click.option("--terminal", is_flag=True, help="Use text prompts instead of the Textual interface.")
+def autoload_cmd(status_only: bool, terminal: bool, readiness: bool = False) -> None:
+    """Prepare this laptop through the guided autoloader."""
+    from macloader.autoloader.models import ActionKind
+    from macloader.autoloader.service import AutoloaderService
+    service = AutoloaderService()
+    if not status_only and not terminal and not readiness:
+        from macloader.ui.guided import GuidedApp
+        if GuidedApp(service).run():
+            from macloader.ui.tui import WorkflowApp
+            WorkflowApp(service=service.workflow, config_id=service.configuration.configuration_id if service.configuration else None).run()
+        return
+    try:
+        action = service.start()
+        if readiness:
+            from macloader.autoloader.readiness import campaign_readiness
+            report = campaign_readiness(service)
+            console.print("First-boot gate: " + ("READY" if report["ready_for_first_boot"] else "BLOCKED"))
+            for gate in report["gates"]:
+                console.print(f"{'PASS' if gate['passed'] else 'BLOCKED'} · {gate['name']}: {gate['detail']}", markup=False)
+            console.print("Experimental; internal installation is not authorized.")
+            return
+        if status_only:
+            console.print(service.review_summary(), markup=False)
+            console.print(action.message, markup=False)
+            return
+        last_message = ""
+        while True:
+            action = service.advance_until_blocked()
+            message = service.review_summary() + "\n" + action.message
+            if message != last_message:
+                console.print(message, markup=False)
+                last_message = message
+            if action.code == "USB_WAITING":
+                import time
+                time.sleep(0.5)
+                continue
+            if action.kind != ActionKind.HUMAN or not action.choices:
+                return
+            for index, choice in enumerate(action.choices, 1):
+                console.print(f"{index}. {choice}", markup=False)
+            selection = click.prompt("Choose", type=click.IntRange(1, len(action.choices)))
+            service.perform_choice(action.choices[selection - 1])
+    except Exception as exc:
+        if isinstance(exc, (click.Abort, click.ClickException)):
+            raise
+        from macloader.evidence.acpi_capture import CaptureError
+        raise click.ClickException(str(exc) if isinstance(exc, CaptureError) else service.failure_message()) from exc
 
 
 @cli.command("probe")

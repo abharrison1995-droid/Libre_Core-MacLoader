@@ -27,6 +27,7 @@ from macloader.dependencies.cache import compute_file_sha256
 from macloader.dependencies.resolver import DependencyResolver
 from macloader.database.loader import Database, get_database
 from macloader.domain.build_plan import BuildPlan
+from macloader.domain.hardware import HardwareSnapshot
 from macloader.domain.contracts import (
     BuildManifest,
     CONTRACT_SCHEMA_VERSION,
@@ -64,6 +65,7 @@ class EfiBuilder:
     ) -> None:
         self.db = db or get_database()
         self.identity_store_dir = identity_store_dir or DEFAULT_IDENTITY_DIR
+        self.private_work_root = DEFAULT_WORKSPACE_DIR / "private" / "acpi-build"
         self.max_artifact_expanded_bytes = max_artifact_expanded_bytes
         self.max_build_expanded_bytes = max_build_expanded_bytes
 
@@ -81,6 +83,8 @@ class EfiBuilder:
         cancel: Optional[Callable[[], bool]] = None,
         identity_reference: Optional[IdentityReference] = None,
         synthetic_test_mode: bool = False,
+        private_usb_evidence: Optional[Path] = None,
+        hardware_snapshot: Optional[HardwareSnapshot] = None,
     ) -> EfiBuildResult:
         profile_bound = bool(
             plan.profile_bindings
@@ -278,7 +282,7 @@ class EfiBuilder:
                     raise BuildPlanError("P4 EFI generation requires the private machine-bound ACPI capture")
                 acpi_result = AcpiProcessor(
                     Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256,
-                    work_root=DEFAULT_WORKSPACE_DIR / "p4-acpi-build",
+                    work_root=self.private_work_root,
                 ).build(
                     private_acpi_capture, efi_root / "OC" / "ACPI",
                     expected_bios_binding=reviewed_profile.bios_binding,
@@ -286,6 +290,37 @@ class EfiBuilder:
                     expected_evidence_digest=expected_acpi_evidence_digest,
                     cancel=cancel,
                 )
+
+            generated_usb = None
+            if reviewed_profile is not None:
+                if private_usb_evidence is None or private_usb_evidence.is_symlink() or not private_usb_evidence.is_file():
+                    raise BuildPlanError("EFI build requires private physical USB evidence for the generated map")
+                from macloader.evidence.usb import UsbEvidenceSession
+                from macloader.evidence.usb_capture import collect_firmware_usb_addresses
+                from macloader.build.usb_map import generate_usb_map
+                usb_evidence = UsbEvidenceSession.from_dict(json.loads(private_usb_evidence.read_text()))
+                if usb_evidence.private_ref != str(private_usb_evidence) or usb_evidence.to_evidence_record().digest not in plan.evidence_digests:
+                    raise BuildPlanError("USB map source is not bound to the accepted BuildPlan")
+                campaigns = [c for c in self.db.campaigns.values() if c.profile.profile_id == reviewed_profile.profile_id and c.bios_binding == reviewed_profile.bios_binding]
+                if len(campaigns) != 1:
+                    raise BuildPlanError("No unique campaign binds the USB map policy")
+                if private_acpi_capture is None or not toolchain.acpi_compiler_path or not toolchain.acpi_compiler_sha256:
+                    raise BuildPlanError("USB map requires current private firmware proof")
+                addresses = collect_firmware_usb_addresses(private_acpi_capture, Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256, staging / "private-usb-work", cancel or (lambda: False))
+                # Only the reference controller's PCI identity/topology can drive the injector.
+                from macloader.configuration.service import ConfigurationService
+                if hardware_snapshot is None or hardware_snapshot.snapshot_id != plan.hardware_snapshot_id or ConfigurationService._snapshot_digest(hardware_snapshot) != plan.hardware_content_digest:
+                    raise BuildPlanError("USB map hardware topology does not match the accepted BuildPlan")
+                controller_slots = {device.pci_slot for device in hardware_snapshot.usb_controllers if device.pci_slot}
+                generated_usb = generate_usb_map(usb_evidence, campaigns[0].evidence_policy["usb_capture"],
+                    snapshot_id=plan.hardware_snapshot_id, bios_binding=reviewed_profile.bios_binding,
+                    smbios=dict(plan.effective_option_selections).get("profile.smbios", ""),
+                    first_route=reviewed_profile.usb.first_install_route, addresses=addresses, controller_slots=controller_slots)
+                shutil.rmtree(staging / "private-usb-work")
+                usb_contents = efi_root / "OC" / "Kexts" / "MacLoaderUSBMap.kext" / "Contents"
+                usb_contents.mkdir(parents=True)
+                (usb_contents / "Info.plist").write_bytes(generated_usb.plist)
+                kexts.append("MacLoaderUSBMap.kext")
 
             identity_path = self._identity_path(plan, dependencies, identity_reference)
             stored_identity = self._load_identity(identity_path) if identity_path.is_file() else None
@@ -341,7 +376,7 @@ class EfiBuilder:
                 schema_digest = generator.schema_digest
                 profile_digest = expected_effective_profile_digest
                 acpi_digest = acpi_result.generated_digest if acpi_result is not None else ""
-                evidence_digests = (acpi_result.source_evidence_digest,) if acpi_result is not None else ()
+                evidence_digests = ((acpi_result.source_evidence_digest,) if acpi_result is not None else ()) + ((generated_usb.evidence_digest, generated_usb.digest) if generated_usb else ())
                 usb_policy_state = reviewed_profile.usb.usb_c_correlation
                 usb_first_install_route = reviewed_profile.usb.first_install_route
             validation = self.validate_tree(staging, toolchain=None, identity=identity_data, cancel=cancel)
@@ -424,6 +459,8 @@ class EfiBuilder:
         expected_manifest: Optional[BuildManifest] = None,
         cancel: Optional[Callable[[], bool]] = None,
         synthetic_test_mode: bool = False,
+        private_usb_evidence: Optional[Path] = None,
+        hardware_snapshot: Optional[HardwareSnapshot] = None,
     ) -> ValidationReport:
         required = [
             root / "EFI" / "BOOT" / "BOOTx64.efi",
@@ -611,7 +648,7 @@ class EfiBuilder:
             return
         try:
             pid = getattr(process, "pid", None)
-            if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            if sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
             else:
                 process.terminate()
@@ -619,12 +656,12 @@ class EfiBuilder:
         except (OSError, subprocess.TimeoutExpired):
             try:
                 pid = getattr(process, "pid", None)
-                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                if sys.platform == "win32" and isinstance(pid, int) and pid > 0:
                     subprocess.run(
                         ["taskkill", "/T", "/F", "/PID", str(pid)],
                         capture_output=True, check=False,
                     )
-                elif os.name != "nt" and isinstance(pid, int) and pid > 0:
+                elif sys.platform != "win32" and isinstance(pid, int) and pid > 0:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 else:
                     process.kill()

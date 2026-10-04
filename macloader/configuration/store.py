@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from typing import Any, Iterator, Optional
@@ -82,19 +83,19 @@ class ConfigurationStore:
             lock_path = self.root / f".{configuration_id}.lock"
             self._assert_safe_path(lock_path)
             with lock_path.open("a+", encoding="utf-8") as handle:
-                if os.name == "nt":
+                if sys.platform == "win32":
                     import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 else:
                     import fcntl
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:
                     yield
                 finally:
-                    if os.name == "nt":
+                    if sys.platform == "win32":
                         import msvcrt
                         handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
                     else:
                         import fcntl
                         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

@@ -146,10 +146,12 @@ class AudioInfo:
     codec_vendor_id: Optional[str] = None
     codec_device_id: Optional[str] = None
     pci: Optional[PciDevice] = None
+    codec_subsystem_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
+            "codec_subsystem_id": self.codec_subsystem_id,
             "codec_name": self.codec_name,
             "codec_vendor_id": self.codec_vendor_id,
             "codec_device_id": self.codec_device_id,
@@ -162,6 +164,7 @@ class AudioInfo:
         return cls(
             name=data["name"],
             codec_name=data.get("codec_name"),
+            codec_subsystem_id=data.get("codec_subsystem_id"),
             codec_vendor_id=data.get("codec_vendor_id"),
             codec_device_id=data.get("codec_device_id"),
             pci=PciDevice.from_dict(pci_data) if pci_data else None,
@@ -252,6 +255,12 @@ class DisplayInfo:
     name: Optional[str] = None
     resolution: Optional[str] = None
     is_internal: bool = True
+    touch_capability: Optional[bool] = None
+    source: str = "unknown"
+
+    def __post_init__(self) -> None:
+        if self.touch_capability is not None and type(self.touch_capability) is not bool:
+            raise HardwareContractError("display touch capability must be boolean or unknown")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
