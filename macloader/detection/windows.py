@@ -227,6 +227,33 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             allow_empty=allow_empty,
         )
 
+    @staticmethod
+    def _usable_pnp_inventory(result: CimQueryResult) -> CimQueryResult:
+        """Keep PnP rows with structural identity; display names are optional."""
+        if not result.is_complete:
+            return result
+
+        rows = [
+            row for row in result.rows
+            if isinstance(row.get("PNPDeviceID"), str) and row["PNPDeviceID"].strip()
+        ]
+        if not rows:
+            return CimQueryResult(
+                execution_success=result.execution_success,
+                parse_success=False,
+                is_confirmed_empty=False,
+                rows=[],
+                raw=result.raw,
+                error_message="No PnP rows contain a usable PNPDeviceID",
+            )
+        return CimQueryResult(
+            execution_success=result.execution_success,
+            parse_success=True,
+            is_confirmed_empty=False,
+            rows=rows,
+            raw=result.raw,
+        )
+
     def _json_rows(self, script: str) -> List[Dict[str, Any]]:
         return self._query_cim(script).rows
 
@@ -345,11 +372,12 @@ class WindowsHardwareProvider(BaseHardwareProvider):
         usb_controllers: List[PciDevice] = []
         thunderbolt = None
 
-        pnp_res = self._query_cim(
-            "Get-CimInstance Win32_PnPEntity | Select-Object Name,PNPDeviceID,Class,Service | ConvertTo-Json",
-            required_fields=["Name", "PNPDeviceID"],
+        pnp_res = self._usable_pnp_inventory(self._query_cim(
+            "Get-CimInstance Win32_PnPEntity | "
+            "Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.PNPDeviceID) } | "
+            "Select-Object Name,PNPDeviceID,Class,Service | ConvertTo-Json",
             allow_empty=False,
-        )
+        ))
         if pnp_res.rows:
             for row in pnp_res.rows:
                 name = normalize_dmi_string(row.get("Name")) or "Unknown device"

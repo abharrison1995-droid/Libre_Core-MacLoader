@@ -4,9 +4,12 @@ import json
 from typing import Optional
 
 from macloader.compatibility.engine import CompatibilityEngine
-from macloader.database.loader import Database
+from macloader.configuration.campaign_match import match_campaign
+from macloader.configuration.observations import snapshot_observations
+from macloader.database.loader import Database, get_database
 from macloader.detection.windows import WindowsHardwareProvider
 from macloader.domain.compatibility import CompatibilityState
+from macloader.domain.configuration import ObservationStatus
 
 
 def test_windows_provider_with_mock_runner() -> None:
@@ -370,3 +373,97 @@ def test_complete_valid_windows_hardware_snapshot_is_build_eligible(db: Database
 
     assert report.overall_state in (CompatibilityState.SUPPORTED, CompatibilityState.EXPERIMENTAL)
     assert report.can_generate_build_plan is True
+
+
+def test_pnp_inventory_keeps_rows_with_optional_names_and_ignores_missing_identity() -> None:
+    pnp_rows = [
+        {"Name": None, "PNPDeviceID": r"PCI\VEN_8086&DEV_15C1&SUBSYS_225817AA", "Class": "USB"},
+        {"Name": "Intel Ethernet Connection I219-V", "PNPDeviceID": r"PCI\VEN_8086&DEV_15D8&SUBSYS_225817AA", "Class": "Net"},
+        {"Name": "Intel Dual Band Wireless-AC 8265", "PNPDeviceID": r"PCI\VEN_8086&DEV_24FD&SUBSYS_00108086", "Class": "Net"},
+        {"Name": "Realtek Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_17AA2258", "Class": "MEDIA"},
+        {"Name": "Intel Wireless Bluetooth", "PNPDeviceID": r"USB\VID_8087&PID_0A2B", "Class": "Bluetooth"},
+        {"Name": "Standard PS/2 Keyboard", "PNPDeviceID": r"ACPI\PNP0303", "Class": "Keyboard"},
+        {"Name": "ELAN PTP Touchpad", "PNPDeviceID": r"ACPI\ELAN0001", "Class": "Mouse"},
+        {"Name": "Intel Thunderbolt Controller", "PNPDeviceID": r"PCI\VEN_8086&DEV_15BF&SUBSYS_225817AA", "Class": "System"},
+        {"Name": "Intel USB Controller", "PNPDeviceID": r"PCI\VEN_8086&DEV_9D2F&SUBSYS_225817AA", "Class": "USB"},
+        {"Name": None, "PNPDeviceID": r"ACPI\UNKNOWN0001"},
+        {"Name": "Unidentified PnP entity", "PNPDeviceID": "   ", "Class": "System"},
+    ]
+
+    def runner(script: str) -> Optional[str]:
+        if "Win32_ComputerSystem" in script:
+            return json.dumps({"Manufacturer": "LENOVO", "Model": "20L8S4P100"})
+        if "Win32_BIOS" in script:
+            return json.dumps({"SMBIOSBIOSVersion": "N22ET85W (1.62 )"})
+        if "Win32_Processor" in script:
+            return json.dumps({"Name": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz", "NumberOfCores": 4, "NumberOfLogicalProcessors": 8})
+        if "Win32_VideoController" in script:
+            return json.dumps([{"Name": "Intel UHD Graphics 620", "PNPDeviceID": r"PCI\VEN_8086&DEV_5917&SUBSYS_225817AA"}])
+        if "Win32_PnPEntity" in script:
+            assert "Where-Object" in script and "PNPDeviceID" in script
+            return json.dumps(pnp_rows)
+        if "Win32_DiskDrive" in script:
+            return json.dumps([{"Model": "SSSTC CA5-8D256-HP", "InterfaceType": "SCSI", "Size": "256052966400", "PNPDeviceID": r"SCSI\DISK&VEN_NVME&PROD_SSSTC"}])
+        if "WmiMonitorConnectionParams" in script:
+            return json.dumps([{"InstanceName": "DISPLAY-TEST", "VideoOutputTechnology": 11, "Active": True}])
+        if "WmiMonitorListedSupportedSourceModes" in script:
+            return json.dumps([{"InstanceName": "DISPLAY-TEST", "PreferredMonitorSourceModeIndex": 0, "MonitorSourceModes": [{"HorizontalActivePixels": 1920, "VerticalActivePixels": 1080}]}])
+        return ""
+
+    snapshot = WindowsHardwareProvider(command_runner=runner).probe()
+    inventory = snapshot.raw_evidence["inventory_status"]
+    assert inventory["pnp"] is True
+    assert all(inventory[name] for name in ("audio", "ethernet", "wifi", "bluetooth", "input"))
+
+    assert snapshot.audio[0].codec_vendor_id == "10ec"
+    assert snapshot.audio[0].codec_device_id == "0257"
+    assert snapshot.audio[0].codec_subsystem_id == "17aa:2258"
+    ethernet = snapshot.ethernet[0]
+    wifi = snapshot.wifi[0]
+    bluetooth = snapshot.bluetooth[0]
+    assert ethernet.pci is not None and ethernet.pci.canonical_id == "8086:15d8"
+    assert wifi.pci is not None and wifi.pci.canonical_id == "8086:24fd"
+    assert bluetooth.usb is not None and bluetooth.usb.canonical_id == "8087:0a2b"
+    assert {device.kind for device in snapshot.input_devices} == {"keyboard", "trackpad"}
+    assert snapshot.thunderbolt is not None and snapshot.thunderbolt.present
+    assert {device.canonical_id for device in snapshot.usb_controllers} == {"8086:15c1", "8086:9d2f"}
+    assert snapshot.displays[0].resolution == "1920x1080"
+    assert snapshot.displays[0].touch_capability is None
+
+    query_status = snapshot.raw_evidence["query_status"]["pnp"]
+    assert query_status["is_complete"] is True
+    assert query_status["row_count"] == len(pnp_rows) - 1
+
+    observations = {item.field_path: item for item in snapshot_observations(snapshot)}
+    for field in ("audio.codec", "audio.subsystem", "ethernet.identity", "wifi.identity", "bluetooth.identity", "input.topology", "usb_controllers.identity"):
+        assert observations[field].status == ObservationStatus.OBSERVED
+
+    match = match_campaign(snapshot, get_database())
+    assert match.campaign is not None
+    assert match.campaign.campaign_id == "t480s-20l8-n22et85w-162-sequoia"
+    assert not match.mismatches
+    assert match.unknown == ("panel.touch",)
+
+
+def test_pnp_inventory_rejects_rows_without_any_usable_identity() -> None:
+    result = WindowsHardwareProvider._parse_cim_output(
+        json.dumps([{"Name": "Unknown device", "PNPDeviceID": None}, {"Name": "Also unknown", "PNPDeviceID": " "}]),
+        allow_empty=False,
+    )
+    filtered = WindowsHardwareProvider._usable_pnp_inventory(result)
+    assert filtered.execution_success is True
+    assert filtered.parse_success is False
+    assert filtered.rows == []
+    assert filtered.error_message == "No PnP rows contain a usable PNPDeviceID"
+
+
+def test_general_cim_parser_remains_strict_for_required_fields() -> None:
+    result = WindowsHardwareProvider._parse_cim_output(
+        json.dumps({"Manufacturer": "LENOVO", "Model": None}),
+        required_fields=["Manufacturer", "Model"],
+        allow_empty=False,
+    )
+    assert result.execution_success is True
+    assert result.parse_success is False
+    assert result.rows == []
+    assert result.error_message == "Row missing required fields: ['Model']"
