@@ -168,8 +168,9 @@ class WindowsRemovableAdapter:
                 # PhysicalDrive is a whole-disk path, never a drive letter.  A
                 # missing serial deliberately remains non-qualified for writes.
                 device_id = f"windows:physical:{_as_int(number, 'disk number')}"
-            mount_state_known = "Mounted" in row
-            mounted = _as_bool(row.get("Mounted")) if mount_state_known else True
+            mounted = self._partition_mount_state(
+                row.get("PartitionMountState"), row.get("Partitions")
+            )
             devices.append(
                 RemovableDevice(
                     device_id=device_id,
@@ -281,16 +282,95 @@ class WindowsRemovableAdapter:
         return tuple(result)
 
     @staticmethod
+    def _partition_mount_state(value: Any, disk_partitions: Any) -> bool:
+        'Return true when structured Windows mount evidence is unsafe or unknown.'
+        if not isinstance(value, dict) or value.get("Known") is not True:
+            return True
+        if disk_partitions is None:
+            return True
+        expected_values = disk_partitions if isinstance(disk_partitions, list) else [disk_partitions]
+        expected: set[str] = set()
+        for partition_number in expected_values:
+            if isinstance(partition_number, bool) or not isinstance(partition_number, (int, str)):
+                return True
+            text = str(partition_number).strip()
+            if not text.isdigit() or text in expected:
+                return True
+            expected.add(text)
+        partitions = value.get("Partitions")
+        if isinstance(partitions, dict):
+            partition_rows = [partitions]
+        elif isinstance(partitions, list):
+            partition_rows = partitions
+        else:
+            return True
+        observed: set[str] = set()
+        for partition in partition_rows:
+            if not isinstance(partition, dict) or partition.get("AccessPathsKnown") is not True:
+                return True
+            partition_number = partition.get("PartitionNumber")
+            if isinstance(partition_number, bool) or not isinstance(partition_number, (int, str)):
+                return True
+            partition_text = str(partition_number).strip()
+            if not partition_text.isdigit() or partition_text in observed:
+                return True
+            observed.add(partition_text)
+            if "AccessPaths" not in partition:
+                return True
+            access_paths = partition.get("AccessPaths")
+            if isinstance(access_paths, list):
+                paths = access_paths
+            elif isinstance(access_paths, str):
+                paths = [access_paths]
+            else:
+                return True
+            for access_path in paths:
+                if not isinstance(access_path, str) or not access_path.strip():
+                    return True
+                path = access_path.strip()
+                if WindowsRemovableAdapter._is_volume_guid_path(path):
+                    continue
+                # Drive-letter roots and folder mounts are unsafe; unknown
+                # non-GUID path forms also fail closed.
+                return True
+        return observed != expected
+
+    @staticmethod
+    def _is_volume_guid_path(path: str) -> bool:
+        for prefix in ("\\\\?\\Volume{", "\\??\\Volume{"):
+            suffix = "}\\"
+            if path.startswith(prefix) and path.endswith(suffix):
+                guid = path[len(prefix):-len(suffix)]
+                if re.fullmatch(
+                    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                    guid,
+                ):
+                    return True
+        return False
+
+    @staticmethod
     def _powershell_query() -> str:
-        # ConvertTo-Json is bounded to disk rows and intentionally excludes
-        # volume drive letters.  The serial/model/whole-disk number are the
-        # identity inputs used by the shared stale-target checks.
+        # Read partition access paths directly. A volume GUID path is present
+        # even when an ESP has no drive or folder mount, so Python classifies
+        # the structured paths and fails closed on unknown shapes.
         return (
-            "Get-Disk | Select-Object Number,FriendlyName,SerialNumber,Size,BusType,"
-            "IsBoot,IsSystem,IsReadOnly,OperationalStatus,IsRemovable,Manufacturer,"
-            "@{Name='Partitions';Expression={(Get-Partition -DiskNumber $_.Number -ErrorAction Stop | ForEach-Object { $_.PartitionNumber })}},"
-            "@{Name='Mounted';Expression={((Get-Partition -DiskNumber $_.Number -ErrorAction Stop | Get-Volume -ErrorAction Stop) | Where-Object { $_.DriveLetter -or $_.Path }).Count -gt 0}} | "
-            "ConvertTo-Json -Compress"
+            "Get-Disk | ForEach-Object { $disk = $_; "
+            "$partitionObjects = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop); "
+            "$partitionMountStates = @($partitionObjects | ForEach-Object { "
+            "$partition = $_; $accessPathsKnown = $null -ne $partition.PSObject.Properties['AccessPaths']; "
+            "$accessPaths = @(); if ($accessPathsKnown) { foreach ($accessPath in @($partition.AccessPaths)) { "
+            "if ($null -ne $accessPath) { $accessPaths += [string]$accessPath } } }; "
+            "[pscustomobject]@{ PartitionNumber=$partition.PartitionNumber; "
+            "GptType=$partition.GptType; IsHidden=$partition.IsHidden; "
+            "AccessPathsKnown=$accessPathsKnown; AccessPaths=$accessPaths } }); "
+            "$partitionNumbers = @($partitionObjects | ForEach-Object { $_.PartitionNumber }); "
+            "[pscustomobject]@{ Number=$disk.Number; FriendlyName=$disk.FriendlyName; "
+            "SerialNumber=$disk.SerialNumber; Size=$disk.Size; BusType=$disk.BusType; "
+            "IsBoot=$disk.IsBoot; IsSystem=$disk.IsSystem; IsReadOnly=$disk.IsReadOnly; "
+            "OperationalStatus=$disk.OperationalStatus; IsRemovable=$disk.IsRemovable; "
+            "Manufacturer=$disk.Manufacturer; Partitions=$partitionNumbers; "
+            "PartitionMountState=[pscustomobject]@{ Known=$true; Partitions=$partitionMountStates } } "
+            "} | ConvertTo-Json -Compress -Depth 6"
         )
 
     @staticmethod

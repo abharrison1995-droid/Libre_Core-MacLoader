@@ -1,8 +1,12 @@
 # Native Windows writer qualification
 
-Status: **implementation supplied; no physical qualification or production
-approval**. Exact software verification results are recorded in draft PR #1. ADR-007 remains Windows-first. PR #1 stays draft. The
-known-green starting commit is `4dd066da20f866ddecb3844c451717a3c1c5be7d`.
+Status: **mount-detection remediation implemented; the new backend has not
+been physically qualified; production approval remains false**. The pre-fix
+physical campaign is historical evidence only: its unexpected-mount case is
+physical-fail and cannot qualify a repaired backend. PR #1 stays draft.
+The pre-fix commit at discovery was
+ed37b7893519a54fa5fb29636a4abef2690cf42f; its backend digest is
+cf9d8a1133002859c2bc8a29022243c73b92cb32155e9797667bec83ca8c94d8.
 
 ## Implemented boundary
 
@@ -59,6 +63,28 @@ writer. Other formats/media are rejected. Mounted targets remain ineligible unde
 the existing shared safety contract; do not bypass it or secretly unmount a target
 before user selection. Prepare a genuinely unmounted sacrificial target using
 Windows' storage UI as a separate reviewed qualification preparation step.
+
+## Windows mount-state evidence
+
+The pre-fix expression piped Get-Partition results into Get-Volume and treated
+either DriveLetter or Path as evidence of a mount. On the Windows 11 host, the
+unmounted SanDisk ESP had only a volume GUID root in Get-Partition.AccessPaths;
+the non-elevated Get-Partition | Get-Volume projection returned no volume row,
+while an elevated Get-Volume.Path could expose the GUID root even while the
+partition had no drive-letter or folder mount. During the recorded mounted
+state, Windows exposed the temporary FAT32 access path, but the adapter still
+reported mounted=false. The failed assumption was that Get-Volume would map
+the ESP and that any Path value meant a user-visible mount.
+
+Discovery now reads each partition's structured AccessPaths directly from
+Get-Partition. A volume GUID root such as \\?\Volume{...}\ can identify a
+volume without assigning it a drive-letter or folder mount; that GUID alone
+does not make a target mounted.
+A drive root such as R:\ and a folder path such as C:\Mounts\EFI\ do.
+Missing, malformed, or unknown access-path state is treated as mounted. The
+writer checks the same stable device identity again immediately before native
+I/O, so a mount added after planning must stop the write before any disk handle
+is opened for writing.
 
 ## Microsoft API sources
 
@@ -130,7 +156,7 @@ performing it; do not improvise timing-sensitive disconnects on valuable media.
 | exact-target-revalidation | Retain initial and pre-I/O anonymized binding/native checks | Same approved target; no number-only inference |
 | disappeared | Remove selected USB between selection and confirmation | Abort; no other disk modified |
 | identity-changed | Replace selected USB with different sacrificial device before confirmation | Abort; replacement untouched |
-| unexpected-mount | Mount/access selected USB before confirming | Abort; no write |
+| unexpected-mount | After selecting the stable model/capacity/reference, pause at erase confirmation. Add a temporary letter or folder path to the existing ESP, verify Get-Partition.AccessPaths, FAT32 via Get-Volume, and read-only root access, then confirm only to exercise the writer's pre-I/O recheck. | Refuse as mounted before destructive I/O; remove the temporary path and confirm the adapter returns to unmounted. |
 | read-only | Use hardware protection or separately reviewed exact-target read-only preparation | Abort; no ready publication |
 | short-write | Controlled native I/O failure on sacrificial medium; preserve injected/native trace | Fail; attempt invalidation; never ready |
 | cancelled | Interrupt bounded write/readback on sacrificial medium | Fail; attempt invalidation; never ready |
@@ -141,6 +167,13 @@ performing it; do not improvise timing-sensitive disconnects on valuable media.
 | reconnect-invalidated | Reconnect failed medium after successful invalidation | No valid GPT boot layout; report remains failed |
 | unrelated-usb | Normal run with second sacrificial storage attached; compare its read-only pre/post contents | Only selected medium changed |
 | system-disks-present | Normal and reject scenarios with Windows system/internal disks present | System/internal targets never eligible/touched |
+
+For unexpected-mount, preserve the stable public reference, model/capacity/USB
+correlation, partition number and GPT type, actual drive/folder AccessPaths,
+FAT32 and read-only accessibility evidence, adapter mount result, writer refusal,
+and confirmation that cleanup restores the unmounted state. Stop before entering
+confirmation if any identity or mount evidence is ambiguous. A generic
+failed-usb-unready message by itself is not evidence that this case passed.
 
 The normal harness automatically records only normal-write and its target
 revalidation on success. Remaining operator results use the explicit reporting

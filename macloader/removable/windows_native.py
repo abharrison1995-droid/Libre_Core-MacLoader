@@ -207,8 +207,8 @@ class WindowsNativeBackend:
     def _current(self, device: RemovableDevice, changed_layout: bool = False) -> int:
         from macloader.removable.adapters import WindowsRemovableAdapter
         rows = self.inventory()
-        required = {'Number', 'FriendlyName', 'SerialNumber', 'Size', 'IsBoot', 'IsSystem', 'IsReadOnly', 'Mounted', 'BusType', 'Partitions'}
-        if not all(isinstance(row, dict) and required <= set(row) and all(isinstance(row[key], bool) for key in ('IsBoot', 'IsSystem', 'IsReadOnly', 'Mounted')) for row in rows):
+        required = {'Number', 'FriendlyName', 'SerialNumber', 'Size', 'IsBoot', 'IsSystem', 'IsReadOnly', 'BusType', 'Partitions', 'PartitionMountState'}
+        if not all(isinstance(row, dict) and required <= set(row) and all(isinstance(row[key], bool) for key in ('IsBoot', 'IsSystem', 'IsReadOnly')) for row in rows):
             raise UnsafeRemovableTarget('Windows disk safety inventory is incomplete')
         adapter = WindowsRemovableAdapter(runner=lambda _: json.dumps(rows), platform='win32')
         devices = adapter.enumerate()

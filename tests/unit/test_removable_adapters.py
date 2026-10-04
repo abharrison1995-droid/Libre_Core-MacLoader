@@ -30,17 +30,55 @@ def _empty_linux_runner(_args: list[str], _input: Optional[str] = None) -> str:
     return ""
 
 
+def _partition_mount_state(*paths: str, known: bool = True) -> dict[str, Any]:
+    return {
+        "Known": known,
+        "Partitions": [
+            {
+                "PartitionNumber": 1,
+                "AccessPathsKnown": known,
+                "AccessPaths": list(paths),
+            }
+        ],
+    }
+
+
+def _windows_row_json(**overrides: Any) -> str:
+    row: dict[str, Any] = {
+        "Number": 3,
+        "FriendlyName": "USB Disk",
+        "SerialNumber": "SERIAL",
+        "Size": 1000,
+        "BusType": "USB",
+        "IsBoot": False,
+        "IsSystem": False,
+        "IsReadOnly": False,
+        "OperationalStatus": "Online",
+        "IsRemovable": True,
+        "Partitions": [1],
+        "PartitionMountState": _partition_mount_state(),
+    }
+    row.update(overrides)
+    return json.dumps([row])
+
+
 QUALIFIED = MediaBindings("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64, "f" * 64)
 
 
 def test_windows_discovery_uses_whole_disk_identity_and_redacts_serial() -> None:
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SECRET-SERIAL", "Size": 1000, "BusType": "USB", "IsBoot": false, "IsSystem": false, "IsReadOnly": false, "OperationalStatus": "Online", "Mounted": false, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(
+            SerialNumber="SECRET-SERIAL",
+            PartitionMountState=_partition_mount_state(
+                "\\\\?\\Volume{12345678-1234-1234-1234-1234567890ab}\\"
+            ),
+        ),
         platform="win32",
     )
     devices = adapter.enumerate()
     assert devices[0].device_id == "windows:serial:SECRET-SERIAL"
     assert devices[0].is_removable is True
+    assert devices[0].mounted is False
     assert adapter.status.advertised is True
     assert adapter.status.qualified is False
     assert "SECRET-SERIAL" not in adapter.status.reason
@@ -125,7 +163,7 @@ def test_windows_backend_failure_invalidates_and_remounts(
 ) -> None:
     backend = FailingWindowsBackend()
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(),
         backend=backend,
         platform="win32",
         synthetic_test_mode=True,
@@ -142,7 +180,7 @@ def test_windows_backend_invalidates_failed_readback_before_remount(
 ) -> None:
     backend = FalseReadbackWindowsBackend()
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(),
         backend=backend,
         platform="win32",
         synthetic_test_mode=True,
@@ -155,8 +193,81 @@ def test_windows_backend_invalidates_failed_readback_before_remount(
 
 
 def test_windows_discovery_fails_closed_when_mount_state_is_missing() -> None:
+    row = json.loads(_windows_row_json())[0]
+    row.pop("PartitionMountState")
+    row["Mounted"] = False  # The pre-fix boolean is not trusted as a substitute.
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "IsRemovable": true}]',
+        runner=lambda _script: json.dumps([row]),
+        platform="win32",
+    )
+    assert adapter.enumerate()[0].mounted is True
+
+
+def test_windows_efi_volume_guid_does_not_mean_user_mount() -> None:
+    state = {
+        "Known": True,
+        "Partitions": {
+            "PartitionNumber": 1,
+            "GptType": "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}",
+            "FileSystem": "FAT32",
+            "IsHidden": True,
+            "AccessPathsKnown": True,
+            "AccessPaths": "\\\\?\\Volume{12345678-1234-1234-1234-1234567890ab}\\",
+        },
+    }
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: _windows_row_json(
+            FriendlyName="USB SanDisk 3.2Gen1",
+            PartitionMountState=state,
+        ),
+        platform="win32",
+    )
+    device = adapter.enumerate()[0]
+    assert device.mounted is False
+
+
+def test_windows_hidden_efi_fat32_mount_is_detected() -> None:
+    state = _partition_mount_state(
+        "\\\\?\\Volume{12345678-1234-1234-1234-1234567890ab}\\",
+        "R:\\",
+    )
+    state["Partitions"][0].update(
+        GptType="{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}",
+        FileSystem="FAT32",
+        IsHidden=True,
+    )
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: _windows_row_json(PartitionMountState=state),
+        platform="win32",
+    )
+    assert adapter.enumerate()[0].mounted is True
+
+
+@pytest.mark.parametrize("access_path", ["R:\\", "C:\\Mounts\\EFI\\"])
+def test_windows_drive_letter_and_folder_access_paths_are_mounts(access_path: str) -> None:
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: _windows_row_json(
+            PartitionMountState=_partition_mount_state(access_path),
+        ),
+        platform="win32",
+    )
+    assert adapter.enumerate()[0].mounted is True
+
+
+@pytest.mark.parametrize(
+    "mount_state",
+    [
+        {"Known": False, "Partitions": []},
+        {"Known": True, "Partitions": [{"AccessPathsKnown": False, "AccessPaths": []}]},
+        {"Known": True, "Partitions": [{"AccessPathsKnown": True, "AccessPaths": ["unrecognized"]}]},
+        {"Known": True, "Partitions": [{"PartitionNumber": 1, "AccessPathsKnown": True}]},
+        {"Known": True, "Partitions": [{"PartitionNumber": 1, "AccessPathsKnown": True, "AccessPaths": None}]},
+        {"Known": True, "Partitions": [{"PartitionNumber": 2, "AccessPathsKnown": True, "AccessPaths": []}]},
+    ],
+)
+def test_windows_mount_state_fails_closed_when_missing_or_ambiguous(mount_state: dict[str, Any]) -> None:
+    adapter = WindowsRemovableAdapter(
+        runner=lambda _script: _windows_row_json(PartitionMountState=mount_state),
         platform="win32",
     )
     assert adapter.enumerate()[0].mounted is True
@@ -164,11 +275,38 @@ def test_windows_discovery_fails_closed_when_mount_state_is_missing() -> None:
 
 def test_windows_online_disk_with_mounted_volume_is_rejected_by_writer() -> None:
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": true, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(
+            PartitionMountState=_partition_mount_state("R:\\"),
+        ),
         platform="win32",
     )
     with pytest.raises(UnsafeRemovableTarget, match="mounted"):
         RemovableMediaWriter().dry_run(adapter.enumerate()[0], 1)
+
+
+def test_windows_writer_rejects_mount_change_before_destructive_io(
+    valid_source: Path,
+) -> None:
+    state = [_windows_row_json()]
+    enumerator = lambda: WindowsRemovableAdapter(
+        runner=lambda _script: state[0],
+        platform="win32",
+    ).enumerate()
+    initial = enumerator()[0]
+    writer_calls: list[object] = []
+    writer = RemovableMediaWriter(
+        destructive_write=lambda plan, _source: writer_calls.append(plan),
+        enumerator=enumerator,
+        require_published_artifacts=False,
+    )
+    plan = writer.dry_run(initial, 1, source_dir=valid_source, bindings=QUALIFIED)
+    state[0] = _windows_row_json(
+        PartitionMountState=_partition_mount_state("R:\\"),
+    )
+    confirmation = DestructiveConfirmation.issue(plan)
+    with pytest.raises(UnsafeRemovableTarget, match="mounted"):
+        writer.write(plan, valid_source, confirmation)
+    assert writer_calls == []
 
 
 def test_windows_adapter_never_writes_without_qualified_backend(tmp_path: Path) -> None:
@@ -221,7 +359,7 @@ def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path, monk
     monkeypatch.setattr(writer_module, "_WINDOWS_PLATFORM", True)
     backend = FakeWindowsBackend()
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(),
         backend=backend,
         platform="win32",
         synthetic_test_mode=True,
@@ -237,7 +375,7 @@ def test_windows_qualified_backend_lifecycle_is_ordered(valid_source: Path, monk
 def test_writer_invalidates_after_post_write_cancellation(valid_source: Path) -> None:
     backend = FakeWindowsBackend()
     adapter = WindowsRemovableAdapter(
-        runner=lambda _script: '[{"Number": 3, "FriendlyName": "USB Disk", "SerialNumber": "SERIAL", "Size": 1000, "BusType": "USB", "Mounted": false, "IsRemovable": true}]',
+        runner=lambda _script: _windows_row_json(),
         backend=backend,
         platform="win32",
         synthetic_test_mode=True,
@@ -590,6 +728,14 @@ def test_current_adapter_does_not_enable_unqualified_media(monkeypatch: pytest.M
     adapter = current_adapter()
     assert isinstance(adapter, WindowsRemovableAdapter)
     assert adapter.status.qualified is False
+
+
+def test_powershell_query_returns_structured_partition_access_paths() -> None:
+    script = WindowsRemovableAdapter._powershell_query()
+    assert "PartitionMountState" in script
+    assert "AccessPaths" in script
+    assert "Get-Volume" not in script
+    assert "-Depth 6" in script
 
 
 def test_powershell_runner_uses_bounded_noninteractive_command() -> None:

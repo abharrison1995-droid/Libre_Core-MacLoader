@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -92,7 +93,7 @@ else:
         )
         path = path.with_suffix(".cmd")
         path.write_text(
-            "@echo off\npython \"%~dp0fake_iasl_runner.py\" %*\n",
+            f"@echo off\n\"{sys.executable}\" \"%~dp0fake_iasl_runner.py\" %*\n",
             encoding="utf-8",
             newline="\r\n",
         )

@@ -22,7 +22,10 @@ from macloader.removable.windows_qualification import (REQUIRED_CASES, approved_
 def row() -> dict[str, Any]:
     return dict(Number=3, FriendlyName='Test USB', SerialNumber='SYNTHETIC', Size=1024,
         IsBoot=False, IsSystem=False, IsReadOnly=False, BusType='USB', IsRemovable=True,
-        Mounted=False, Partitions=['1'])
+        Partitions=['1'], PartitionMountState={
+            'Known': True,
+            'Partitions': [{'PartitionNumber': 1, 'AccessPathsKnown': True, 'AccessPaths': []}],
+        })
 
 
 def device() -> RemovableDevice:
@@ -148,7 +151,11 @@ def test_normal_raw_readback_offline_and_other_disks_untouched(tmp_path: Path, m
 
 
 @pytest.mark.parametrize('change', [dict(SerialNumber='OTHER'), dict(Size=2048), dict(FriendlyName='Other'),
-    dict(IsBoot=True), dict(IsSystem=True), dict(IsReadOnly=True), dict(Mounted=True), dict(BusType='SATA', IsRemovable=False), dict(Partitions=['2'])])
+    dict(IsBoot=True), dict(IsSystem=True), dict(IsReadOnly=True),
+    dict(PartitionMountState={'Known': True, 'Partitions': [
+        {'PartitionNumber': 1, 'AccessPathsKnown': True, 'AccessPaths': ['R:\\']}
+    ]}),
+    dict(BusType='SATA', IsRemovable=False), dict(Partitions=['2'])])
 def test_prewrite_full_identity_revalidation(change: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     b, api, rows = backend(monkeypatch)
     rows[0].update(change)
@@ -224,7 +231,10 @@ def test_cancel_between_chunks_and_native_identity_changed_after_lock(tmp_path: 
     assert api.offline and b.handle is None
     b, api, rows = backend(monkeypatch)
     b.lock_and_dismount(target)
-    rows[0]['Mounted'] = True
+    rows[0]['PartitionMountState'] = {
+        'Known': True,
+        'Partitions': [{'PartitionNumber': 1, 'AccessPathsKnown': True, 'AccessPaths': ['R:\\']}],
+    }
     with pytest.raises(UnsafeRemovableTarget): b.write(WritePlan(target, 100), tmp_path)
     b.invalidate(target, 'not touched')
     assert not api.blocks and b.handle is None
