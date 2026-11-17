@@ -301,7 +301,8 @@ dependencies:
     version: "2.4.0"
     release_tag: "v2.4.0"
     date_verified: "2026-09-09"
-    dependencies: []
+    dependencies:
+      - "lilu"
     subcomponents:
       - "IntelBluetoothFirmware.kext"
       - "IntelBTPatcher.kext"

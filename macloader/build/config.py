@@ -171,21 +171,25 @@ class SchemaDrivenConfigGenerator:
     @staticmethod
     def _ordered_kexts(kexts: Iterable[str]) -> Tuple[str, ...]:
         """Keep parent kexts before their bundled plug-ins and dependants."""
-        unique = {item for item in kexts}
+        groups = {
+            "lilu.kext": 0,
+            "virtualsmc.kext": 1,
+            "applealc.kext": 2,
+            "whatevergreen.kext": 2,
+            "intelbluetoothfirmware.kext": 5,
+            "intelbtpatcher.kext": 6,
+            "bluetoolfixup.kext": 7,
+        }
 
         def order(item: str) -> Tuple[int, str]:
-            name = Path(item).name.casefold()
-            if name == "lilu.kext":
-                return (0, name)
-            if name == "virtualsmc.kext":
-                return (1, name)
-            if name in {"applealc.kext", "bluetoolfixup.kext", "whatevergreen.kext"}:
-                return (2, name)
+            path = item.casefold().replace("\\", "/")
+            # All plug-ins share the load group of their outermost bundle.
+            name = next((part for part in path.split("/") if part.endswith(".kext")), path)
             if name.startswith("smc") and name.endswith(".kext"):
-                return (3, name)
-            return (4, name)
+                return (3, path)
+            return (groups.get(name, 4), path)
 
-        return tuple(sorted(unique, key=order))
+        return tuple(sorted(dict.fromkeys(kexts), key=order))
 
     @staticmethod
     def _ordered_drivers(drivers: Iterable[str]) -> list[str]:

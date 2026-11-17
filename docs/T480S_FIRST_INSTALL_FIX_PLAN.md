@@ -26,7 +26,8 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
 | P4.3 profile kext set | Stopped | The reviewed profile has no revision to bump |
-| P4.4 kext order | **Next chunk** | Phase 4 |
+| P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
+| P4.5 structural validation | **Next chunk** | Phase 4 |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -419,6 +420,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Problem:** `config.py:172-188` orders by leaf name. Plug-ins nested under a parent (for example `VoodooPS2Controller.kext/Contents/PlugIns/VoodooInput.kext`) can sort before the parent [R]; BlueToolFixup sorts before IntelBluetoothFirmware [R].
 - **Change:** rewrite `_ordered_kexts` as a stable sort with this key: (group, parent-first path). Groups: 0 `Lilu.kext`; 1 `VirtualSMC.kext`; 2 `WhateverGreen.kext`, `AppleALC.kext`; 3 `SMC*.kext`; 4 everything else **except** Bluetooth; 5 `IntelBluetoothFirmware.kext`; 6 `IntelBTPatcher.kext`; 7 `BlueToolFixup.kext`. Within a group sort by full bundle path, and enforce: any path that starts with `<parent>.kext/` comes after `<parent>.kext`. Add `lilu` to the `dependencies` of `intel_bluetooth_firmware` in `catalog.yaml` if it is empty [R `catalog.yaml:294-323`].
 - **Tests:** ordering for the full T480s kext list: Lilu first; VoodooPS2Controller before every `VoodooPS2Controller.kext/Contents/PlugIns/*`; IntelBluetoothFirmware < IntelBTPatcher < BlueToolFixup.
+- **Result** (`plan/P4.4`): Confirmed leaf-name sorting can place VoodooInput before its parent and BlueToolFixup before the Intel kexts. The Intel firmware package's dependency list was empty. The stable sort uses the outermost bundle's group and the full bundle path. The catalog now declares Lilu for Intel Bluetooth. The complete list test covers parent/plug-in order and the three Bluetooth entries. Targeted and data-loader tests 53 passed, 1 skipped. Full suite 761 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 
 ### P4.5 Structural validation checks what OpenCore will load [R]
 - **Problem:** `macloader/build/efi.py:706-738` checks kext directories exist but not `Info.plist`, not the executable named by `ExecutablePath` (`config.py:167` hard-codes `Contents/MacOS/<name>`), and not `ACPI.Add` files.

@@ -121,10 +121,18 @@ def test_catalog_rejects_modified_selection(tmp_path: Path) -> None:
 
 
 def test_schema_generator_orders_kext_parents_before_plugins() -> None:
-    ordered = SchemaDrivenConfigGenerator._ordered_kexts(
-        ["SMCSuperIO.kext", "AppleALC.kext", "VirtualSMC.kext", "Lilu.kext", "BlueToolFixup.kext"]
+    ps2 = "VoodooPS2Controller.kext"
+    plugins = tuple(
+        f"{ps2}/Contents/PlugIns/{name}.kext"
+        for name in ("VoodooInput", "VoodooPS2Keyboard", "VoodooPS2Mouse", "VoodooPS2Trackpad")
     )
-    assert ordered == ("Lilu.kext", "VirtualSMC.kext", "AppleALC.kext", "BlueToolFixup.kext", "SMCSuperIO.kext")
+    expected = (
+        "Lilu.kext", "VirtualSMC.kext", "AppleALC.kext", "WhateverGreen.kext",
+        "SMCBatteryManager.kext", "SMCSuperIO.kext", "IntelMausi.kext", "itlwm.kext",
+        "MacLoaderUSBMap.kext", ps2, *plugins,
+        "IntelBluetoothFirmware.kext", "IntelBTPatcher.kext", "BlueToolFixup.kext",
+    )
+    assert SchemaDrivenConfigGenerator._ordered_kexts(reversed(expected)) == expected
 
 
 def test_real_matching_ocvalidate_accepts_schema_generated_config(tmp_path: Path) -> None:
