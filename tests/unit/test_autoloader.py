@@ -198,3 +198,82 @@ def test_started_action_is_marked_interrupted_on_restart(tmp_path: Path) -> None
     restarted = AutoloaderService(root=tmp_path)
     restarted.start(candidate(), private_material="test")
     assert restarted.session is not None and restarted.session.actions[-1]["state"] == "interrupted"
+
+
+def _fail_next_save(service: AutoloaderService, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make the store's next save raise once; return the revisions it was handed."""
+    original = service.store.save
+    seen: list[int] = []
+
+    def flaky(session, expected_revision):  # type: ignore[no-untyped-def]
+        seen.append(session.revision)
+        monkeypatch.setattr(service.store, "save", original)
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(service.store, "save", flaky)
+    return seen
+
+
+def test_failed_session_save_restores_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    previous = service.session.revision
+    seen = _fail_next_save(service, monkeypatch)
+    with pytest.raises(OSError, match="simulated"):
+        service._save_session()
+    assert seen == [previous + 1]
+    assert service.session.revision == previous
+    service._save_session()
+    assert service.session.revision == previous + 1
+    assert service.store.load(service.session.session_id).revision == previous + 1
+
+
+def test_failed_resume_save_restores_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    AutoloaderService(root=tmp_path).start(candidate(), private_material="test")
+    restarted = AutoloaderService(root=tmp_path)
+    captured = []
+
+    def flaky(session, expected_revision):  # type: ignore[no-untyped-def]
+        captured.append((session, expected_revision))
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(restarted.store, "save", flaky)
+    with pytest.raises(OSError, match="simulated"):
+        restarted.start(candidate(), private_material="test")
+    (session, expected), = captured
+    assert session.revision == expected
+
+
+def test_normal_session_save_increments_revision_by_one(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    before = service.session.revision
+    service._save_session()
+    assert service.session.revision == before + 1
+    assert service.store.load(service.session.session_id).revision == before + 1
+
+
+def test_conflicting_writer_is_not_overwritten_after_failed_save(tmp_path: Path) -> None:
+    AutoloaderService(root=tmp_path).start(candidate(), private_material="test")
+    writer_a = AutoloaderService(root=tmp_path)
+    writer_a.start(candidate(), private_material="test")
+    writer_b = AutoloaderService(root=tmp_path)
+    writer_b.start(candidate(), private_material="test")
+    assert writer_a.session is not None and writer_b.session is not None
+    writer_b.session.actions.append({"stage": "acpi", "state": "writer-b-marker"})
+    writer_b._save_session()
+    stored_b = writer_b.store.load(writer_b.session.session_id)
+    stale = writer_a.session.revision
+    writer_a.session.actions.append({"stage": "acpi", "state": "writer-a-marker"})
+    with pytest.raises(ValueError, match="changed"):
+        writer_a._save_session()
+    assert writer_a.session.revision == stale
+    # Without the rollback each failed attempt advances the stale revision
+    # until one lines up with the stored file and overwrites writer B.
+    for _ in range(3):
+        with pytest.raises(ValueError, match="changed"):
+            writer_a._save_session()
+        assert writer_a.session.revision == stale
+    assert writer_a.store.load(writer_a.session.session_id) == stored_b

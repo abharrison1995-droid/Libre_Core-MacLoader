@@ -120,9 +120,7 @@ class AutoloaderService:
             session.artifacts = {key: artifact for key, artifact in session.artifacts.items()
                                  if artifact.get("input_digest") == self.workflow.load(session.configuration_id).semantic_digest}
             self.workflow.save_snapshot(draft, safe)
-            previous = session.revision
-            session.revision += 1
-            self.store.save(session, previous)
+            self._save_revision(session)
         self.session, self.snapshot = session, safe
         self.configuration = self.workflow.load(session.configuration_id)
         self.match = match_campaign(safe, self.workflow.orchestrator.db, self.configuration)
@@ -541,9 +539,18 @@ class AutoloaderService:
     def _save_session(self) -> None:
         if self.session is None:
             raise ValueError("No active guided session")
-        previous = self.session.revision
-        self.session.revision += 1
-        self.store.save(self.session, previous)
+        self._save_revision(self.session)
+
+    def _save_revision(self, session: AutoloaderSession) -> None:
+        """Advance the revision and save; restore it if the save fails so a
+        retry still fails the store's compare-and-swap check."""
+        previous = session.revision
+        session.revision += 1
+        try:
+            self.store.save(session, previous)
+        except BaseException:
+            session.revision = previous
+            raise
 
     def save_configuration(self, configuration: UserConfiguration) -> None:
         self.workflow.save_revision(configuration)
