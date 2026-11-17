@@ -25,7 +25,8 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.5 ACPI BIOS binding and cleanup | Stopped | Import already checks the normalized BIOS |
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
-| P4.3 profile kext set | **Next chunk** | Phase 4 |
+| P4.3 profile kext set | Stopped | The reviewed profile has no revision to bump |
+| P4.4 kext order | **Next chunk** | Phase 4 |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -412,6 +413,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Read first:** `engine.py:515-620`, `macloader/dependencies/resolver.py:86-200`, `macloader/database/data/profiles/t480s/baseline.yaml`, `macloader/configuration/policy.py:150-170`.
 - **Change:** add `required_capabilities` to `p4-sequoia.yaml`: `accelerated_intel_uhd_620`, `alc257_audio`, `intel_gigabit_ethernet`, `intel_wireless_lan`, `intel_bluetooth`, `ps2_trackpad_trackpoint` (use the exact strings the engine emits; confirm each by search). In the place where the build plan for a reviewed profile is finalised (find where `ReviewedEfiProfile` and the BuildPlan meet; likely `macloader/workflow/service.py` or `macloader/build/efi.py:127-141`), compare the plan's capabilities with the profile's required list. Any missing capability raises a blocking issue `PROFILE_CAPABILITY_MISSING` naming the capability and the hardware category that was not detected. Do not auto-add the capability: the block is the fix.
 - **Tests:** snapshot without an input device → `PROFILE_CAPABILITY_MISSING: ps2_trackpad_trackpoint`; complete snapshot → no issue.
+- **Result** (`plan/P4.3`): Stopped before editing code. Confirmed all six capability names in the engine and resolver. `ConfigurationService.evaluate` is where the build plan and reviewed profile meet. Handover section 2 calls for a profile revision bump, but `p4-sequoia.yaml` has only `schema_version`; `ReviewedEfiProfile` has no revision and its loader rejects unknown keys. Campaign revision 3 is separate. The plan needs to define the initial profile revision and compatibility rules or specify a campaign-only revision bump. No implementation tests were run.
 
 ### P4.4 Kext load order [C/R] — REVIEW
 - **Problem:** `config.py:172-188` orders by leaf name. Plug-ins nested under a parent (for example `VoodooPS2Controller.kext/Contents/PlugIns/VoodooInput.kext`) can sort before the parent [R]; BlueToolFixup sorts before IntelBluetoothFirmware [R].
