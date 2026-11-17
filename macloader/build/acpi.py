@@ -15,8 +15,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypedDict
 
+from macloader.build.dsl_names import dsl_names
 from macloader.domain.contracts import canonical_json_digest
 from macloader.exceptions import BuildPlanError
 
@@ -53,6 +54,7 @@ class AcpiBuildResult:
     tool_digest: str
     diagnostics: Tuple[AcpiSourceResult, ...]
     qualification_path: str
+    notes: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -64,7 +66,16 @@ class AcpiBuildResult:
             "table_count": sum(item.file_name in TABLE_NAMES for item in self.diagnostics),
             "generated_files": list(self.output_files),
             "diagnostics": [item.__dict__ for item in self.diagnostics],
+            "notes": list(self.notes),
         }
+
+
+class _ResolvedNames(TypedDict):
+    cpu0: str
+    xhc: str
+    ec: str | None
+    igpu: str | None
+    has_pnlf: bool
 
 
 def _digest_file(path: Path) -> str:
@@ -138,7 +149,7 @@ class AcpiProcessor:
         for path in table_paths:
             if cancel and cancel():
                 raise BuildPlanError("ACPI build cancelled")
-            stem = path.stem
+            stem = path.stem.lower()
             prefix = disassembled / stem
             diagnostic_path = raw_logs / f"{stem}.txt"
             result = self._run(
@@ -182,7 +193,9 @@ class AcpiProcessor:
                 )
             diagnostics.append(source_diagnostic)
 
-        generated_specs = self._generated_sources(expected_bios_binding)
+        names = self._resolve_names(disassembled)
+        generated_specs = self._generated_sources(expected_bios_binding, names)
+        notes = ("firmware defines PNLF; SSDT-PNLF omitted",) if names["has_pnlf"] else ()
         generated_records: List[Dict[str, object]] = []
         generated_diagnostics: List[AcpiSourceResult] = []
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +233,7 @@ class AcpiProcessor:
         generated_digest = canonical_json_digest({
             "bios_binding": expected_bios_binding,
             "sources": generated_records,
+            "notes": notes,
         })
         safe_diagnostics = tuple(diagnostics + generated_diagnostics)
         build_result = AcpiBuildResult(
@@ -229,6 +243,7 @@ class AcpiProcessor:
             tool_digest=self.iasl_sha256,
             diagnostics=safe_diagnostics,
             qualification_path="private-input-reviewed-generated-sources",
+            notes=notes,
         )
         (output_dir.parent / "P4-ACPI-qualification.json").write_text(
             json.dumps(build_result.to_dict(), indent=2), encoding="utf-8"
@@ -426,15 +441,54 @@ class AcpiProcessor:
                 pass
 
     @staticmethod
-    def _generated_sources(bios_binding: str) -> Dict[str, str]:
+    def _resolve_names(dsl_dir: Path) -> _ResolvedNames:
+        matches: dict[str, list[str]] = {name: [] for name in ("cpu0", "xhc", "ec", "igpu", "pnlf")}
+        dsl_paths = (dsl_dir / Path(table).with_suffix(".dsl") for table in TABLE_NAMES)
+        for dsl_path in dsl_paths:
+            if not dsl_path.is_file():
+                continue
+            dsl = dsl_path.read_text(encoding="utf-8", errors="replace")
+            for path, kind, attributes in dsl_names(dsl):
+                path = ".".join(segment.rstrip("_") for segment in path.split("."))
+                parent, _, name = path.rpartition(".")
+                if kind == "Processor" and path in (r"\_PR.PR00", r"\_PR.CPU0", r"\_SB.PR00"):
+                    matches["cpu0"].append(path)
+                if kind != "Device":
+                    continue
+                if name == "PNLF" or path == r"\PNLF":
+                    matches["pnlf"].append(path)
+                if ("_HID", "PNP0C09") in attributes:
+                    matches["ec"].append(path)
+                if parent == r"\_SB.PCI0":
+                    for attribute in attributes:
+                        if attribute == ("_ADR", 0x00140000):
+                            matches["xhc"].append(path)
+                        elif attribute == ("_ADR", 0x00020000):
+                            matches["igpu"].append(path)
+        for name, paths in matches.items():
+            if len(paths) > 1:
+                raise BuildPlanError(f"Captured firmware defines multiple matches for {name}; generated ACPI cannot be bound")
+        for name in ("cpu0", "xhc"):
+            if not matches[name]:
+                raise BuildPlanError(f"Captured firmware does not define {name}; generated ACPI cannot be bound")
+        return {
+            "cpu0": matches["cpu0"][0],
+            "xhc": matches["xhc"][0],
+            "ec": next(iter(matches["ec"]), None),
+            "igpu": next(iter(matches["igpu"]), None),
+            "has_pnlf": bool(matches["pnlf"]),
+        }
+
+    @staticmethod
+    def _generated_sources(bios_binding: str, names: _ResolvedNames) -> Dict[str, str]:
         # These are deliberately small, reviewed additions.  The OEM DSDT and
         # SSDTs are never copied into the generated EFI.
-        return {
+        sources = {
             "SSDT-PLUG-T480S": f'''DefinitionBlock ("", "SSDT", 2, "MLDR", "PLUGT48S", 0x00000001)
 {{
     // Machine-bound to Lenovo T480s 20L8, BIOS {bios_binding}.
-    External (\\_PR.PR00, ProcessorObj)
-    Scope (\\_PR.PR00)
+    External ({names["cpu0"]}, ProcessorObj)
+    Scope ({names["cpu0"]})
     {{
         Name (PLUG, One)
     }}
@@ -498,3 +552,6 @@ class AcpiProcessor:
 }}
 ''',
         }
+        if names["has_pnlf"]:
+            del sources["SSDT-PNLF-T480S"]
+        return sources

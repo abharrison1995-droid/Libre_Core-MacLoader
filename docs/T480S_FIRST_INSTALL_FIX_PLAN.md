@@ -17,8 +17,8 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P0.5a (orchestrator confirms BIOS table) | Not started | Under P0.5 |
 | P3.1 Windows capture | Done, merged to local `main` | `plan/P3.1` |
 | P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
-| P3.3 generated SSDT resolution | **Next**: unblocked by review | Record omissions in the ACPI result `notes`, not the EFI manifest |
-| P3.4a PLUG | Pending | After P3.3 |
+| P3.3 generated SSDT resolution | Done, merged to local `main` | `plan/P3.3`; ACPI qualification records PNLF omission |
+| P3.4a PLUG | **Next** | P3.3 resolved CPU path is available |
 | P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
 | P3.4d EC | Pending | After P3.3 |
@@ -331,6 +331,8 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Tests** (`tests/unit/test_p4_acpi.py`): DSL fixture with `PR00` → source uses `\_PR.PR00`; fixture with `CPU0` → uses `\_PR.CPU0`; fixture without an XHCI device → `BuildPlanError`; fixture with existing PNLF → no PNLF table.
 - **Result** (`plan/P3.3`): Stopped before editing code. The fixed names and existing tokenizer match the plan. The generated ACPI processor writes a qualification report, while the EFI build manifest is constructed in `macloader/build/efi.py` and parsed against the strict field set in `macloader/domain/contracts.py`. The required manifest record for an existing PNLF needs a change outside this chunk's scope. The plan needs to specify the qualification report or authorize the manifest changes. No implementation tests were run.
 - **Review decision (2026-11-17):** the stop was correct. "Manifest" in this chunk and in P3.4d means the ACPI result, not the EFI build manifest. Add `notes: Tuple[str, ...]` to `AcpiBuildResult` in `acpi.py`, write it into `to_dict()` (so it lands in `P4-ACPI-qualification.json`), and include it in the `generated_digest` input. Do not edit `efi.py` or `domain/contracts.py`: the EFI manifest already lists `output_files`, so an omitted table shows there by its absence. Note texts are fixed strings: `"firmware defines PNLF; SSDT-PNLF omitted"` and (P3.4d) `"native EC present; SSDT-EC omitted"`. Name resolution must read the disassembled DSL before the P3.5 cleanup removes it. P3.3 is unblocked; do it before P3.4a, P3.4d and P3.5.
+
+- **Result after review** (`plan/P3.3`): Reused the USB tokenizer to resolve CPU, XHCI, EC, graphics and PNLF against the disassembled tables. Missing required names and multiple matches fail before generated compilation. PLUG uses the resolved CPU path. USBX already uses the system bus after P3.4b, so XHCI is validated without adding a source reference. Native PNLF suppresses the generated table and records the omission in the qualification report and generated digest. ACPI and USB tests: 21 passed, 2 skipped. Full suite: 770 passed, 16 skipped, 1 xfailed, exit 0. Mypy passed for 89 source files.
 
 ### P3.4 Make the generated tables do what they claim [C] — REVIEW
 - **Problem:** SSDT-PLUG is `Name (PLUG, One)` with no `_DSM`; SSDT-USBX has no properties (`acpi.py:433-471`). PNLF uses `_CID "APP0002"` and `_UID 0x13` [R: differs from the Dortania reference].

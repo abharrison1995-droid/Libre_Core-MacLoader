@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Callable, Protocol
 
+from macloader.build.dsl_names import dsl_names
 from macloader.domain.evidence import EvidenceConfidence
 from macloader.evidence.acpi_capture import CaptureError
 from macloader.evidence.usb import UsbEvidenceSession, UsbPortObservation
@@ -38,30 +39,16 @@ def firmware_usb_addresses(dsl: str) -> dict[str, int]:
     Computed addresses, methods, aliases and ambiguous definitions stay unknown.
     This parser never executes AML. Paths are corroborated with kernel firmware nodes.
     """
-    text = re.sub(r'/\*.*?\*/|//[^\n]*', '', dsl, flags=re.S)
-    token = re.compile(r'(Device|Scope|Method)\s*\(\s*([\\A-Za-z0-9_.]+)[^)]*\)\s*\{|Name\s*\(\s*_ADR\s*,\s*(0x[0-9A-Fa-f]+|\d+|One|Zero)\s*\)|[{}]')
-    stack: list[tuple[str, bool]] = []
     addresses: dict[str, int] = {}
-    for item in token.finditer(text):
-        if item.group(1):
-            parent = stack[-1][0] if stack else ""
-            name = item.group(2)
-            path = name.lstrip('\\') if name.startswith('\\') else '.'.join(p for p in (parent, name) if p)
-            stack.append((path, item.group(1) == "Method" or bool(stack and stack[-1][1])))
-        elif item.group(3) and stack and not stack[-1][1]:
-            path = stack[-1][0]
-            if re.fullmatch(r'_SB(?:_)?\.[A-Za-z0-9_]+\.XHC[I_]?\.(HS|SS)\d{2}', path):
-                literal = item.group(3)
-                value = {"One": 1, "Zero": 0}.get(literal)
-                value = int(literal, 0) if value is None else value
-                path = canonical_namespace(path)
+    for path, kind, attributes in dsl_names(dsl):
+        if kind in ("Device", "Scope") and re.fullmatch(r'\\_SB(?:_)?\.[A-Za-z0-9_]+\.XHC[I_]?\.(HS|SS)\d{2}', path):
+            path = canonical_namespace(path)
+            for name, value in attributes:
+                if name != "_ADR" or not isinstance(value, int):
+                    continue
                 if path in addresses or not 1 <= value <= 255:
                     raise CaptureError("USB_FIRMWARE_AMBIGUOUS", "Firmware USB addresses are ambiguous.")
-                addresses[canonical_namespace(path)] = value
-        elif item.group() == "{":
-            stack.append((stack[-1][0] if stack else "", True))
-        elif item.group() == "}" and stack:
-            stack.pop()
+                addresses[path] = value
     return addresses
 
 
