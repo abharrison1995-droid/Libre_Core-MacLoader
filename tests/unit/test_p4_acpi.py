@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from typing import Callable
 
 import pytest
 
@@ -152,10 +153,7 @@ def _write_dsl(directory: Path, *, cpu: str = "PR00", controller: str = "XHC0",
     )
 
 
-@pytest.mark.parametrize(("native_pnlf", "ec"), [(False, "EC00"), (True, "EC00"), (True, "EC__")])
-def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
-    tmp_path: Path, native_pnlf: bool, ec: str,
-) -> None:
+def _prepare_build(tmp_path: Path, *, ec: str = "EC00", native_pnlf: bool = False) -> tuple[AcpiProcessor, Path]:
     tool = tmp_path / "iasl"
     tool_digest = _fake_iasl(tool)
     capture = tmp_path / "capture"
@@ -169,6 +167,14 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
     if os.name == "nt":
         tool = tool.with_suffix(".cmd")
     processor = AcpiProcessor(tool, tool_digest, tmp_path / "work")
+    return processor, capture
+
+
+@pytest.mark.parametrize(("native_pnlf", "ec"), [(False, "EC00"), (True, "EC00"), (True, "EC__")])
+def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
+    tmp_path: Path, native_pnlf: bool, ec: str,
+) -> None:
+    processor, capture = _prepare_build(tmp_path, ec=ec, native_pnlf=native_pnlf)
     output = tmp_path / "output" / "ACPI"
     result = processor.build(capture, output, expected_bios_binding="N22ET85W-1.62")
 
@@ -179,7 +185,7 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
     if ec == "EC__":
         notes += ("native EC present; SSDT-EC omitted",)
     assert result.notes == notes
-    assert result.tool_digest == tool_digest
+    assert result.tool_digest == processor.iasl_sha256
     assert result.to_dict()["table_count"] == len(TABLE_NAMES)
     assert all((output / name).read_bytes() == b"AML" for name in result.output_files)
     report = json.loads((output.parent / "P4-ACPI-qualification.json").read_text(encoding="utf-8"))
@@ -197,6 +203,10 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
         } for name in result.output_files],
     })
     assert any(item.warnings == 1 for item in result.diagnostics)
+    run_dir = processor.work_root / result.source_evidence_digest
+    assert {path.name for path in run_dir.iterdir()} == {"generated-sources", "generated-aml"}
+    assert (run_dir / "generated-aml" / "SSDT-PLUG-T480S.aml").is_file()
+    assert (run_dir / "generated-sources" / "SSDT-PLUG-T480S.dsl").is_file()
 
     with pytest.raises(BuildPlanError, match="evidence digest"):
         processor.build(
@@ -205,6 +215,54 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
             expected_bios_binding="N22ET85W-1.62",
             expected_evidence_digest="0" * 64,
         )
+
+
+def test_acpi_build_cleans_raw_intermediates_after_compile_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor, capture = _prepare_build(tmp_path)
+    digest = processor.capture_evidence_digest(capture, "synthetic-bios")
+    run_dir = processor.work_root / digest
+    original_run = processor._run
+
+    def fail_generated_compile(args: list[str], diagnostic_path: Path,
+                               cancel: Callable[[], bool] | None = None) -> tuple[int, str, str]:
+        if diagnostic_path.name == "SSDT-PLUG-T480S-compile.txt":
+            assert (run_dir / "disassembled" / "dsdt.dsl").is_file()
+            assert (run_dir / "raw-compiled" / "dsdt.aml").is_file()
+            assert (run_dir / "raw-diagnostics" / "dsdt.txt").is_file()
+            diagnostic_path.write_text("synthetic compile failure", encoding="utf-8")
+            return 1, "", "synthetic compile failure"
+        return original_run(args, diagnostic_path, cancel=cancel)
+
+    monkeypatch.setattr(processor, "_run", fail_generated_compile)
+    with pytest.raises(BuildPlanError, match="generated ACPI source failed compilation"):
+        processor.build(capture, tmp_path / "output" / "ACPI", expected_bios_binding="synthetic-bios")
+
+    assert {path.name for path in run_dir.iterdir()} == {"generated-sources", "generated-aml"}
+    assert (run_dir / "generated-sources" / "SSDT-PLUG-T480S.dsl").is_file()
+
+
+def test_acpi_build_does_not_follow_a_linked_intermediate_directory(tmp_path: Path) -> None:
+    processor, capture = _prepare_build(tmp_path)
+    digest = processor.capture_evidence_digest(capture, "synthetic-bios")
+    run_dir = processor.work_root / digest
+    run_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep"
+    marker.touch()
+    link = run_dir / "raw-diagnostics"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
+
+    with pytest.raises(BuildPlanError, match="work directory is unsafe"):
+        processor.build(capture, tmp_path / "output" / "ACPI", expected_bios_binding="synthetic-bios")
+
+    assert link.is_symlink()
+    assert set(outside.iterdir()) == {marker}
 
 
 @pytest.mark.parametrize("cpu", ["PR00", "CPU0"])

@@ -137,120 +137,131 @@ class AcpiProcessor:
             raise BuildPlanError("Private ACPI evidence digest does not match the accepted machine-bound evidence")
 
         run_dir = self.work_root / source_evidence_digest
+        if run_dir.is_symlink() or run_dir.resolve() != run_dir:
+            raise BuildPlanError("ACPI build work directory is unsafe")
+        run_dir.mkdir(parents=True, exist_ok=True)
         disassembled = run_dir / "disassembled"
         raw_logs = run_dir / "raw-diagnostics"
         raw_compiled = run_dir / "raw-compiled"
         generated_sources = run_dir / "generated-sources"
         generated_aml = run_dir / "generated-aml"
-        for directory in (disassembled, raw_logs, raw_compiled, generated_sources, generated_aml):
-            directory.mkdir(parents=True, exist_ok=True)
+        intermediates = (disassembled, raw_logs, raw_compiled)
+        try:
+            for directory in (*intermediates, generated_sources, generated_aml):
+                if directory.is_symlink() or directory.resolve() != directory:
+                    raise BuildPlanError("ACPI build work directory is unsafe")
+                directory.mkdir(exist_ok=True)
 
-        diagnostics: List[AcpiSourceResult] = []
-        for path in table_paths:
-            if cancel and cancel():
-                raise BuildPlanError("ACPI build cancelled")
-            stem = path.stem.lower()
-            prefix = disassembled / stem
-            diagnostic_path = raw_logs / f"{stem}.txt"
-            result = self._run(
-                ["-d", "-p", str(prefix), str(path)],
-                diagnostic_path,
-                cancel=cancel,
-            )
-            dsl_path = prefix.with_suffix(".dsl")
-            if result[0] != 0 or not dsl_path.is_file():
-                raise BuildPlanError(f"Pinned iasl could not disassemble ACPI source {stem}")
-            dsl_text = dsl_path.read_text(encoding="utf-8", errors="replace")
-            if "LENOVO" not in dsl_text or "DefinitionBlock" not in dsl_text:
-                raise BuildPlanError(f"ACPI source {stem} is not the reviewed Lenovo table set")
-            compile_result = self._run(
-                ["-tc", "-p", str((raw_compiled / stem)), str(dsl_path)],
-                raw_logs / f"{stem}-compile.txt",
-                cancel=cancel,
-            )
-            if compile_result[0] != 0 and (stem != "dsdt" or not allow_oem_compile_failure):
-                raise BuildPlanError(f"Pinned iasl rejected reviewed ACPI source {stem}")
-            source_diagnostic = self._diagnostic(
-                path.name.lower(),
-                result[1] + "\n" + compile_result[1],
-                result[2] + "\n" + compile_result[2],
-            )
-            if compile_result[0] != 0 and stem == "dsdt":
-                source_diagnostic = AcpiSourceResult(
-                    file_name=source_diagnostic.file_name,
-                    status="oem-compile-diagnostic",
-                    warnings=source_diagnostic.warnings,
-                    errors=source_diagnostic.errors,
-                    diagnostic_digest=source_diagnostic.diagnostic_digest,
+            diagnostics: List[AcpiSourceResult] = []
+            for path in table_paths:
+                if cancel and cancel():
+                    raise BuildPlanError("ACPI build cancelled")
+                stem = path.stem.lower()
+                prefix = disassembled / stem
+                diagnostic_path = raw_logs / f"{stem}.txt"
+                result = self._run(
+                    ["-d", "-p", str(prefix), str(path)],
+                    diagnostic_path,
+                    cancel=cancel,
                 )
-            elif result[0] == 0 and compile_result[0] == 0:
-                source_diagnostic = AcpiSourceResult(
-                    file_name=source_diagnostic.file_name,
+                dsl_path = prefix.with_suffix(".dsl")
+                if result[0] != 0 or not dsl_path.is_file():
+                    raise BuildPlanError(f"Pinned iasl could not disassemble ACPI source {stem}")
+                dsl_text = dsl_path.read_text(encoding="utf-8", errors="replace")
+                if "LENOVO" not in dsl_text or "DefinitionBlock" not in dsl_text:
+                    raise BuildPlanError(f"ACPI source {stem} is not the reviewed Lenovo table set")
+                compile_result = self._run(
+                    ["-tc", "-p", str((raw_compiled / stem)), str(dsl_path)],
+                    raw_logs / f"{stem}-compile.txt",
+                    cancel=cancel,
+                )
+                if compile_result[0] != 0 and (stem != "dsdt" or not allow_oem_compile_failure):
+                    raise BuildPlanError(f"Pinned iasl rejected reviewed ACPI source {stem}")
+                source_diagnostic = self._diagnostic(
+                    path.name.lower(),
+                    result[1] + "\n" + compile_result[1],
+                    result[2] + "\n" + compile_result[2],
+                )
+                if compile_result[0] != 0 and stem == "dsdt":
+                    source_diagnostic = AcpiSourceResult(
+                        file_name=source_diagnostic.file_name,
+                        status="oem-compile-diagnostic",
+                        warnings=source_diagnostic.warnings,
+                        errors=source_diagnostic.errors,
+                        diagnostic_digest=source_diagnostic.diagnostic_digest,
+                    )
+                elif result[0] == 0 and compile_result[0] == 0:
+                    source_diagnostic = AcpiSourceResult(
+                        file_name=source_diagnostic.file_name,
+                        status="passed",
+                        warnings=source_diagnostic.warnings,
+                        errors=source_diagnostic.errors,
+                        diagnostic_digest=source_diagnostic.diagnostic_digest,
+                    )
+                diagnostics.append(source_diagnostic)
+
+            names = self._resolve_names(disassembled)
+            generated_specs = self._generated_sources(expected_bios_binding, names)
+            notes: tuple[str, ...] = ("firmware defines PNLF; SSDT-PNLF omitted",) if names["has_pnlf"] else ()
+            if names["ec"] is not None and "SSDT-EC-T480S" not in generated_specs:
+                notes += ("native EC present; SSDT-EC omitted",)
+            generated_records: List[Dict[str, object]] = []
+            generated_diagnostics: List[AcpiSourceResult] = []
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for name, source in generated_specs.items():
+                if cancel and cancel():
+                    raise BuildPlanError("ACPI build cancelled")
+                source_path = generated_sources / f"{name}.dsl"
+                source_path.write_text(source, encoding="utf-8", newline="\n")
+                prefix = generated_aml / name
+                rc, stdout, stderr = self._run(
+                    ["-tc", "-p", str(prefix), str(source_path)],
+                    raw_logs / f"{name}-compile.txt",
+                    cancel=cancel,
+                )
+                if rc != 0 or not prefix.with_suffix(".aml").is_file():
+                    raise BuildPlanError(f"Reviewed generated ACPI source failed compilation: {name}")
+                aml = prefix.with_suffix(".aml")
+                destination = output_dir / aml.name
+                shutil.copyfile(aml, destination)
+                generated_records.append({
+                    "name": aml.name,
+                    "size_bytes": aml.stat().st_size,
+                    "sha256": _digest_file(aml),
+                    "diagnostic_digest": canonical_json_digest({"stdout": stdout, "stderr": stderr}),
+                })
+                generated_diagnostic = self._diagnostic(aml.name, stdout, stderr)
+                generated_diagnostics.append(AcpiSourceResult(
+                    file_name=generated_diagnostic.file_name,
                     status="passed",
-                    warnings=source_diagnostic.warnings,
-                    errors=source_diagnostic.errors,
-                    diagnostic_digest=source_diagnostic.diagnostic_digest,
-                )
-            diagnostics.append(source_diagnostic)
+                    warnings=generated_diagnostic.warnings,
+                    errors=generated_diagnostic.errors,
+                    diagnostic_digest=generated_diagnostic.diagnostic_digest,
+                ))
 
-        names = self._resolve_names(disassembled)
-        generated_specs = self._generated_sources(expected_bios_binding, names)
-        notes: tuple[str, ...] = ("firmware defines PNLF; SSDT-PNLF omitted",) if names["has_pnlf"] else ()
-        if names["ec"] is not None and "SSDT-EC-T480S" not in generated_specs:
-            notes += ("native EC present; SSDT-EC omitted",)
-        generated_records: List[Dict[str, object]] = []
-        generated_diagnostics: List[AcpiSourceResult] = []
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for name, source in generated_specs.items():
-            if cancel and cancel():
-                raise BuildPlanError("ACPI build cancelled")
-            source_path = generated_sources / f"{name}.dsl"
-            source_path.write_text(source, encoding="utf-8", newline="\n")
-            prefix = generated_aml / name
-            rc, stdout, stderr = self._run(
-                ["-tc", "-p", str(prefix), str(source_path)],
-                raw_logs / f"{name}-compile.txt",
-                cancel=cancel,
-            )
-            if rc != 0 or not prefix.with_suffix(".aml").is_file():
-                raise BuildPlanError(f"Reviewed generated ACPI source failed compilation: {name}")
-            aml = prefix.with_suffix(".aml")
-            destination = output_dir / aml.name
-            shutil.copyfile(aml, destination)
-            generated_records.append({
-                "name": aml.name,
-                "size_bytes": aml.stat().st_size,
-                "sha256": _digest_file(aml),
-                "diagnostic_digest": canonical_json_digest({"stdout": stdout, "stderr": stderr}),
+            generated_digest = canonical_json_digest({
+                "bios_binding": expected_bios_binding,
+                "sources": generated_records,
+                "notes": notes,
             })
-            generated_diagnostic = self._diagnostic(aml.name, stdout, stderr)
-            generated_diagnostics.append(AcpiSourceResult(
-                file_name=generated_diagnostic.file_name,
-                status="passed",
-                warnings=generated_diagnostic.warnings,
-                errors=generated_diagnostic.errors,
-                diagnostic_digest=generated_diagnostic.diagnostic_digest,
-            ))
-
-        generated_digest = canonical_json_digest({
-            "bios_binding": expected_bios_binding,
-            "sources": generated_records,
-            "notes": notes,
-        })
-        safe_diagnostics = tuple(diagnostics + generated_diagnostics)
-        build_result = AcpiBuildResult(
-            output_files=tuple(str(item["name"]) for item in generated_records),
-            source_evidence_digest=source_evidence_digest,
-            generated_digest=generated_digest,
-            tool_digest=self.iasl_sha256,
-            diagnostics=safe_diagnostics,
-            qualification_path="private-input-reviewed-generated-sources",
-            notes=notes,
-        )
-        (output_dir.parent / "P4-ACPI-qualification.json").write_text(
-            json.dumps(build_result.to_dict(), indent=2), encoding="utf-8"
-        )
-        return build_result
+            safe_diagnostics = tuple(diagnostics + generated_diagnostics)
+            build_result = AcpiBuildResult(
+                output_files=tuple(str(item["name"]) for item in generated_records),
+                source_evidence_digest=source_evidence_digest,
+                generated_digest=generated_digest,
+                tool_digest=self.iasl_sha256,
+                diagnostics=safe_diagnostics,
+                qualification_path="private-input-reviewed-generated-sources",
+                notes=notes,
+            )
+            (output_dir.parent / "P4-ACPI-qualification.json").write_text(
+                json.dumps(build_result.to_dict(), indent=2), encoding="utf-8"
+            )
+            return build_result
+        finally:
+            for directory in intermediates:
+                if directory.is_dir() and not directory.is_symlink() and directory.resolve() == directory:
+                    shutil.rmtree(directory, ignore_errors=True)
 
     @classmethod
     def capture_evidence_digest(

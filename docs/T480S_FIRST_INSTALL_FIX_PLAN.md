@@ -22,10 +22,10 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
 | P3.4d EC | Done, merged to local `main` | `plan/P3.4d`; ACPI qualification records native EC omission |
-| P3.5 ACPI intermediate cleanup | **Next** | Re-scoped by review to intermediate cleanup |
+| P3.5 ACPI intermediate cleanup | Done, merged to local `main` | `plan/P3.5`; cleanup on success and failure |
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
-| P4.3 profile kext set | Pending, unblocked by review | Bump the campaign `revision` only |
+| P4.3 profile kext set | **Next** | Bump the campaign `revision` only |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
 | P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
 | P4.6 graphics identity and profile data | Pending, unblocked by review | After P4.3; bump the campaign `revision` only |
@@ -362,6 +362,8 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Review decision (2026-11-17):** confirmed: part (1) is already done by `candidate_campaign` and its existing test, so drop it. P3.5 is now part (2) only. In `AcpiProcessor.build`, wrap the work after `run_dir` is created in `try`/`finally` and, in the `finally`, remove `disassembled`, `raw-compiled` and `raw-diagnostics` (use `shutil.rmtree(..., ignore_errors=True)`; refuse to follow a symlinked directory). Keep `generated-sources`, `generated-aml` and the digests. Test: after a successful build and after a forced compile failure, `run_dir` contains no `.dsl` from the captured tables and no `raw-diagnostics`. Do it after P3.3.
 
 ---
+
+- **Result after review** (`plan/P3.5`): Confirmed that the captured DSL, recompiled OEM tables and tool diagnostics persisted. The build now removes those directories in `finally`, refuses linked work directories and retains generated sources, AML and digests. The existing BIOS rejection test still passes. Targeted tests: 16 passed, 2 skipped. Full suite: 774 passed, 17 skipped, 1 xfailed, exit 0. The new symlink test skipped on this host. Mypy passed for 89 source files.
 
 ## Phase 4 — EFI content that boots
 
