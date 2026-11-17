@@ -2,6 +2,7 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import uuid
 
 import pytest
 
@@ -321,3 +322,101 @@ def test_reprobe_keeps_artifacts_when_only_usb_devices_changed(tmp_path: Path) -
     service.reprobe(changed)
     assert service.session is not None and service.session.session_id == session_id
     assert {"tools", "efi", "recovery"} <= set(service.session.artifacts)
+
+
+def _write_raw_session(root: Path, name: str, content: str) -> None:
+    from macloader.workflow.service import WorkflowService
+    # Private writer so the Windows ACL check passes and only the content is bad.
+    WorkflowService._write_private_json(root / name, content)
+
+
+def test_corrupt_session_file_warns_but_valid_session_resumes(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    session_id = service.session.session_id
+    _write_raw_session(tmp_path, "broken.session.json", "{not json")
+    restarted = AutoloaderService(root=tmp_path)
+    action = restarted.start(candidate(), private_material="test")
+    assert restarted.session is not None and restarted.session.session_id == session_id
+    assert action.kind != ActionKind.BLOCKED and action.code != "SESSION_FILE_UNREADABLE"
+    assert action.message.startswith("Warning (SESSION_FILE_UNREADABLE): 1 saved session file was unreadable")
+    assert "SESSION_FILE_UNREADABLE" in restarted.next_action().message
+    assert "SESSION_FILE_UNREADABLE" in json.dumps(restarted.public_status())
+    assert restarted.skipped_session_files == ("broken.session.json",)
+    assert str(tmp_path) not in action.message
+    assert (tmp_path / "broken.session.json").read_text() == "{not json"
+
+
+def test_unknown_key_session_file_is_skipped_not_fatal(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    record = service.session.to_dict()
+    record.update(session_id=str(uuid.uuid4()), unexpected_field="value")
+    _write_raw_session(tmp_path, "extra.session.json", json.dumps(record))
+    restarted = AutoloaderService(root=tmp_path)
+    action = restarted.start(candidate(), private_material="test")
+    assert restarted.session is not None and restarted.session.session_id == service.session.session_id
+    assert action.kind != ActionKind.BLOCKED
+    assert restarted.skipped_session_files == ("extra.session.json",)
+
+
+def test_only_unreadable_session_that_may_be_ours_blocks_without_new_session(tmp_path: Path) -> None:
+    _write_raw_session(tmp_path, "broken.session.json", "{not json")
+    service = AutoloaderService(root=tmp_path)
+    action = service.start(candidate(), private_material="test")
+    assert action.kind == ActionKind.BLOCKED and action.code == "SESSION_FILE_UNREADABLE"
+    assert service.next_action().code == "SESSION_FILE_UNREADABLE"
+    assert "Warning" not in action.message
+    assert service.session is None
+    assert sorted(path.name for path in tmp_path.glob("*.session.json")) == ["broken.session.json"]
+    # Once the file is moved aside, the same probe path starts normally.
+    (tmp_path / "broken.session.json").unlink()
+    assert service.reprobe(candidate()).stage == Stage.ACPI
+    assert service.session is not None and not service.skipped_session_files
+
+
+def test_unreadable_session_for_another_machine_only_warns(tmp_path: Path) -> None:
+    other = AutoloaderService(root=tmp_path)
+    other.start(candidate(), private_material="another-machine")
+    assert other.session is not None
+    record = other.session.to_dict()
+    record["revision"] = "not-a-number"
+    (tmp_path / f"{other.session.session_id}.session.json").unlink()
+    _write_raw_session(tmp_path, "other.session.json", json.dumps(record))
+    service = AutoloaderService(root=tmp_path)
+    action = service.start(candidate(), private_material="test")
+    assert action.stage == Stage.ACPI and action.kind != ActionKind.BLOCKED
+    assert action.message.startswith("Warning (SESSION_FILE_UNREADABLE)")
+    assert service.session is not None and service.skipped_session_files == ("other.session.json",)
+
+
+def test_no_uuid_and_no_serial_is_machine_identity_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+    # Rule out the Linux machine-id fallback so only UUID and serial count.
+    monkeypatch.setattr("macloader.autoloader.service.os", types.SimpleNamespace(name="nt"))
+    service = AutoloaderService(root=tmp_path)
+    action = service.start(replace(candidate(), uuid=None, serial_number=None))
+    assert action.kind == ActionKind.BLOCKED and action.code == "MACHINE_IDENTITY_UNAVAILABLE"
+    assert service.next_action().code == "MACHINE_IDENTITY_UNAVAILABLE"
+    assert service.session is None and not list(tmp_path.glob("*.session.json"))
+
+
+def test_unusable_supplied_material_is_machine_identity_unavailable(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    assert service.start(candidate(), private_material="").code == "MACHINE_IDENTITY_UNAVAILABLE"
+
+
+def test_two_valid_matching_sessions_are_still_ambiguous(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    record = service.session.to_dict()
+    record["session_id"] = str(uuid.uuid4())
+    _write_raw_session(tmp_path, f"{record['session_id']}.session.json", json.dumps(record))
+    _write_raw_session(tmp_path, "broken.session.json", "{not json")
+    restarted = AutoloaderService(root=tmp_path)
+    action = restarted.start(candidate(), private_material="test")
+    assert action.kind == ActionKind.BLOCKED and action.code == "SESSION_BINDING_AMBIGUOUS"
+    assert restarted.session is None

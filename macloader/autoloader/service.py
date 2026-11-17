@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from macloader.autoloader.models import ActionKind, AutoloaderSession, NextAction, Stage
-from macloader.autoloader.store import AutoloaderSessionStore
+from macloader.autoloader.store import AmbiguousSessionError, AutoloaderSessionStore, MachineIdentityUnavailable
 from macloader.config import DEFAULT_PRIVATE_DIR
 from macloader.configuration.campaign_match import CampaignMatch, match_campaign
 from macloader.configuration.observations import reconcile_configuration
@@ -42,6 +42,8 @@ class AutoloaderService:
         # True only while this process is inside the media write call.
         self._write_in_progress = False
         self._private_material: Optional[str] = None
+        # File names (never paths) of session files the last discovery skipped.
+        self.skipped_session_files: tuple[str, ...] = ()
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
         from macloader.autoloader.media import GuidedMediaService
         self.media = GuidedMediaService()
@@ -69,7 +71,7 @@ class AutoloaderService:
                 value = path.read_text().strip()
                 if re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32:
                     return "linux-os:" + value
-        raise ValueError("A private stable machine binding is unavailable")
+        raise MachineIdentityUnavailable("A private stable machine binding is unavailable")
 
     def start(self, snapshot: Optional[HardwareSnapshot] = None, *, private_material: Optional[str] = None) -> NextAction:
         """Probe before resuming; supplied snapshots/material are engineering seams."""
@@ -89,6 +91,7 @@ class AutoloaderService:
         raw = snapshot or self.workflow.orchestrator.probe_hardware()
         candidate = self.workflow.orchestrator.db.candidate_campaign(raw)
         self._blocker = None
+        self.skipped_session_files = ()
         self.usb_collector = None
         self.media.selected = None
         self.session = None
@@ -100,9 +103,23 @@ class AutoloaderService:
         try:
             material = private_material if private_material is not None else self._private_machine_material(raw)
             binding = self.store.machine_binding(material)
-            session = self.store.find(binding, candidate.campaign_id)
+        except MachineIdentityUnavailable:
+            self._blocker = NextAction(Stage.MATCH, ActionKind.BLOCKED, "MacLoader could not read a usable hardware UUID or serial number for this laptop, so it cannot safely bind or resume a session. Nothing was changed; retry, or open Engineering diagnostics.", "MACHINE_IDENTITY_UNAVAILABLE")
+            return self._blocker
         except ValueError:
+            # The private machine key itself could not be read.
+            self._blocker = NextAction(Stage.MATCH, ActionKind.BLOCKED, "MacLoader could not read its saved machine key, so it cannot match saved sessions. Your saved work is preserved; open Engineering diagnostics.", "SESSION_FILE_UNREADABLE")
+            return self._blocker
+        try:
+            discovery = self.store.discover(binding, candidate.campaign_id)
+        except AmbiguousSessionError:
             self._blocker = NextAction(Stage.MATCH, ActionKind.BLOCKED, "MacLoader cannot safely identify a unique saved session. Your saved work is preserved; open Engineering diagnostics.", "SESSION_BINDING_AMBIGUOUS")
+            return self._blocker
+        session = discovery.session
+        self.skipped_session_files = tuple(item.name for item in discovery.skipped)
+        if session is None and any(item.might_match for item in discovery.skipped):
+            # Starting fresh could fork this machine's real session.
+            self._blocker = NextAction(Stage.MATCH, ActionKind.BLOCKED, "A saved guided session file could not be read and may belong to this laptop. Nothing was replaced or changed; open Engineering diagnostics to repair or move that file aside, then retry.", "SESSION_FILE_UNREADABLE")
             return self._blocker
         safe = self.snapshot
         if session is None:
@@ -144,10 +161,23 @@ class AutoloaderService:
 
     def next_action(self) -> NextAction:
         try:
-            return self._calculate_next_action()
+            action = self._calculate_next_action()
         except Exception:
-            return NextAction(Stage.HARDWARE, ActionKind.BLOCKED,
+            action = NextAction(Stage.HARDWARE, ActionKind.BLOCKED,
                 "Saved inputs could not be reconciled. Your work is preserved; open Engineering diagnostics before continuing.", "GUIDED_STATE_INVALID")
+        if self.skipped_session_files and action.code != "SESSION_FILE_UNREADABLE":
+            # NextAction has no warning field; the notice rides on the message.
+            return replace(action, message=f"{self.session_file_warning()} {action.message}")
+        return action
+
+    def session_file_warning(self) -> str:
+        """User-facing SESSION_FILE_UNREADABLE notice, or "" when nothing was skipped."""
+        count = len(self.skipped_session_files)
+        if not count:
+            return ""
+        files, kept = ("1 saved session file was", "It was") if count == 1 else (f"{count} saved session files were", "They were")
+        return (f"Warning (SESSION_FILE_UNREADABLE): {files} unreadable and skipped. "
+                f"{kept} left untouched; open Engineering diagnostics to review.")
 
     def _calculate_next_action(self) -> NextAction:
         if self._blocker:

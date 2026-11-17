@@ -10,7 +10,7 @@ from macloader.autoloader.models import ActionKind, Stage
 from macloader.autoloader.service import AutoloaderService
 
 # Blockers that only a fresh hardware probe can clear.
-REPROBE_CODES = frozenset({"HARDWARE_UNKNOWN", "HARDWARE_MISMATCH", "CAMPAIGN_NOT_FOUND", "SESSION_BINDING_AMBIGUOUS"})
+REPROBE_CODES = frozenset({"HARDWARE_UNKNOWN", "HARDWARE_MISMATCH", "CAMPAIGN_NOT_FOUND", "SESSION_BINDING_AMBIGUOUS", "MACHINE_IDENTITY_UNAVAILABLE", "SESSION_FILE_UNREADABLE"})
 
 
 class GuidedApp(App[bool]):
