@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 # The word boundary on "lte" keeps names such as "... Filter ..." from matching.
 _WWAN_PATTERN = re.compile(r"wwan|mobile broadband|fibocom|l830|\blte\b|sierra wireless")
 
+# Input classification, tested in this order on the lowercased row text.
+_TOUCHSCREEN_PATTERN = re.compile(r"touch\s*-?\s*screen")
+_TRACKPOINT_PATTERN = re.compile(r"track\s*-?\s*point")
+_TRACKPAD_PATTERN = re.compile(r"touch\s*-?\s*pad|track\s*-?\s*pad|clickpad")
+# Vendor names alone are not enough: Synaptics also makes the T480s
+# fingerprint reader. They count only on a pointing-device row.
+_TRACKPAD_VENDOR_PATTERN = re.compile(r"synaptics|\belan")
+_POINTING_DEVICE_PATTERN = re.compile(r"\bmouse\b|pointing")
+
 
 @dataclass(frozen=True)
 class CimQueryResult:
@@ -266,6 +275,25 @@ class WindowsHardwareProvider(BaseHardwareProvider):
         return cls._parse_cim_output(raw).rows
 
     @staticmethod
+    def _input_kind(lower: str) -> Optional[str]:
+        """Classify a lowercased PnP row as an input kind, or None when it is not one.
+
+        Order matters: a TrackPoint row often also says "keyboard" or "mouse".
+        Generic mouse rows are deliberately not classified here.
+        """
+        if _TOUCHSCREEN_PATTERN.search(lower):
+            return "touchscreen"
+        if _TRACKPOINT_PATTERN.search(lower):
+            return "trackpoint"
+        if _TRACKPAD_PATTERN.search(lower) or (
+            _TRACKPAD_VENDOR_PATTERN.search(lower) and _POINTING_DEVICE_PATTERN.search(lower)
+        ):
+            return "trackpad"
+        if "keyboard" in lower:
+            return "keyboard"
+        return None
+
+    @staticmethod
     def _pnp_ids(pnp_id: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         ven = re.search(r"(?:VEN|VID)_([0-9a-fA-F]{4})", pnp_id or "")
         dev = re.search(r"(?:DEV|PID)_([0-9a-fA-F]{4})", pnp_id or "")
@@ -429,9 +457,14 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                         codec_device_id=dev if is_codec else None,
                         codec_subsystem_id=(codec_subsystem.group(1)[:4] + ":" + codec_subsystem.group(1)[4:]).lower() if codec_subsystem else None,
                     ))
-                elif any(token in lower for token in ("keyboard", "trackpoint", "touchpad", "touchscreen", "mouse")):
-                    kind = "keyboard" if "keyboard" in lower else "trackpoint" if "trackpoint" in lower else "touchscreen" if "touchscreen" in lower else "trackpad"
-                    input_devices.append(InputDeviceInfo(name=name, bus="usb" if usb else "unknown", kind=kind, vendor_id=ven, product_id=dev))
+                elif (input_kind := self._input_kind(lower)) is not None:
+                    input_devices.append(InputDeviceInfo(name=name, bus="usb" if usb else "unknown", kind=input_kind, vendor_id=ven, product_id=dev))
+                elif "mouse" in lower:
+                    # Generic mouse rows ("HID-compliant mouse", "PS/2 Compatible
+                    # Mouse") do not say which pointing device they are. "mouse"
+                    # is not a documented input kind and no input policy covers
+                    # it, so the row is skipped instead of guessed as a trackpad.
+                    continue
                 elif pnp_pci and (
                     dev_class.lower() in {"usb", "usbdevice"}
                     or ("usb" in name.lower() and "controller" in name.lower())

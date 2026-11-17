@@ -728,6 +728,76 @@ def test_ssstc_nvme_disk_reaches_engine_as_known_storage_and_usb_stick_is_ignore
     assert not any(r.component_id == "unknown-storage" for r in report.component_results)
 
 
+# Input rows. Vendor/product IDs and instance suffixes are invented test values.
+_TOUCHSCREEN_ROW = {"Name": "HID-compliant touch screen", "PNPDeviceID": r"HID\VID_04F3&PID_FFF1&COL01\7&TEST&0&0000", "Class": "HIDClass", "Service": "HidUsb"}
+_TRACKPOINT_ROW = {"Name": "ThinkPad TrackPoint", "PNPDeviceID": r"ACPI\LEN0000\4&TEST&0", "Class": "Mouse"}
+_PS2_TRACKPOINT_ROW = {"Name": "Lenovo PS/2 Track-Point Mouse", "PNPDeviceID": r"ACPI\LEN0001\4&TEST&0", "Class": "Mouse"}
+_KEYBOARD_TRACKPOINT_ROW = {"Name": "ThinkPad Keyboard with TrackPoint", "PNPDeviceID": r"ACPI\LEN0002\4&TEST&0", "Class": "Keyboard"}
+_HID_MOUSE_ROW = {"Name": "HID-compliant mouse", "PNPDeviceID": r"HID\VID_FFF3&PID_0C01\7&TEST&0&0000", "Class": "Mouse", "Service": "mouhid"}
+_PS2_KEYBOARD_ROW = {"Name": "Standard PS/2 Keyboard", "PNPDeviceID": r"ACPI\PNP0303\4&TEST&0", "Class": "Keyboard"}
+_SYNAPTICS_POINTING_ROW = {"Name": "Synaptics Pointing Device", "PNPDeviceID": r"ACPI\SYN0000\4&TEST&0", "Class": "Mouse"}
+_ELAN_POINTING_ROW = {"Name": "ELAN Pointing Device", "PNPDeviceID": r"ACPI\ELAN0000\4&TEST&0", "Class": "Mouse"}
+_SYNAPTICS_FINGERPRINT_ROW = {"Name": "Synaptics FS7600 Touch Fingerprint Sensor", "PNPDeviceID": r"USB\VID_06CB&PID_FFF4\TEST0001", "Class": "Biometric"}
+
+
+def _input_kinds(pnp_rows: list[dict[str, str]]) -> list[str]:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows(pnp_rows)).probe()
+    return [device.kind for device in snapshot.input_devices]
+
+
+def test_hid_touch_screen_row_is_touchscreen_and_sets_touch_capability() -> None:
+    def runner(script: str) -> Optional[str]:
+        if "Win32_PnPEntity" in script:
+            return json.dumps([_TOUCHSCREEN_ROW])
+        if "WmiMonitorConnectionParams" in script:
+            return json.dumps([{"InstanceName": "DISPLAY-TEST", "VideoOutputTechnology": 11, "Active": True}])
+        return _valid_baseline_windows_runner(script)
+
+    snapshot = WindowsHardwareProvider(command_runner=runner).probe()
+
+    assert [device.kind for device in snapshot.input_devices] == ["touchscreen"]
+    assert len(snapshot.displays) == 1
+    assert snapshot.displays[0].touch_capability is True
+
+
+def test_trackpoint_rows_are_trackpoint_even_when_name_says_keyboard_or_mouse() -> None:
+    assert _input_kinds([_TRACKPOINT_ROW]) == ["trackpoint"]
+    assert _input_kinds([_PS2_TRACKPOINT_ROW]) == ["trackpoint"]
+    assert _input_kinds([_KEYBOARD_TRACKPOINT_ROW]) == ["trackpoint"]
+
+
+def test_hid_compliant_mouse_alone_does_not_create_a_trackpad() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows([_HID_MOUSE_ROW])).probe()
+
+    assert not any(device.kind == "trackpad" for device in snapshot.input_devices)
+    assert snapshot.input_devices == []
+
+
+def test_synaptics_and_elan_pointing_devices_are_trackpads() -> None:
+    assert _input_kinds([_SYNAPTICS_POINTING_ROW]) == ["trackpad"]
+    assert _input_kinds([_ELAN_POINTING_ROW]) == ["trackpad"]
+
+
+def test_synaptics_fingerprint_reader_is_not_an_input_device() -> None:
+    assert _input_kinds([_SYNAPTICS_FINGERPRINT_ROW]) == []
+
+
+def test_keyboard_and_trackpoint_reach_engine_as_ps2_trackpad_trackpoint(db: Database) -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_pnp_rows([_PS2_KEYBOARD_ROW, _TRACKPOINT_ROW, _HID_MOUSE_ROW])
+    ).probe()
+    assert sorted(device.kind for device in snapshot.input_devices) == ["keyboard", "trackpoint"]
+
+    engine = CompatibilityEngine(db=db)
+    report = engine.evaluate(snapshot, target_macos="sequoia")
+
+    input_results = [r for r in report.component_results if r.category == "input"]
+    assert [r.component_id for r in input_results] == ["thinkpad-trackpad-trackpoint"] * 2
+    assert not any(r.component_id.startswith("unknown-input") for r in report.component_results)
+    plan = engine.generate_build_plan(report)
+    assert "ps2_trackpad_trackpoint" in plan.required_capabilities
+
+
 def test_general_cim_parser_remains_strict_for_required_fields() -> None:
     result = WindowsHardwareProvider._parse_cim_output(
         json.dumps({"Manufacturer": "LENOVO", "Model": None}),
