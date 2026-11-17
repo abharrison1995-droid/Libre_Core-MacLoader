@@ -422,10 +422,8 @@ def test_pnp_inventory_keeps_rows_with_optional_names_and_ignores_missing_identi
     assert snapshot.audio[0].codec_vendor_id == "10ec"
     assert snapshot.audio[0].codec_device_id == "0257"
     assert snapshot.audio[0].codec_subsystem_id == "17aa:2258"
-    display_audio = next(device for device in snapshot.audio if "display audio" in device.name.lower())
-    assert display_audio.codec_vendor_id is None
-    assert display_audio.codec_device_id is None
-    assert display_audio.codec_subsystem_id is None
+    assert not any("display audio" in device.name.lower() for device in snapshot.audio)
+    assert len(snapshot.audio) == 1
     ethernet = snapshot.ethernet[0]
     wifi = snapshot.wifi[0]
     bluetooth = snapshot.bluetooth[0]
@@ -584,6 +582,45 @@ def test_wwan_row_does_not_reach_engine_as_unknown_component(db: Database) -> No
 
     unknown = [r.component_id for r in report.component_results if r.component_id.startswith("unknown-")]
     assert unknown == []
+
+
+# HDAUDIO rows. Instance suffixes are invented test values.
+_DISPLAY_AUDIO_ROW = {"Name": "Intel(R) Display Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_8086&DEV_280B&SUBSYS_80860101&REV_1000\4&TEST&0&0201", "Class": "MEDIA", "Service": "IntcDAud"}
+_ALC257_ROW = {"Name": "Realtek High Definition Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_17AA2258&REV_1000\4&TEST&0&0001", "Class": "MEDIA", "Service": "HDAudAddService"}
+
+
+def test_intel_display_audio_row_yields_no_audio_entry() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows([_DISPLAY_AUDIO_ROW])).probe()
+
+    assert snapshot.audio == []
+    # The PnP query succeeded, so audio is confirmed empty rather than unknown.
+    assert snapshot.raw_evidence["inventory_status"]["audio"] is True
+
+
+def test_alc257_codec_row_is_unchanged_next_to_display_audio() -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_pnp_rows([_DISPLAY_AUDIO_ROW, _ALC257_ROW])
+    ).probe()
+
+    assert len(snapshot.audio) == 1
+    codec = snapshot.audio[0]
+    assert codec.codec_vendor_id == "10ec"
+    assert codec.codec_device_id == "0257"
+    assert f"{codec.codec_vendor_id}:{codec.codec_device_id}" == "10ec:0257"
+    assert codec.codec_subsystem_id == "17aa:2258"
+    assert codec.pci is None
+
+
+def test_display_audio_does_not_reach_engine_as_unknown_audio(db: Database) -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_pnp_rows([_DISPLAY_AUDIO_ROW, _ALC257_ROW])
+    ).probe()
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+
+    audio_results = [r for r in report.component_results if r.category == "audio"]
+    assert [r.component_id for r in audio_results] == ["realtek-alc257"]
+    assert not any(r.component_id == "unknown-audio" for r in report.component_results)
 
 
 def test_general_cim_parser_remains_strict_for_required_fields() -> None:

@@ -414,10 +414,13 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     else:
                         ethernet.append(NetworkInfo(name=name, kind="ethernet", pci=pnp_pci))
                 elif dev_class.lower() in {"media", "sound"} or "audio" in lower:
-                    # HDAUDIO also includes GPU display-audio functions. Those
-                    # endpoints are useful audio inventory, but are not the
-                    # machine's onboard codec or its codec subsystem identity.
-                    is_codec = pnp.upper().startswith("HDAUDIO") and "display audio" not in name.lower()
+                    # HDAUDIO also includes the iGPU's HDMI/DP display-audio
+                    # function. It is not the onboard codec and no audio
+                    # component policy covers it, so keeping it would only
+                    # produce an unknown audio component. Skip it.
+                    if pnp.upper().startswith("HDAUDIO") and "display audio" in name.lower():
+                        continue
+                    is_codec = pnp.upper().startswith("HDAUDIO")
                     codec_subsystem = re.search(r"SUBSYS_([0-9a-fA-F]{8})", pnp) if is_codec else None
                     audio.append(AudioInfo(
                         name=name, pci=None if is_codec else pnp_pci,
