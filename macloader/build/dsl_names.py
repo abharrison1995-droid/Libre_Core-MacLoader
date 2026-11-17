@@ -4,12 +4,16 @@ from collections.abc import Iterator
 import re
 
 
+# iasl's disassembler annotates well-known IDs inside the Name() call, for
+# example `EisaId ("PNP0C09") /* Embedded Controller Device */`, so block
+# comments may appear wherever whitespace may.
+_GAP = r'(?:\s|/\*.*?\*/)*'
 _TOKEN = re.compile(
     r'(?P<scope>Device|Scope|Processor|Method)\s*\(\s*'
     r'(?P<name>[\\^A-Za-z0-9_.]+)[^)]*\)\s*\{'
-    r'|Name\s*\(\s*(?P<attribute>_ADR|_HID)\s*,\s*'
+    rf'|Name{_GAP}\({_GAP}(?P<attribute>_ADR|_HID){_GAP},{_GAP}'
     r'(?:(?P<integer>0x[0-9A-Fa-f]+|\d+|One|Zero)'
-    r'|(?:EisaId\s*\(\s*"(?P<eisa>[A-Za-z0-9]+)"\s*\)|"(?P<hid>[A-Za-z0-9]+)"))\s*\)'
+    rf'|(?:EisaId{_GAP}\({_GAP}"(?P<eisa>[A-Za-z0-9]+)"{_GAP}\)|"(?P<hid>[A-Za-z0-9]+)")){_GAP}\)'
     r'|/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|[{}]',
     re.S,
 )

@@ -143,3 +143,20 @@ Each chunk passed its targeted tests, the full suite, mypy and `git diff --check
 The implementation followed the review decisions. USBX already uses the system bus after P3.4b, so P3.3 validates the resolved XHCI path without placing it in generated DSL. The EFI builder consumes the ACPI processor's dynamic output list, so P3.3 and P3.4d needed no edits to the EFI manifest or its builder. P3.5 was limited to cleanup because the existing campaign matcher enforces the BIOS binding. P4.3 added the required capability list to the profile and its strict reader, and both profile edits used campaign-only revision bumps.
 
 No review chunk was stopped or skipped. The EFI iGPU allow-list includes `8086:5916`, but the component catalog classifies it as HD 620 and the current guided campaign requires UHD 620. The allow-list governs EFI generation and the campaign governs guided qualification. P3.2, P4.2, Phase 5 and later, and the owner steps remain deferred.
+
+### 2026-11-17 review of the follow-up hand-back
+
+Reviewed `adfb7f4` to `c905013` against P3.3, P3.4a, P3.4d, P3.5, P4.3 and P4.6. All six chunks are accepted. The review commit fixed one bug:
+
+- **P3.3 tokenizer:** iasl's disassembler writes a comment inside well-known `_HID` calls, for example `EisaId ("PNP0C09") /* Embedded Controller Device */`. The new regular expression did not allow it, so the EC was never found on real firmware. `macloader/build/dsl_names.py` now allows block comments in a `Name` call, and a test covers it.
+- **`8086:5916`:** kept. Some T480s units have 7th-generation HD 620 graphics. P4.3 already stops them, with a clear message, before the EFI check runs. The notes are under P3.3 and P4.6 in the plan.
+
+After the fix the full suite had 778 passed, 17 skipped and 1 xfailed, with exit 0. Mypy passed for 89 source files.
+
+Every chunk that can be done without the owner is now done. The next steps need the owner's Phase 0 facts:
+
+- P0.2 unblocks P4.2.
+- P0.3 unblocks P3.2.
+- P0.4 unblocks Phase 5.
+
+P0.5a is reserved for the reviewer.

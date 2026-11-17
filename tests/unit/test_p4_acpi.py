@@ -278,6 +278,44 @@ def test_names_resolve_from_nested_firmware_devices(tmp_path: Path, cpu: str) ->
     assert rf"Scope (\_PR.{cpu})" in source
 
 
+def test_names_resolve_through_iasl_inline_comments(tmp_path: Path) -> None:
+    # iasl -d annotates well-known IDs inside the Name() call.
+    tmp_path.joinpath("dsdt.dsl").write_text(
+        '''DefinitionBlock ("", "DSDT", 2, "LENOVO", "P4TEST", 1)
+{
+    Scope (_PR)
+    {
+        Processor (PR00, 0x01, 0x00001810, 0x06)
+        {
+        }
+    }
+    Scope (_SB)
+    {
+        Device (PCI0)
+        {
+            Name (_HID, EisaId ("PNP0A08") /* PCI Express Bus */)  // _HID: Hardware ID
+            Device (XHCI)
+            {
+                Name (_ADR, 0x00140000)  // _ADR: Address
+            }
+            Device (LPCB)
+            {
+                Device (EC)
+                {
+                    Name (_HID, EisaId ("PNP0C09") /* Embedded Controller Device */)  // _HID: Hardware ID
+                }
+            }
+        }
+    }
+}
+''', encoding="utf-8",
+    )
+    names = AcpiProcessor._resolve_names(tmp_path)
+    assert names["ec"] == r"\_SB.PCI0.LPCB.EC"
+    assert names["xhc"] == r"\_SB.PCI0.XHCI"
+    assert "SSDT-EC-T480S" not in AcpiProcessor._generated_sources("synthetic-bios", names)
+
+
 def test_xhc_must_be_direct_child_of_pci0(tmp_path: Path) -> None:
     _write_dsl(tmp_path, controller_address="Zero")
     with pytest.raises(BuildPlanError, match="Captured firmware does not define xhc"):
