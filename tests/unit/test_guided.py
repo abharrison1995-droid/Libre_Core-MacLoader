@@ -111,7 +111,7 @@ def test_multiple_usb_choices_require_selection_and_busy_quit_cancels(tmp_path: 
             await app.workers.wait_for_complete()
             assert selected == [choices[2]]
             app._busy = True
-            app.action_quit()
+            app._request_quit()
             assert app._cancelled and app._exit_after_work
             app._busy = False
     asyncio.run(exercise())
@@ -131,7 +131,7 @@ def test_quit_between_worker_scheduling_and_entry_preserves_cancellation(tmp_pat
         monkeypatch.setattr(app, "exit", lambda result=False: exits.append(result))
         original = app._advance
         def schedule(choice=None):  # type: ignore[no-untyped-def]
-            app.action_quit()
+            app._request_quit()
             original(choice)
         monkeypatch.setattr(app, "_advance", schedule)
         async with app.run_test() as pilot:
@@ -139,6 +139,21 @@ def test_quit_between_worker_scheduling_and_entry_preserves_cancellation(tmp_pat
             await pilot.pause()
             assert observed == [True]
             assert app._exit_after_work and exits == [False]
+    asyncio.run(exercise())
+
+
+def test_q_key_quits_idle_guided_app(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        service = AutoloaderService(root=tmp_path)
+        service.start(candidate(), private_material="test")
+        app = GuidedApp(service)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert not app._busy
+            await pilot.press("q")
+            await pilot.pause()
+        assert app.return_value is False
     asyncio.run(exercise())
 
 

@@ -119,7 +119,10 @@ class GuidedApp(App[bool]):
             if buttons:
                 buttons[0].disabled = self._busy or not (isinstance(event.value, str) and event.value in self._choices)
 
-    def action_quit(self) -> None:
+    async def action_quit(self) -> None:
+        self._request_quit()
+
+    def _request_quit(self) -> None:
         if self._busy:
             self._cancelled = True
             self._exit_after_work = True
