@@ -18,10 +18,10 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.1 Windows capture | Done, merged to local `main` | `plan/P3.1` |
 | P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
 | P3.3 generated SSDT resolution | Done, merged to local `main` | `plan/P3.3`; ACPI qualification records PNLF omission |
-| P3.4a PLUG | **Next** | P3.3 resolved CPU path is available |
+| P3.4a PLUG | Done, merged to local `main` | `plan/P3.4a` |
 | P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
-| P3.4d EC | Pending | After P3.3 |
+| P3.4d EC | **Next** | P3.3 resolved EC path is available |
 | P3.5 ACPI intermediate cleanup | Pending, re-scoped by review | Part (1) already done; cleanup only, after P3.3 |
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
@@ -349,6 +349,8 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Result** (`plan/P3.4c`): Confirmed the current PNLF source and Kaby Lake profile values. The [OpenCore PNLF sample referenced by WhateverGreen](https://github.com/acidanthera/OpenCorePkg/blob/master/Docs/AcpiSamples/Source/SSDT-PNLF.dsl) confirms UID 16 for Skylake/Kaby Lake and UID 19 for Coffee Lake. PNLF now has the reviewed IDs and Darwin-only status. This body change is independent of P3.3's omission rule. The source test covers the IDs and status. Targeted tests 6 passed, 1 skipped. Full suite 757 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 - **Result** (`plan/P3.4d`): Skipped. The generator has no resolved `ec` path because P3.3 stopped. The EC emission decision requires that path. The native EC outcome also needs a manifest record. No code changed or implementation tests run.
 - **Review (2026-11-17):** P3.4b and P3.4c checked against the Dortania prebuilt USBX and PNLF tables and the OpenCore `SSDT-PNLF` sample comments (UID 16 is Skylake/Kaby Lake; 19 is Coffee Lake); accepted. P3.4a and P3.4d stay pending until P3.3 lands; P3.4d records "native EC" with the `notes` field set out under P3.3.
+
+- **Result after review** (`plan/P3.4a`): Replaced the PLUG marker with a Darwin-guarded `_DSM` bound to the resolved processor. The source test checks the guard, support buffer and `plugin-type` package. Targeted tests: 12 passed, 1 skipped. Full suite: 771 passed, 16 skipped, 1 xfailed, exit 0. Mypy passed for 89 source files.
 
 ### P3.5 Bind captured tables to the live machine and clean intermediates [R]
 - **Problem:** `macloader/workflow/service.py:126-134` takes `bios_binding` from the campaign profile and never compares against the current probe; decompiled DSL persists under the work root (`acpi.py:128-135`).

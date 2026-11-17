@@ -488,9 +488,19 @@ class AcpiProcessor:
 {{
     // Machine-bound to Lenovo T480s 20L8, BIOS {bios_binding}.
     External ({names["cpu0"]}, ProcessorObj)
-    Scope ({names["cpu0"]})
+    If (_OSI ("Darwin"))
     {{
-        Name (PLUG, One)
+        Scope ({names["cpu0"]})
+        {{
+            Method (_DSM, 4, NotSerialized)
+            {{
+                If (Arg2 == Zero)
+                {{
+                    Return (Buffer (One) {{ 0x03 }})
+                }}
+                Return (Package (0x02) {{ "plugin-type", One }})
+            }}
+        }}
     }}
 }}
 ''',

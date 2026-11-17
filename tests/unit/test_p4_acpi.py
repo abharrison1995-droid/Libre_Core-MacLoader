@@ -226,6 +226,20 @@ def test_ambiguous_xhc_is_rejected(tmp_path: Path) -> None:
         AcpiProcessor._resolve_names(tmp_path)
 
 
+def test_generated_plug_returns_plugin_type_only_under_darwin(tmp_path: Path) -> None:
+    _write_dsl(tmp_path, cpu="CPU0")
+    names = AcpiProcessor._resolve_names(tmp_path)
+    source = AcpiProcessor._generated_sources("synthetic-bios", names)["SSDT-PLUG-T480S"]
+    assert '''If (_OSI ("Darwin"))
+    {
+        Scope (\\_PR.CPU0)
+        {
+            Method (_DSM, 4, NotSerialized)''' in source
+    assert "If (Arg2 == Zero)" in source
+    assert "Return (Buffer (One) { 0x03 })" in source
+    assert 'Return (Package (0x02) { "plugin-type", One })' in source
+
+
 def test_generated_usbx_has_darwin_power_properties(tmp_path: Path) -> None:
     _write_dsl(tmp_path)
     names = AcpiProcessor._resolve_names(tmp_path)
