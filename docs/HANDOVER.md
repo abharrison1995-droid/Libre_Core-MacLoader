@@ -38,7 +38,7 @@ Work in this order and stop at the end of it for review (section 5). Every item 
 4. **P3.4a, P3.4b, P3.4c, P3.4d**: one chunk each (PLUG, USBX, PNLF, EC).
 5. **P3.5**: bind captured tables to the live BIOS; delete decompiled intermediates.
 6. **P4.1**: add `OpenHfsPlus.efi` (not `HfsPlus.efi`, not `ApfsDriverLoader.efi`).
-7. **P4.3, P4.4, P4.5, P4.6**: kext set from the profile, kext order, structural validation, iGPU check and stale profile data. P4.3 and P4.6 edit `macloader/database/data/profiles/t480s/p4-sequoia.yaml`: bump the profile revision and the campaign `revision` as the plan says.
+7. **P4.3, P4.4, P4.5, P4.6**: kext set from the profile, kext order, structural validation, iGPU check and stale profile data. P4.3 and P4.6 edit `macloader/database/data/profiles/t480s/p4-sequoia.yaml`: bump only the campaign `revision`, by one per chunk (profiles have no revision field; see the review decision under P4.3).
 
 **Do not start these; they need the owner's facts first:**
 
@@ -113,3 +113,14 @@ The final full suite had **765 passed, 16 skipped, 1 xfailed and 0 failed**. Myp
 P3.4b and P3.4c could proceed independently because their table bodies use the system bus and require no device path from P3.3. The PNLF UID is documented in the OpenCore sample referenced by WhateverGreen. P4.1 and P4.5 also updated the synthetic build path so it meets the new driver and kext structural checks. Direct schema-generator calls can retain their previous defaults when no extracted bundle information is supplied.
 
 The plan needs to resolve whether the P3.3 and P3.4d omission notes belong in the ACPI qualification report or the EFI manifest. P3.5 should account for the existing BIOS gate when scoping intermediate cleanup. P4.3 and P4.6 need an explicit profile revision migration or a campaign-only revision rule. P3.2, P4.2, Phase 5 and later, and the owner steps remain deferred.
+
+### 2026-11-17 review of the hand-back
+
+Reviewed every commit from `bcd72df` to `3fd8998` against its chunk. The full suite was rerun on `3fd8998`: 765 passed, 16 skipped, 1 xfailed, exit 0. Mypy was clean.
+
+- **Accepted as merged:** P2.7, P3.1, P3.4b, P3.4c, P4.1, P4.4 and P4.5. No code changes were needed. The non-blocking notes are under P4.5 in the plan; the kext executable lookup is Phase 12 item I25.
+- **All four stops were correct.** Each one came from an error in the plan or in this handover. The review decisions are now in the plan:
+  - P3.3 and P3.4d record omissions in a new `notes` field on the ACPI result. The EFI manifest is not touched.
+  - P3.5 is cut to the cleanup of intermediate files only, because the BIOS gate already exists.
+  - P4.3 and P4.6 bump only the campaign `revision`. Profiles have no revision field, and `effective_profile_digest` already binds their content.
+- **Remaining work list, in order:** P3.3, P3.4a, P3.4d, P3.5, P4.3, P4.6. Section 3 applies unchanged. Hand back again under a new heading in this section.

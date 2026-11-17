@@ -17,25 +17,25 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P0.5a (orchestrator confirms BIOS table) | Not started | Under P0.5 |
 | P3.1 Windows capture | Done, merged to local `main` | `plan/P3.1` |
 | P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
-| P3.3 generated SSDT resolution | Stopped | Recording the PNLF omission in the build manifest requires out-of-scope files |
-| P3.4a PLUG | Skipped | Requires the CPU path from P3.3 |
+| P3.3 generated SSDT resolution | **Next**: unblocked by review | Record omissions in the ACPI result `notes`, not the EFI manifest |
+| P3.4a PLUG | Pending | After P3.3 |
 | P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
-| P3.4d EC | Skipped | Requires the EC path from P3.3 |
-| P3.5 ACPI BIOS binding and cleanup | Stopped | Import already checks the normalized BIOS |
+| P3.4d EC | Pending | After P3.3 |
+| P3.5 ACPI intermediate cleanup | Pending, re-scoped by review | Part (1) already done; cleanup only, after P3.3 |
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
-| P4.3 profile kext set | Stopped | The reviewed profile has no revision to bump |
+| P4.3 profile kext set | Pending, unblocked by review | Bump the campaign `revision` only |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
 | P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
-| P4.6 graphics identity and profile data | Stopped | The reviewed profile has no revision to bump |
+| P4.6 graphics identity and profile data | Pending, unblocked by review | After P4.3; bump the campaign `revision` only |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
 
 **Hand-back checkpoint:** 765 passed, 16 skipped, 1 xfailed, 0 failed. Mypy passed for all 88 source files. The authorized work list has been reviewed in order and is ready for owner review. See section 6 of [HANDOVER.md](HANDOVER.md) for blockers.
 
-**Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe).
+**Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe), I25 read `CFBundleExecutable` for kexts.
 
 **Handover:** the next implementing agent starts from [HANDOVER.md](HANDOVER.md), which lists the chunks that can be done without the owner and how to hand the work back for review.
 
@@ -330,6 +330,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Change:** after disassembly, add `_resolve_names(dsl_dir) -> dict` built on that helper. It returns: `cpu0` (`\_PR.PR00` or `\_PR.CPU0`, or `\_SB.PR00`), `xhc` (the device **directly under `\_SB.PCI0`** whose `_ADR` is `0x00140000`), `ec` (full path of the device with `_HID` `PNP0C09`), `igpu` (the device **directly under `\_SB.PCI0`** whose `_ADR` is `0x00020000`), `has_pnlf` (bool). More than one match for any name is an error, not a pick-the-first. If `cpu0` or `xhc` is not found, raise `BuildPlanError("Captured firmware does not define <name>; generated ACPI cannot be bound")`. Pass the resolved names into `_generated_sources` instead of the literals. If `has_pnlf` is true, omit SSDT-PNLF and record that in the manifest.
 - **Tests** (`tests/unit/test_p4_acpi.py`): DSL fixture with `PR00` → source uses `\_PR.PR00`; fixture with `CPU0` → uses `\_PR.CPU0`; fixture without an XHCI device → `BuildPlanError`; fixture with existing PNLF → no PNLF table.
 - **Result** (`plan/P3.3`): Stopped before editing code. The fixed names and existing tokenizer match the plan. The generated ACPI processor writes a qualification report, while the EFI build manifest is constructed in `macloader/build/efi.py` and parsed against the strict field set in `macloader/domain/contracts.py`. The required manifest record for an existing PNLF needs a change outside this chunk's scope. The plan needs to specify the qualification report or authorize the manifest changes. No implementation tests were run.
+- **Review decision (2026-11-17):** the stop was correct. "Manifest" in this chunk and in P3.4d means the ACPI result, not the EFI build manifest. Add `notes: Tuple[str, ...]` to `AcpiBuildResult` in `acpi.py`, write it into `to_dict()` (so it lands in `P4-ACPI-qualification.json`), and include it in the `generated_digest` input. Do not edit `efi.py` or `domain/contracts.py`: the EFI manifest already lists `output_files`, so an omitted table shows there by its absence. Note texts are fixed strings: `"firmware defines PNLF; SSDT-PNLF omitted"` and (P3.4d) `"native EC present; SSDT-EC omitted"`. Name resolution must read the disassembled DSL before the P3.5 cleanup removes it. P3.3 is unblocked; do it before P3.4a, P3.4d and P3.5.
 
 ### P3.4 Make the generated tables do what they claim [C] — REVIEW
 - **Problem:** SSDT-PLUG is `Name (PLUG, One)` with no `_DSM`; SSDT-USBX has no properties (`acpi.py:433-471`). PNLF uses `_CID "APP0002"` and `_UID 0x13` [R: differs from the Dortania reference].
@@ -345,12 +346,14 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Result** (`plan/P3.4b`): USBX now defines the four power properties under the system bus with Darwin-only device status. The zero-function `_DSM` query reports function support. This scope needs no resolved device path. The output filename is unchanged and the EFI builder already uses the processor's output list. Source tests covered the scope, methods and property values. Targeted tests 5 passed, 1 skipped. Full suite 756 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 - **Result** (`plan/P3.4c`): Confirmed the current PNLF source and Kaby Lake profile values. The [OpenCore PNLF sample referenced by WhateverGreen](https://github.com/acidanthera/OpenCorePkg/blob/master/Docs/AcpiSamples/Source/SSDT-PNLF.dsl) confirms UID 16 for Skylake/Kaby Lake and UID 19 for Coffee Lake. PNLF now has the reviewed IDs and Darwin-only status. This body change is independent of P3.3's omission rule. The source test covers the IDs and status. Targeted tests 6 passed, 1 skipped. Full suite 757 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 - **Result** (`plan/P3.4d`): Skipped. The generator has no resolved `ec` path because P3.3 stopped. The EC emission decision requires that path. The native EC outcome also needs a manifest record. No code changed or implementation tests run.
+- **Review (2026-11-17):** P3.4b and P3.4c checked against the Dortania prebuilt USBX and PNLF tables and the OpenCore `SSDT-PNLF` sample comments (UID 16 is Skylake/Kaby Lake; 19 is Coffee Lake); accepted. P3.4a and P3.4d stay pending until P3.3 lands; P3.4d records "native EC" with the `notes` field set out under P3.3.
 
 ### P3.5 Bind captured tables to the live machine and clean intermediates [R]
 - **Problem:** `macloader/workflow/service.py:126-134` takes `bios_binding` from the campaign profile and never compares against the current probe; decompiled DSL persists under the work root (`acpi.py:128-135`).
 - **Change:** (1) at import, require the current snapshot's normalised BIOS to equal the profile's `bios_binding`, else raise with "This capture can only be imported on BIOS <binding>". (2) After a successful or failed build, delete the `disassembled` directory and iasl logs in a `finally`; keep only digests.
 - **Tests:** import with snapshot BIOS `N22ET76W-1.53` fails; work directory has no `.dsl` after build.
 - **Result** (`plan/P3.5`): Stopped before editing code. `import_acpi_capture` already requires `candidate_campaign(snapshot)`, which compares the normalized snapshot BIOS with the campaign BIOS. The campaign loader requires the profile to have the same BIOS, and `test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture` already covers rejection. The disassembly and raw logs still persist. The plan needs a separate cleanup chunk or a revised import requirement. No implementation tests were run.
+- **Review decision (2026-11-17):** confirmed: part (1) is already done by `candidate_campaign` and its existing test, so drop it. P3.5 is now part (2) only. In `AcpiProcessor.build`, wrap the work after `run_dir` is created in `try`/`finally` and, in the `finally`, remove `disassembled`, `raw-compiled` and `raw-diagnostics` (use `shutil.rmtree(..., ignore_errors=True)`; refuse to follow a symlinked directory). Keep `generated-sources`, `generated-aml` and the digests. Test: after a successful build and after a forced compile failure, `run_dir` contains no `.dsl` from the captured tables and no `raw-diagnostics`. Do it after P3.3.
 
 ---
 
@@ -367,7 +370,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 ### P4.2 Explicit reviewed config settings [C] — REVIEW
 - **Problem:** `config.py:226-269` leaves every quirk and security key at the sample default and replaces boot-args with `alcid=<n>` only.
 - **Needs:** the P0.2 table.
-- **Change (data):** add a `config_overrides` block to `macloader/database/data/profiles/t480s/p4-sequoia.yaml`, then bump the profile revision and the campaign `revision`. Values (source: Dortania OpenCore Install Guide, Kaby Lake laptop page; the reviewer confirms each against P0.2 and that page):
+- **Change (data):** add a `config_overrides` block to `macloader/database/data/profiles/t480s/p4-sequoia.yaml`, then bump the campaign `revision` (profiles have no revision; see the review decision under P4.3). Values (source: Dortania OpenCore Install Guide, Kaby Lake laptop page; the reviewer confirms each against P0.2 and that page):
 
   | Section | Key | Value |
   |---|---|---|
@@ -418,6 +421,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Change:** add `required_capabilities` to `p4-sequoia.yaml`: `accelerated_intel_uhd_620`, `alc257_audio`, `intel_gigabit_ethernet`, `intel_wireless_lan`, `intel_bluetooth`, `ps2_trackpad_trackpoint` (use the exact strings the engine emits; confirm each by search). In the place where the build plan for a reviewed profile is finalised (find where `ReviewedEfiProfile` and the BuildPlan meet; likely `macloader/workflow/service.py` or `macloader/build/efi.py:127-141`), compare the plan's capabilities with the profile's required list. Any missing capability raises a blocking issue `PROFILE_CAPABILITY_MISSING` naming the capability and the hardware category that was not detected. Do not auto-add the capability: the block is the fix.
 - **Tests:** snapshot without an input device → `PROFILE_CAPABILITY_MISSING: ps2_trackpad_trackpoint`; complete snapshot → no issue.
 - **Result** (`plan/P4.3`): Stopped before editing code. Confirmed all six capability names in the engine and resolver. `ConfigurationService.evaluate` is where the build plan and reviewed profile meet. Handover section 2 calls for a profile revision bump, but `p4-sequoia.yaml` has only `schema_version`; `ReviewedEfiProfile` has no revision and its loader rejects unknown keys. Campaign revision 3 is separate. The plan needs to define the initial profile revision and compatibility rules or specify a campaign-only revision bump. No implementation tests were run.
+- **Review decision (2026-11-17):** the stop was correct; "profile revision" was an error in this plan and the handover. Reviewed profiles carry no revision. Their content is bound by `effective_profile_digest`, so a profile edit already invalidates earlier builds. For every chunk that edits `p4-sequoia.yaml` (P4.2, P4.3, P4.6): add no field to the profile or its loader; bump only the campaign `revision` in `campaigns/t480s-20l8-sequoia-15.0.yaml` by one per chunk (P4.3: `"3"` → `"4"`). P4.3 is unblocked.
 
 ### P4.4 Kext load order [C/R] — REVIEW
 - **Problem:** `config.py:172-188` orders by leaf name. Plug-ins nested under a parent (for example `VoodooPS2Controller.kext/Contents/PlugIns/VoodooInput.kext`) can sort before the parent [R]; BlueToolFixup sorts before IntelBluetoothFirmware [R].
@@ -430,11 +434,13 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Change:** (1) in `_kernel_entry`, accept an `has_executable: bool` argument; set `ExecutablePath` to `""` when the extracted bundle has no `Contents/MacOS/<name>` file. Thread the flag from where bundles are extracted. (2) In `validate_tree`, for each `Kernel.Add` entry verify `PlistPath` exists and, when `ExecutablePath` is non-empty, that file exists; for each `ACPI.Add` entry verify the `.aml` exists; reject entries whose files are missing.
 - **Tests:** codeless bundle → empty `ExecutablePath` and validation passes; wrong executable name → validation fails; missing AML → validation fails. Update fixtures in `tests/unit/test_efi_builder.py:107-110` so normal kexts include a `Contents/MacOS/<name>` file.
 - **Result** (`plan/P4.5`): Confirmed that structural validation lacked the kext plist, executable and ACPI file checks. The builder now passes executable presence from the extracted bundles into config generation, including synthetic builds. Validation checks the configured paths within their component directories. Synthetic tests cover codeless bundles, missing plists and AML, and incorrect executable paths. Targeted tests 66 passed, 1 skipped. Full suite 765 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
+- **Review (2026-11-17), P4.1, P4.4, P4.5 accepted.** Two notes, neither blocking: (a) the builder treats a kext as having code only when `Contents/MacOS/<bundle stem>` exists, as this chunk specified; a kext whose `CFBundleExecutable` differs from its stem would get an empty `ExecutablePath` and load without code. None of the pinned T480s kexts does this today; reading `CFBundleExecutable` from `Info.plist` is Phase 12 item I25. (b) P4.1 and P4.4 changed `dependencies/catalog.yaml` without bumping `macloader_dependency_set` (`2026.08-a`). The catalog content digest already binds builds to the edit, so this is accepted; bump it with the next catalog change.
 
 ### P4.6 Graphics identity check and stale profile data [R]
 - **Change:** before generation, require the captured iGPU PCI ID to be `8086:5917` or `8086:5916` (the IDs the `device-id` spoof `16590000` is valid for); otherwise raise `BuildPlanError`. Remove `HS06` from `usb.routes` in `p4-sequoia.yaml:24` (it is excluded in `evidence/t480s.yaml:28`). Reword `macloader/database/data/macos/sequoia.yaml:8` to "Intel Wi-Fi uses itlwm on Sequoia (not physically verified)".
 - **Tests:** iGPU `8086:3ea0` → build refused.
 - **Result** (`plan/P4.6`): Stopped before editing code. Confirmed the EFI builder has no reviewed iGPU PCI allow-list, the profile still includes the USB route excluded by the evidence policy, and the Sequoia note mentions both Wi-Fi drivers while the resolver selects itlwm. As in P4.3, the required profile revision bump has no existing field in the YAML or its strict loader. The chunk needs an explicit versioning decision before changing the profile. No implementation tests were run.
+- **Review decision (2026-11-17):** same rule as P4.3: no profile revision; bump the campaign `revision` by one. `macos/sequoia.yaml` has no version field, so its wording change needs no bump. P4.6 is unblocked; do it after P4.3.
 
 ---
 
@@ -720,6 +726,7 @@ All `[R]`; confirm before changing. One chunk each.
 | I22 | PM981 from Windows | Found in P1.4 [C by worker test]: a PM981 detected on Windows (model `MZVLB...`, no PCI id on the disk row) matches `standard-nvme`, so `nvme_compatibility_fix` never fires; `_match_storage` lowercases the model but not the YAML patterns, so `*PM981*` patterns cannot match either (`macloader/compatibility/engine.py` about line 273, `storage.yaml`). Fix the case handling and add an `MZVLB` rule. Not needed for the reference SSSTC drive. Also: a USB disk attached through UASP reports `InterfaceType` SCSI and a `SCSI\DISK` id, so the P1.4 USB exclusion does not catch it; exclude by bus type from `Get-Disk`/`MSFT_Disk` instead. |
 | I23 | Linux removable disks | `macloader/detection/linux.py` lists every whole `sd*` disk, USB sticks included, as `StorageInfo(kind="sata")`, and `StorageInfo` has no removable/bus field. Read `/sys/block/<dev>/removable` or the USB transport and exclude or tag those disks. Matters once a Linux writer exists. Also: the Linux provider puts `usb_count` into `raw_evidence` (`linux.py:678`), which is still part of `stable_snapshot_digest`, so on Linux a stick still invalidates saved artifacts on resume (P2.2b fixed Windows only). |
 | I24 | Test hygiene | `tests/unit/test_guided.py::test_late_selection_message_after_unmount_is_harmless` builds a `GuidedApp` with an empty service, so `on_mount` runs a live `probe_hardware()` during the suite (found in P2.4). Inject a fixture snapshot instead; add a guard that fails any test reaching the real provider. Also: `advance_until_blocked`'s `Stage.DETECT` fallback and the guided `session is None` path call `start()` with no arguments and reset the stored private material (test seam only). |
+| I25 | EFI correctness | `EfiBuilder` decides whether a kext has code by looking for `Contents/MacOS/<bundle stem>` (P4.5). Read `CFBundleExecutable` from each bundle's `Info.plist` instead, and fail the build if the named file is missing. |
 | I19 | Release config | A second reviewed `config_overrides` set for daily use after acceptance: no `-v`, `Misc.Debug.Target` 3, `HideAuxiliary` true, a picker timeout. Selected explicitly; the first-install set stays the default. |
 | I20 | Wi-Fi after install | Document HeliPort for itlwm on Sequoia (downloaded over Ethernet) in the post-install section; decide whether Wi-Fi and Bluetooth kexts should be optional for the first install to reduce risk. |
 
