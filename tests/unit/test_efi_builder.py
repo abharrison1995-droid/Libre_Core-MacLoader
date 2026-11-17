@@ -20,12 +20,18 @@ from macloader.identity.service import IdentityService
 
 
 def _minimal_tree(root: Path) -> None:
-    for relative in ("EFI/BOOT/BOOTx64.efi", "EFI/OC/OpenCore.efi", "EFI/OC/Drivers/OpenRuntime.efi"):
+    drivers = ("OpenRuntime.efi", "OpenHfsPlus.efi")
+    for relative in ("EFI/BOOT/BOOTx64.efi", "EFI/OC/OpenCore.efi", *(f"EFI/OC/Drivers/{name}" for name in drivers)):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
     (root / "EFI/OC/config.plist").write_bytes(
-        plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}, "PlatformInfo": {"Generic": {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}}})
+        plistlib.dumps({
+            "OC": {"Version": "1.0.7"},
+            "UEFI": {"Drivers": [{"Path": name, "Enabled": True} for name in drivers]},
+            "Kernel": {"Add": []},
+            "PlatformInfo": {"Generic": IdentityService.fake_identity()},
+        })
     )
 
 
@@ -50,7 +56,7 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
     assert report.status == "INVALID"
     assert any("Configured driver is missing" in error for error in report.errors)
 
-    (root / "EFI/OC/config.plist").write_bytes(plistlib.dumps({"OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []}, "PlatformInfo": {"Generic": {"SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL", "MLB": "MLB1234", "SystemUUID": "12345678"}}}))
+    _minimal_tree(root)
     builder = EfiBuilder()
     expected_manifest = BuildManifest(
         CONTRACT_SCHEMA_VERSION,
@@ -68,6 +74,27 @@ def test_ocvalidate_failure_and_config_file_mismatch_are_rejected(tmp_path: Path
     report = builder.validate_tree(root, toolchain=toolchain, expected_manifest=expected_manifest, synthetic_test_mode=True)
     assert report.status == "INVALID"
     assert report.checks["ocvalidate_exit"] == "2"
+
+
+@pytest.mark.parametrize("driver", ["OpenRuntime.efi", "OpenHfsPlus.efi"])
+@pytest.mark.parametrize("missing", ["file", "config entry"])
+def test_structural_validation_requires_both_boot_drivers(tmp_path: Path, driver: str, missing: str) -> None:
+    root = tmp_path / "efi"
+    _minimal_tree(root)
+    if missing == "file":
+        (root / "EFI/OC/Drivers" / driver).unlink()
+        expected = f"Configured driver is missing: {driver}"
+    else:
+        plist_path = root / "EFI/OC/config.plist"
+        config = plistlib.loads(plist_path.read_bytes())
+        config["UEFI"]["Drivers"] = [
+            entry for entry in config["UEFI"]["Drivers"] if entry["Path"] != driver
+        ]
+        plist_path.write_bytes(plistlib.dumps(config))
+        expected = f"Required driver is missing from UEFI.Drivers: {driver}"
+    report = EfiBuilder().validate_tree(root)
+    assert report.status == "INVALID"
+    assert expected in report.errors
 
 
 def test_qualified_validation_requires_a_trusted_expected_manifest(tmp_path: Path) -> None:
@@ -130,6 +157,11 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     assert result.validation.status == "VALID"
     assert (result.output_dir / "EFI/BOOT/BOOTx64.efi").is_file()
     assert (result.output_dir / "EFI/OC/OpenCore.efi").is_file()
+    assert (result.output_dir / "EFI/OC/Drivers/OpenHfsPlus.efi").is_file()
+    config = plistlib.loads((result.output_dir / "EFI/OC/config.plist").read_bytes())
+    assert [entry["Path"] for entry in config["UEFI"]["Drivers"]] == [
+        "OpenRuntime.efi", "OpenHfsPlus.efi", "ResetNvramEntry.efi",
+    ]
     assert (result.output_dir / "EFI/OC/Tools/OpenShell.efi").is_file()
     for dependency_id in ("opencore", "lilu", "virtualsmc"):
         expected_license = (db.data_dir / "licenses" / f"{dependency_id}.txt").read_text(encoding="utf-8")

@@ -138,12 +138,15 @@ def test_real_matching_ocvalidate_accepts_schema_generated_config(tmp_path: Path
         profile,
         identity=IdentityService.fake_identity(),
         kexts=(),
-        drivers=("OpenRuntime.efi",),
+        drivers=("ResetNvramEntry.efi", "OpenHfsPlus.efi", "OpenRuntime.efi"),
         acpi_files=(),
         opencore_version=selection.opencore_version,
         acpi_digest="",
         evidence_digests=(),
     )
+    assert [entry["Path"] for entry in config["UEFI"]["Drivers"]] == [
+        "OpenRuntime.efi", "OpenHfsPlus.efi", "ResetNvramEntry.efi",
+    ]
     config_path = tmp_path / "config.plist"
     generator.write(config, config_path)
     import subprocess

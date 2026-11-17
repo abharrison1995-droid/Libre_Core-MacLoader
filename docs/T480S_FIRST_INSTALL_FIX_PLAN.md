@@ -23,7 +23,9 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
 | P3.4d EC | Skipped | Requires the EC path from P3.3 |
 | P3.5 ACPI BIOS binding and cleanup | Stopped | Import already checks the normalized BIOS |
-| Phase 4 | **P4.1 next** | P4.2 awaits owner input |
+| P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
+| P4.2 explicit config | Deferred to owner input | Requires P0.2 |
+| P4.3 profile kext set | **Next chunk** | Phase 4 |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -355,6 +357,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Change:** add `EFI/OC/Drivers/OpenHfsPlus.efi` to the opencore `subcomponents` list (it is inside the same OpenCore release archive, so the archive hash does not change). Do **not** use `HfsPlus.efi` (that file is in a different repository and is not in the pinned archive). In `config.py`, emit drivers with `OpenRuntime.efi` first, then the rest sorted. In `validate_tree`, require both `OpenRuntime.efi` and `OpenHfsPlus.efi` to exist and be listed in `UEFI.Drivers`.
 - **Do not add** `ApfsDriverLoader.efi`; OpenCore loads APFS itself.
 - **Tests:** generated `UEFI.Drivers` paths are `["OpenRuntime.efi", "OpenHfsPlus.efi", "ResetNvramEntry.efi"]` in that order; validation fails when `OpenHfsPlus.efi` is missing.
+- **Result** (`plan/P4.1`): Added the HFS+ driver supplied by the [OpenCore 1.0.7 packaging script](https://github.com/acidanthera/OpenCorePkg/blob/1.0.7/build_oc.tool#L1375). Driver generation puts OpenRuntime first and sorts the rest. Structural validation requires both boot drivers on disk and in `UEFI.Drivers`. Updated synthetic EFI fixtures and tested ordered output, extraction, and missing files or entries. Targeted and data-loader tests 97 passed, 3 skipped. Full suite 761 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 
 ### P4.2 Explicit reviewed config settings [C] — REVIEW
 - **Problem:** `config.py:226-269` leaves every quirk and security key at the sample default and replaces boot-args with `alcid=<n>` only.

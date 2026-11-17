@@ -188,6 +188,10 @@ class SchemaDrivenConfigGenerator:
         return tuple(sorted(unique, key=order))
 
     @staticmethod
+    def _ordered_drivers(drivers: Iterable[str]) -> list[str]:
+        return sorted(set(drivers), key=lambda name: (name != "OpenRuntime.efi", name))
+
+    @staticmethod
     def _driver_entry(path: str, enabled: bool = True) -> Dict[str, Any]:
         return {"Arguments": "", "Comment": "P4 reviewed OpenCore driver", "Enabled": enabled, "LoadEarly": False, "Path": path}
 
@@ -230,7 +234,7 @@ class SchemaDrivenConfigGenerator:
         config["#WARNING - 4"] = "Experimental graphics/audio policy requires physical acceptance."
 
         config["Kernel"]["Add"] = [self._kernel_entry(item) for item in self._ordered_kexts(kexts)]
-        config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in sorted(set(drivers))]
+        config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in self._ordered_drivers(drivers)]
         config["ACPI"]["Add"] = [
             {"Comment": "P4 reviewed machine-bound ACPI source", "Enabled": True, "Path": item}
             for item in sorted(set(acpi_files))
@@ -295,7 +299,7 @@ class SchemaDrivenConfigGenerator:
         config = self._load_schema()
         config["#WARNING - MacLoader"] = "Synthetic test config; not machine-qualified or install-ready."
         config["Kernel"]["Add"] = [self._kernel_entry(item) for item in self._ordered_kexts(kexts)]
-        config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in sorted(set(drivers))]
+        config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in self._ordered_drivers(drivers)]
         config["ACPI"]["Add"] = []
         config["ACPI"]["Delete"] = []
         config["ACPI"]["Patch"] = []

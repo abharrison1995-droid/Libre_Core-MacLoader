@@ -15,6 +15,7 @@ dependencies:
       - "EFI/BOOT/BOOTx64.efi"
       - "EFI/OC/OpenCore.efi"
       - "EFI/OC/Drivers/OpenRuntime.efi"
+      - "EFI/OC/Drivers/OpenHfsPlus.efi"
       - "EFI/OC/Drivers/ResetNvramEntry.efi"
       - "EFI/OC/Tools/OpenShell.efi"
     artifacts:

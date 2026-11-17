@@ -585,13 +585,16 @@ def test_windows_backend_without_production_attestation_stays_nonqualified() -> 
 
 def test_efi_validation_cancellation_stops_validator_process(tmp_path: Path) -> None:
     root = tmp_path / "efi"
-    for relative in ("EFI/BOOT/BOOTx64.efi", "EFI/OC/OpenCore.efi", "EFI/OC/Drivers/OpenRuntime.efi"):
+    drivers = ("OpenRuntime.efi", "OpenHfsPlus.efi")
+    for relative in ("EFI/BOOT/BOOTx64.efi", "EFI/OC/OpenCore.efi", *(f"EFI/OC/Drivers/{name}" for name in drivers)):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
     (root / "EFI/OC/config.plist").write_bytes(
         plistlib.dumps({
-            "OC": {"Version": "1.0.7"}, "UEFI": {"Drivers": []}, "Kernel": {"Add": []},
+            "OC": {"Version": "1.0.7"},
+            "UEFI": {"Drivers": [{"Path": name, "Enabled": True} for name in drivers]},
+            "Kernel": {"Add": []},
             "PlatformInfo": {"Generic": {
                 "SystemProductName": "MacBookPro15,2", "SystemSerialNumber": "SERIAL",
                 "MLB": "MLB1234", "SystemUUID": "12345678",
