@@ -42,6 +42,17 @@ _TRACKPAD_PATTERN = re.compile(r"touch\s*-?\s*pad|track\s*-?\s*pad|clickpad")
 _TRACKPAD_VENDOR_PATTERN = re.compile(r"synaptics|\belan")
 _POINTING_DEVICE_PATTERN = re.compile(r"\bmouse\b|pointing")
 
+# PCI location of present PCI devices, one row per (InstanceId, KeyName, Data).
+# Bus number and address are integers on every Windows language, unlike
+# DEVPKEY_Device_LocationInfo, which is a translated sentence.
+_PCI_BUS_KEY = "DEVPKEY_Device_BusNumber"
+_PCI_ADDRESS_KEY = "DEVPKEY_Device_Address"
+_PCI_LOCATION_QUERY = (
+    "Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\\*' } | "
+    f"Get-PnpDeviceProperty -KeyName {_PCI_BUS_KEY},{_PCI_ADDRESS_KEY} | "
+    "Select-Object InstanceId,KeyName,Data | ConvertTo-Json"
+)
+
 
 @dataclass(frozen=True)
 class CimQueryResult:
@@ -306,6 +317,49 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             pnp_id or None,
         )
 
+    @staticmethod
+    def _pci_slot(bus: Any, address: Any) -> Optional[str]:
+        """Format a Windows bus number and PCI address as ``0000:BB:DD.F``, or None.
+
+        For PCI, DEVPKEY_Device_Address is ``(device << 16) | function``.
+        """
+        # bool is an int subclass; a JSON true/false is not a bus number.
+        if type(bus) is not int or type(address) is not int or bus < 0 or address < 0:
+            return None
+        device = address >> 16
+        function = address & 0xFFFF
+        if bus > 255 or device > 31 or function > 7:
+            return None
+        return f"0000:{bus:02x}:{device:02x}.{function:x}"
+
+    @classmethod
+    def _pci_slots(cls, result: CimQueryResult) -> Dict[str, str]:
+        """Map upper-cased PCI instance ids to slots; devices lacking a usable value are left out."""
+        if not result.is_complete:
+            return {}
+        values: Dict[str, Dict[str, Any]] = {}
+        for row in result.rows:
+            instance_id = row.get("InstanceId")
+            key = row.get("KeyName")
+            if not isinstance(instance_id, str) or not instance_id.strip() or key not in (_PCI_BUS_KEY, _PCI_ADDRESS_KEY):
+                continue
+            props = values.setdefault(instance_id.strip().upper(), {})
+            data = row.get("Data")
+            # Conflicting duplicate values for one key leave that device without a slot.
+            props[key] = data if key not in props or props[key] == data else None
+        slots: Dict[str, str] = {}
+        for instance_id, props in values.items():
+            slot = cls._pci_slot(props.get(_PCI_BUS_KEY), props.get(_PCI_ADDRESS_KEY))
+            if slot is not None:
+                slots[instance_id] = slot
+        return slots
+
+    @staticmethod
+    def _with_pci_slot(pci: PciDevice, pnp_id: str, slots: Dict[str, str]) -> PciDevice:
+        """Set ``pci_slot`` from the slot map when ``pnp_id`` names a located PCI device."""
+        pci.pci_slot = slots.get(pnp_id.strip().upper())
+        return pci
+
     def probe(self) -> HardwareSnapshot:
         """Probe Windows hardware returning a HardwareSnapshot."""
         # 1. Computer System (Manufacturer, Model)
@@ -364,6 +418,15 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     generation=gen,
                 )
 
+        # PCI locations. Optional evidence: a failure leaves every pci_slot None
+        # and is recorded in query_status only, never in inventory_status.
+        pci_location_res = self._query_cim(
+            _PCI_LOCATION_QUERY,
+            required_fields=["InstanceId", "KeyName"],
+            allow_empty=False,
+        )
+        pci_slots = self._pci_slots(pci_location_res)
+
         # 4. PnP Video / Graphics
         video_res = self._query_cim(
             "Get-CimInstance Win32_VideoController | Select-Object Name,PNPDeviceID | ConvertTo-Json",
@@ -384,11 +447,11 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 ven_id = ven_match.group(1).lower()
                 dev_id = dev_match.group(1).lower()
                 subsys_match = re.search(r"SUBSYS_([0-9a-fA-F]{8})", pnp_id)
-                pci = PciDevice(
+                pci = self._with_pci_slot(PciDevice(
                     vendor_id=ven_id, device_id=dev_id, device_name=v_name,
                     subsystem_device_id=subsys_match.group(1)[:4].lower() if subsys_match else None,
                     subsystem_vendor_id=subsys_match.group(1)[4:].lower() if subsys_match else None,
-                )
+                ), pnp_id, pci_slots)
 
                 if ven_id == "8086":
                     igpu = GpuInfo(name=v_name or "Intel UHD Graphics 620", pci=pci, is_igpu=True)
@@ -416,7 +479,7 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 pnp = str(row.get("PNPDeviceID") or "")
                 dev_class = normalize_dmi_string(row.get("Class")) or ""
                 ven, dev, subven, subdev, _ = self._pnp_ids(pnp)
-                pnp_pci = PciDevice(vendor_id=ven, device_id=dev, subsystem_vendor_id=subven, subsystem_device_id=subdev, device_name=name) if ven and dev and "USB" not in pnp.upper() else None
+                pnp_pci = self._with_pci_slot(PciDevice(vendor_id=ven, device_id=dev, subsystem_vendor_id=subven, subsystem_device_id=subdev, device_name=name), pnp, pci_slots) if ven and dev and "USB" not in pnp.upper() else None
                 usb = UsbDevice(vendor_id=ven, product_id=dev, product_name=name) if ven and dev and "USB" in pnp.upper() else None
                 service = normalize_dmi_string(row.get("Service")) or ""
                 lower = f"{name} {dev_class} {service}".lower()
@@ -582,6 +645,7 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     "video": video_res.to_dict(),
                     "pnp": pnp_res.to_dict(),
                     "storage": disk_res.to_dict(),
+                    "pci_location": pci_location_res.to_dict(),
                 },
             },
         )

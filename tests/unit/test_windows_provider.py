@@ -3,6 +3,8 @@
 import json
 from typing import Callable, Optional
 
+import pytest
+
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.configuration.campaign_match import match_campaign
 from macloader.configuration.observations import snapshot_observations
@@ -808,3 +810,152 @@ def test_general_cim_parser_remains_strict_for_required_fields() -> None:
     assert result.parse_success is False
     assert result.rows == []
     assert result.error_message == "Row missing required fields: ['Model']"
+
+
+# PCI slot from DEVPKEY_Device_BusNumber / DEVPKEY_Device_Address (P1.6).
+# Instance suffixes are invented test values.
+_XHCI_INSTANCE = r"PCI\VEN_8086&DEV_9D2F&SUBSYS_225817AA&REV_21\3&TEST&0&A0"
+_IGPU_INSTANCE = r"PCI\VEN_8086&DEV_5917&SUBSYS_225C17AA&REV_07\3&11583659&0&10"  # baseline video row
+_I219_INSTANCE = r"PCI\VEN_8086&DEV_15D7&SUBSYS_225C17AA&REV_21\3&TEST&0&FE"
+
+_SLOT_PNP_ROWS = [
+    {"Name": "Intel(R) USB 3.0 eXtensible Host Controller - 1.0 (Microsoft)", "PNPDeviceID": _XHCI_INSTANCE, "Class": "USB", "Service": "USBXHCI"},
+    {"Name": "Intel(R) Ethernet Connection (4) I219-V", "PNPDeviceID": _I219_INSTANCE, "Class": "Net"},
+    {"Name": "Intel(R) Dual Band Wireless-AC 8265", "PNPDeviceID": r"PCI\VEN_8086&DEV_24FD&SUBSYS_00108086&REV_78\4&TEST&0&00E4", "Class": "Net"},
+    {"Name": "Realtek High Definition Audio", "PNPDeviceID": r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_17AA2258\4&TEST&0&0001", "Class": "MEDIA"},
+    {"Name": "Intel(R) Wireless Bluetooth(R)", "PNPDeviceID": r"USB\VID_8087&PID_0A2B\5&TEST&0&7", "Class": "Bluetooth"},
+    {"Name": "Standard PS/2 Keyboard", "PNPDeviceID": r"ACPI\PNP0303\4&TEST&0", "Class": "Keyboard"},
+    {"Name": "Synaptics Pointing Device", "PNPDeviceID": r"ACPI\LEN0071\4&TEST&0", "Class": "Mouse"},
+]
+
+_SLOT_ROWS = [
+    {"InstanceId": _XHCI_INSTANCE, "KeyName": "DEVPKEY_Device_BusNumber", "Data": 0},
+    {"InstanceId": _XHCI_INSTANCE, "KeyName": "DEVPKEY_Device_Address", "Data": 0x00140000},
+    # Lower-case instance id: matching is case-insensitive.
+    {"InstanceId": _IGPU_INSTANCE.lower(), "KeyName": "DEVPKEY_Device_BusNumber", "Data": 0},
+    {"InstanceId": _IGPU_INSTANCE.lower(), "KeyName": "DEVPKEY_Device_Address", "Data": 0x00020000},
+    # I219 lacks its address value: no slot.
+    {"InstanceId": _I219_INSTANCE, "KeyName": "DEVPKEY_Device_BusNumber", "Data": 0},
+    {"InstanceId": _I219_INSTANCE, "KeyName": "DEVPKEY_Device_Address", "Data": None},
+]
+
+
+def _slot_runner(slot_output: Optional[str], scripts: Optional[list[str]] = None) -> Callable[[str], Optional[str]]:
+    def runner(script: str) -> Optional[str]:
+        if scripts is not None:
+            scripts.append(script)
+        if "Get-PnpDeviceProperty" in script:
+            return slot_output
+        if "Win32_PnPEntity" in script:
+            return json.dumps(_SLOT_PNP_ROWS)
+        return _valid_baseline_windows_runner(script)
+
+    return runner
+
+
+@pytest.mark.parametrize(
+    ("bus", "address", "expected"),
+    [
+        (0, 0x00140000, "0000:00:14.0"),
+        (0, 0x001F0003, "0000:00:1f.3"),
+        (2, 0, "0000:02:00.0"),
+        (0x3D, 0, "0000:3d:00.0"),
+        (255, 0x001F0007, "0000:ff:1f.7"),
+    ],
+)
+def test_pci_slot_formats_bus_and_address(bus: int, address: int, expected: str) -> None:
+    assert WindowsHardwareProvider._pci_slot(bus, address) == expected
+
+
+@pytest.mark.parametrize(
+    ("bus", "address"),
+    [
+        (0, None),  # missing address
+        (None, 0x00140000),  # missing bus
+        (0, 0x00200000),  # device 32
+        (0, 0x00000008),  # function 8
+        (256, 0),  # bus 256
+        (-1, 0),
+        (0, -1),
+        ("0", 0x00140000),  # not an integer
+        (0, 1310720.0),  # float, not an integer
+        (False, 0x00140000),  # bool is not a bus number
+    ],
+)
+def test_pci_slot_refuses_missing_or_out_of_range_values(bus: object, address: object) -> None:
+    assert WindowsHardwareProvider._pci_slot(bus, address) is None
+
+
+def test_pci_location_query_sets_usb_controller_and_igpu_slots(db: Database) -> None:
+    scripts: list[str] = []
+    snapshot = WindowsHardwareProvider(command_runner=_slot_runner(json.dumps(_SLOT_ROWS), scripts)).probe()
+
+    assert snapshot.usb_controllers[0].canonical_id == "8086:9d2f"
+    assert snapshot.usb_controllers[0].pci_slot == "0000:00:14.0"
+    assert snapshot.igpu is not None and snapshot.igpu.pci.pci_slot == "0000:00:02.0"
+    # A device lacking either value, or with no rows at all, keeps pci_slot None.
+    assert snapshot.ethernet[0].pci is not None and snapshot.ethernet[0].pci.pci_slot is None
+    assert snapshot.wifi[0].pci is not None and snapshot.wifi[0].pci.pci_slot is None
+    assert snapshot.to_dict()["usb_controllers"][0]["pci_slot"] == "0000:00:14.0"
+
+    status = snapshot.raw_evidence["query_status"]["pci_location"]
+    assert status["is_complete"] is True and status["row_count"] == len(_SLOT_ROWS)
+    slot_script = next(script for script in scripts if "Get-PnpDeviceProperty" in script)
+    assert "Get-PnpDevice -PresentOnly" in slot_script
+    assert "'PCI\\*'" in slot_script
+    assert "DEVPKEY_Device_BusNumber,DEVPKEY_Device_Address" in slot_script
+    assert "LocationInfo" not in slot_script
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert report.can_generate_build_plan is True
+
+
+def test_failed_pci_location_query_leaves_slots_none_and_completeness_unchanged(db: Database) -> None:
+    located = WindowsHardwareProvider(command_runner=_slot_runner(json.dumps(_SLOT_ROWS))).probe()
+    failed = WindowsHardwareProvider(command_runner=_slot_runner(None)).probe()
+
+    assert failed.usb_controllers[0].pci_slot is None
+    assert failed.igpu is not None and failed.igpu.pci.pci_slot is None
+    assert all(n.pci is None or n.pci.pci_slot is None for n in failed.ethernet + failed.wifi)
+
+    status = failed.raw_evidence["query_status"]["pci_location"]
+    assert status["execution_success"] is False
+    assert status["is_complete"] is False
+    assert status["error_message"] == "Query execution failed or timed out"
+
+    assert failed.raw_evidence["inventory_status"] == located.raw_evidence["inventory_status"]
+    assert all(failed.raw_evidence["inventory_status"].values())
+    engine = CompatibilityEngine(db=db)
+    located_report = engine.evaluate(located, target_macos="sequoia")
+    failed_report = engine.evaluate(failed, target_macos="sequoia")
+    assert failed_report.overall_state == located_report.overall_state
+    assert failed_report.can_generate_build_plan is True
+    assert [r.component_id for r in failed_report.component_results] == [r.component_id for r in located_report.component_results]
+
+
+@pytest.mark.parametrize("output", ["", "not json", json.dumps([{"KeyName": "DEVPKEY_Device_Address", "Data": 0}])])
+def test_unanswered_or_malformed_pci_location_query_is_recorded_as_failure(output: str) -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_slot_runner(output)).probe()
+
+    assert snapshot.usb_controllers[0].pci_slot is None
+    status = snapshot.raw_evidence["query_status"]["pci_location"]
+    assert status["is_complete"] is False
+    assert status["error_message"]
+    assert all(snapshot.raw_evidence["inventory_status"].values())
+
+
+def test_baseline_runner_without_pci_location_answer_keeps_inventory_complete() -> None:
+    # Existing runners return "" for scripts they do not recognise; that is the failure path.
+    snapshot = WindowsHardwareProvider(command_runner=_valid_baseline_windows_runner).probe()
+
+    assert snapshot.raw_evidence["query_status"]["pci_location"]["is_complete"] is False
+    assert all(snapshot.raw_evidence["inventory_status"].values())
+    assert snapshot.igpu is not None and snapshot.igpu.pci.pci_slot is None
+
+
+def test_conflicting_duplicate_pci_location_rows_leave_slot_none() -> None:
+    rows = _SLOT_ROWS + [{"InstanceId": _XHCI_INSTANCE, "KeyName": "DEVPKEY_Device_Address", "Data": 0x00150000}]
+    snapshot = WindowsHardwareProvider(command_runner=_slot_runner(json.dumps(rows))).probe()
+
+    assert snapshot.usb_controllers[0].pci_slot is None
+    assert snapshot.igpu is not None and snapshot.igpu.pci.pci_slot == "0000:00:02.0"
