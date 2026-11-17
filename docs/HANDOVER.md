@@ -87,3 +87,29 @@ When you stop, the owner asks the reviewing agent to check your work, commit by 
 ## 6. Hand-back log
 
 _The next agent appends its summary here._
+
+### 2026-11-17 implementation hand-back
+
+Local `main` has one commit per chunk in section 2, with a matching `plan/<chunk-id>` branch and Result entry. The work started at handover commit `4726fc5`. The commits are ready for owner review before push.
+
+| Chunk | Commit | Outcome |
+|---|---|---|
+| P2.7 | `bcd72df` | Waited for Textual button actions and the Retry worker. Before the change Retry failed once in 20 runs and Apply target passed 20 of 20. Both passed 30 consecutive runs after the change. |
+| P3.1 | `c77b993` | Filtered Windows capture to DSDT and SSDT, then validated the set regardless of the tool's exit codes. |
+| P3.3 | `3edb7e0` | Stopped. Recording the PNLF omission in the EFI manifest needs files outside the chunk. |
+| P3.4a | `337a4ea` | Skipped. PLUG needs the CPU path from P3.3. |
+| P3.4b | `5ed6491` | Added USBX power properties, the zero-function `_DSM` response and Darwin-only status under the system bus. |
+| P3.4c | `9d5bd77` | Updated the PNLF body with the reviewed Kaby Lake UID and Darwin-only status. |
+| P3.4d | `5daf7c8` | Skipped. EC emission depends on the EC path from P3.3. Recording native EC also requires a manifest change. |
+| P3.5 | `86724d3` | Stopped. Import already checks the normalized snapshot BIOS through campaign matching. Intermediate cleanup still needs work. |
+| P4.1 | `e81e725` | Packaged OpenHfsPlus, ordered the driver entries and checked required driver files and config entries. |
+| P4.3 | `68a1b51` | Stopped. The handover requires a profile revision bump, but the profile and loader have no revision field. |
+| P4.4 | `e652302` | Ordered parent bundles before plug-ins, set the Bluetooth load order and added the Lilu dependency. |
+| P4.5 | `44cf1c1` | Derived executable presence from extraction and checked kext plist, executable and ACPI paths during structural validation. |
+| P4.6 | `plan/P4.6` | Stopped. Confirmed the graphics and stale-data findings. The same profile revision mismatch blocks the changes. |
+
+The final full suite had **765 passed, 16 skipped, 1 xfailed and 0 failed**. Mypy passed for 88 source files. The expected failure is the strict USB-keyboard resume case from P2.2b. P2.7 also passed two consecutive full suites at its own checkpoint. The data-loader and reference-campaign tests passed after each catalog edit. `git diff --check` passed for each commit.
+
+P3.4b and P3.4c could proceed independently because their table bodies use the system bus and require no device path from P3.3. The PNLF UID is documented in the OpenCore sample referenced by WhateverGreen. P4.1 and P4.5 also updated the synthetic build path so it meets the new driver and kext structural checks. Direct schema-generator calls can retain their previous defaults when no extracted bundle information is supplied.
+
+The plan needs to resolve whether the P3.3 and P3.4d omission notes belong in the ACPI qualification report or the EFI manifest. P3.5 should account for the existing BIOS gate when scoping intermediate cleanup. P4.3 and P4.6 need an explicit profile revision migration or a campaign-only revision rule. P3.2, P4.2, Phase 5 and later, and the owner steps remain deferred.

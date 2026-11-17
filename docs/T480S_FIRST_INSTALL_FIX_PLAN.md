@@ -28,10 +28,12 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P4.3 profile kext set | Stopped | The reviewed profile has no revision to bump |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
 | P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
-| P4.6 graphics identity and profile data | **Next chunk** | Phase 4 |
+| P4.6 graphics identity and profile data | Stopped | The reviewed profile has no revision to bump |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
+
+**Hand-back checkpoint:** 765 passed, 16 skipped, 1 xfailed, 0 failed. Mypy passed for all 88 source files. The authorized work list has been reviewed in order and is ready for owner review. See section 6 of [HANDOVER.md](HANDOVER.md) for blockers.
 
 **Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe).
 
@@ -432,6 +434,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 ### P4.6 Graphics identity check and stale profile data [R]
 - **Change:** before generation, require the captured iGPU PCI ID to be `8086:5917` or `8086:5916` (the IDs the `device-id` spoof `16590000` is valid for); otherwise raise `BuildPlanError`. Remove `HS06` from `usb.routes` in `p4-sequoia.yaml:24` (it is excluded in `evidence/t480s.yaml:28`). Reword `macloader/database/data/macos/sequoia.yaml:8` to "Intel Wi-Fi uses itlwm on Sequoia (not physically verified)".
 - **Tests:** iGPU `8086:3ea0` → build refused.
+- **Result** (`plan/P4.6`): Stopped before editing code. Confirmed the EFI builder has no reviewed iGPU PCI allow-list, the profile still includes the USB route excluded by the evidence policy, and the Sequoia note mentions both Wi-Fi drivers while the resolver selects itlwm. As in P4.3, the required profile revision bump has no existing field in the YAML or its strict loader. The chunk needs an explicit versioning decision before changing the profile. No implementation tests were run.
 
 ---
 
