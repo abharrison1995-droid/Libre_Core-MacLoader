@@ -408,14 +408,19 @@ def test_toolchain_catalog_reports_missing_required_pins() -> None:
         _tool_record({}, "sample_plist")
 
 
-def test_toolchain_root_and_version_checks_reject_untrusted_state(tmp_path: Path) -> None:
+def test_toolchain_root_check_rejects_symlinked_root(tmp_path: Path) -> None:
     loader = _synthetic_loader(tmp_path)
     linked_root = tmp_path / "linked-toolchain"
-    linked_root.symlink_to(loader.tool_root, target_is_directory=True)
+    try:
+        linked_root.symlink_to(loader.tool_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
     loader.tool_root = linked_root
     with pytest.raises(ToolchainTrustError, match="symlink boundary"):
         loader.select()
 
+
+def test_toolchain_version_check_rejects_wrong_reported_version(tmp_path: Path) -> None:
     version_root = tmp_path / "version"
     version_root.mkdir()
     loader = _synthetic_loader(version_root)

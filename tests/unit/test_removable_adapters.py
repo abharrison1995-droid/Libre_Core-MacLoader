@@ -417,8 +417,11 @@ def test_linux_discovery_uses_stable_by_id_and_rejects_system_internal_and_mount
     usb_node.touch()
     by_id = tmp_path / "by-id"
     by_id.mkdir()
-    (by_id / "wwn-0xINTERNAL001").symlink_to(internal_node)
-    (by_id / "usb-MAKER_MODEL_SERIAL001-0-0").symlink_to(usb_node)
+    try:
+        (by_id / "wwn-0xINTERNAL001").symlink_to(internal_node)
+        (by_id / "usb-MAKER_MODEL_SERIAL001-0-0").symlink_to(usb_node)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable on this host")
     payload = {"blockdevices": [
         {
             "name": "sda", "path": str(internal_node), "type": "disk", "size": 500_000_000,

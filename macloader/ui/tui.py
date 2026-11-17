@@ -207,7 +207,8 @@ class WorkflowApp(App[None]):
                 worker.cancel()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        actions: dict[str, Callable[[], None]] = {
+        # Values return None for plain handlers or a Worker for @work handlers.
+        actions: dict[str, Callable[[], object]] = {
             "apply-target": self._apply_target,
             "set-option": self._set_option,
             "acknowledge": self._acknowledge,
