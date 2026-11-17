@@ -1,7 +1,7 @@
 """Unit tests for WindowsHardwareProvider using mock PowerShell command runner."""
 
 import json
-from typing import Optional
+from typing import Callable, Optional
 
 from macloader.compatibility.engine import CompatibilityEngine
 from macloader.configuration.campaign_match import match_campaign
@@ -466,6 +466,79 @@ def test_pnp_inventory_rejects_rows_without_any_usable_identity() -> None:
     assert filtered.parse_success is False
     assert filtered.rows == []
     assert filtered.error_message == "No PnP rows contain a usable PNPDeviceID"
+
+
+# Software network / Bluetooth endpoints that Windows lists in Win32_PnPEntity
+# without any PCI or USB identity. Instance suffixes are invented test values.
+_SOFTWARE_NETWORK_ROWS = [
+    {"Name": "WAN Miniport (IP)", "PNPDeviceID": r"SWD\MSRRAS\MS_NDISWANIP", "Class": "Net"},
+    {"Name": "Microsoft Wi-Fi Direct Virtual Adapter", "PNPDeviceID": r"{5D624F94-TEST}\VWIFIMP_WFD\0&TEST&0001", "Class": "Net"},
+    {"Name": "Bluetooth Device (RFCOMM Protocol TDI)", "PNPDeviceID": r"BTH\MS_RFCOMM\7&TEST&0&0", "Class": "Bluetooth"},
+    {"Name": "Bluetooth Device (Personal Area Network)", "PNPDeviceID": r"BTH\MS_BTHPAN\7&TEST&0&2", "Class": "Net"},
+]
+
+_HARDWARE_NETWORK_ROWS = [
+    {"Name": "Intel(R) Ethernet Connection (4) I219-V", "PNPDeviceID": r"PCI\VEN_8086&DEV_15D7&SUBSYS_225C17AA&REV_21\3&TEST&0&FE", "Class": "Net"},
+    {"Name": "Intel(R) Dual Band Wireless-AC 8265", "PNPDeviceID": r"PCI\VEN_8086&DEV_24FD&SUBSYS_00108086&REV_78\4&TEST&0&00E4", "Class": "Net"},
+    {"Name": "Intel(R) Wireless Bluetooth(R)", "PNPDeviceID": r"USB\VID_8087&PID_0A2B\5&TEST&0&7", "Class": "Bluetooth"},
+]
+
+
+def _runner_with_pnp_rows(pnp_rows: list[dict[str, str]]) -> Callable[[str], Optional[str]]:
+    def runner(script: str) -> Optional[str]:
+        if "Win32_PnPEntity" in script:
+            return json.dumps(pnp_rows)
+        return _valid_baseline_windows_runner(script)
+
+    return runner
+
+
+def test_software_network_and_bluetooth_rows_without_hardware_ids_are_ignored() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows(_SOFTWARE_NETWORK_ROWS)).probe()
+
+    assert snapshot.ethernet == []
+    assert snapshot.wifi == []
+    assert snapshot.bluetooth == []
+    # The PnP query itself succeeded, so the categories are confirmed empty, not unknown.
+    inventory = snapshot.raw_evidence["inventory_status"]
+    assert inventory["ethernet"] is True
+    assert inventory["wifi"] is True
+    assert inventory["bluetooth"] is True
+
+
+def test_real_network_and_bluetooth_hardware_is_kept_next_to_software_rows() -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_pnp_rows(_SOFTWARE_NETWORK_ROWS + _HARDWARE_NETWORK_ROWS)
+    ).probe()
+
+    assert [eth.pci.canonical_id for eth in snapshot.ethernet if eth.pci] == ["8086:15d7"]
+    assert len(snapshot.ethernet) == 1
+    assert [wifi.pci.canonical_id for wifi in snapshot.wifi if wifi.pci] == ["8086:24fd"]
+    assert len(snapshot.wifi) == 1
+    assert [bt.usb.canonical_id for bt in snapshot.bluetooth if bt.usb] == ["8087:0a2b"]
+    assert len(snapshot.bluetooth) == 1
+
+
+def test_software_network_rows_do_not_reach_engine_as_unknown_components(db: Database) -> None:
+    pnp_rows = (
+        _SOFTWARE_NETWORK_ROWS
+        + _HARDWARE_NETWORK_ROWS
+        + [
+            {"Name": "Realtek High Definition Audio", "PNPDeviceID": r"PCI\VEN_10EC&DEV_0257&SUBSYS_225C17AA", "Class": "MEDIA"},
+            {"Name": "Standard PS/2 Keyboard", "PNPDeviceID": r"ACPI\PNP0303\4&TEST&0", "Class": "Keyboard"},
+            {"Name": "Synaptics Pointing Device", "PNPDeviceID": r"ACPI\SYN1014\4&TEST&0", "Class": "Mouse"},
+        ]
+    )
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows(pnp_rows)).probe()
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+
+    network_results = [r for r in report.component_results if r.category in {"ethernet", "wifi", "bluetooth"}]
+    assert {r.category for r in network_results} == {"ethernet", "wifi", "bluetooth"}
+    assert len(network_results) == 3
+    unknown = [r.component_id for r in report.component_results if r.component_id.startswith("unknown-")]
+    assert unknown == []
+    assert report.can_generate_build_plan is True
 
 
 def test_general_cim_parser_remains_strict_for_required_fields() -> None:

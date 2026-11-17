@@ -392,10 +392,18 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     thunderbolt = ThunderboltInfo(present=True, controller_name=name, pci=pnp_pci)
                 if usb:
                     usb_devices.append(usb)
+                # Network and Bluetooth rows without a PCI or USB identity are
+                # software endpoints (WAN Miniports, virtual Wi-Fi Direct
+                # adapters, Bluetooth protocol drivers). They are not hardware
+                # and must not become unknown network components.
+                has_hw_id = pnp_pci is not None or usb is not None
                 if "bluetooth" in lower:
-                    bluetooth.append(NetworkInfo(name=name, kind="bluetooth", pci=pnp_pci, usb=usb))
+                    if has_hw_id:
+                        bluetooth.append(NetworkInfo(name=name, kind="bluetooth", pci=pnp_pci, usb=usb))
                 elif dev_class.lower() == "net" or any(token in lower for token in ("ethernet", "wireless", "wi-fi", "wifi")):
-                    if any(token in lower for token in ("wi-fi", "wifi", "wireless", "wlan")):
+                    if not has_hw_id:
+                        pass
+                    elif any(token in lower for token in ("wi-fi", "wifi", "wireless", "wlan")):
                         wifi.append(NetworkInfo(name=name, kind="wifi", pci=pnp_pci))
                     else:
                         ethernet.append(NetworkInfo(name=name, kind="ethernet", pci=pnp_pci))
