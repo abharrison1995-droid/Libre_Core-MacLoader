@@ -158,6 +158,19 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: P
         )
 
 
+def test_generated_usbx_has_darwin_power_properties() -> None:
+    source = AcpiProcessor._generated_sources("synthetic-bios")["SSDT-USBX-T480S"]
+    assert "Scope (\\_SB)" in source
+    assert "Device (USBX)" in source
+    assert "Method (_DSM, 4, NotSerialized)" in source
+    assert "Method (_STA, 0, NotSerialized)" in source
+    assert 'If (_OSI ("Darwin"))' in source
+    assert '"kUSBSleepPowerSupply", 0x13EC' in source
+    assert '"kUSBSleepPortCurrentLimit", 0x0834' in source
+    assert '"kUSBWakePowerSupply", 0x13EC' in source
+    assert '"kUSBWakePortCurrentLimit", 0x0834' in source
+
+
 def test_acpi_processor_rejects_missing_capture_and_untrusted_tool(tmp_path: Path) -> None:
     missing_tool = AcpiProcessor(tmp_path / "missing-iasl", "0" * 64, tmp_path / "work")
     with pytest.raises(BuildPlanError, match="missing or unsafe"):

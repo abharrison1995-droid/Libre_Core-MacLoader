@@ -19,6 +19,7 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
 | P3.3 generated SSDT resolution | Stopped | Recording the PNLF omission in the build manifest requires out-of-scope files |
 | P3.4a PLUG | Skipped | Requires the CPU path from P3.3 |
+| P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | Phases 4-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -330,6 +331,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Also update:** the expected output file list wherever it is asserted (`tests/unit/test_p4_acpi.py:143`, `macloader/build/efi.py:363-369`).
 - **Tests:** generated source contains `_DSM` and `plugin-type`; USBX contains the four property names; EC table is emitted only when the firmware name is not `EC`. Real compilation is covered by P11.2.
 - **Result** (`plan/P3.4a`): Skipped. PLUG still uses a fixed processor path because P3.3 stopped. The specified Darwin-guarded replacement takes the resolved `cpu0` path. No code changed or implementation tests run.
+- **Result** (`plan/P3.4b`): USBX now defines the four power properties under the system bus with Darwin-only device status. The zero-function `_DSM` query reports function support. This scope needs no resolved device path. The output filename is unchanged and the EFI builder already uses the processor's output list. Source tests covered the scope, methods and property values. Targeted tests 5 passed, 1 skipped. Full suite 756 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 
 ### P3.5 Bind captured tables to the live machine and clean intermediates [R]
 - **Problem:** `macloader/workflow/service.py:126-134` takes `bios_binding` from the campaign profile and never compares against the current probe; decompiled DSL persists under the work root (`acpi.py:128-135`).

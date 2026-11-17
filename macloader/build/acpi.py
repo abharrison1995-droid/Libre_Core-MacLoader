@@ -459,13 +459,33 @@ class AcpiProcessor:
 {{
     // Power properties only. This is not a complete USB port map.
     // USB-C logical correlation remains unresolved for BIOS {bios_binding}.
-    External (\\_SB.PCI0.XHC, DeviceObj)
-    Scope (\\_SB.PCI0.XHC)
+    Scope (\\_SB)
     {{
         Device (USBX)
         {{
             Name (_ADR, Zero)
-            Name (_STA, 0x0B)
+            Method (_DSM, 4, NotSerialized)
+            {{
+                If (Arg2 == Zero)
+                {{
+                    Return (Buffer (One) {{ 0x03 }})
+                }}
+                Return (Package (0x08)
+                {{
+                    "kUSBSleepPowerSupply", 0x13EC,
+                    "kUSBSleepPortCurrentLimit", 0x0834,
+                    "kUSBWakePowerSupply", 0x13EC,
+                    "kUSBWakePortCurrentLimit", 0x0834
+                }})
+            }}
+            Method (_STA, 0, NotSerialized)
+            {{
+                If (_OSI ("Darwin"))
+                {{
+                    Return (0x0F)
+                }}
+                Return (Zero)
+            }}
         }}
     }}
 }}
