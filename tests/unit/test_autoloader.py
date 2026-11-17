@@ -174,7 +174,6 @@ def test_resume_keeps_artifacts_with_identical_snapshot(tmp_path: Path) -> None:
     _assert_resume_keeps_artifacts(tmp_path, candidate())
 
 
-@pytest.mark.xfail(strict=True, reason="P2.2: resume drops artifacts when hardware_snapshot_digest (full snapshot, usb_devices) changes; see plan")
 def test_resume_keeps_artifacts_with_extra_usb_device(tmp_path: Path) -> None:
     from macloader.domain.hardware import UsbDevice
     changed = candidate()
@@ -182,7 +181,7 @@ def test_resume_keeps_artifacts_with_extra_usb_device(tmp_path: Path) -> None:
     _assert_resume_keeps_artifacts(tmp_path, changed)
 
 
-@pytest.mark.xfail(strict=True, reason="P2.2: resume drops artifacts when hardware_snapshot_digest and the input.topology observation/confirmation change; see plan")
+@pytest.mark.xfail(strict=True, reason="external USB input devices change input.topology; not fixed before first install")
 def test_resume_keeps_artifacts_with_extra_usb_keyboard(tmp_path: Path) -> None:
     from macloader.domain.hardware import InputDeviceInfo
     changed = candidate()

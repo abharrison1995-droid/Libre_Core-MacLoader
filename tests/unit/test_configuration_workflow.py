@@ -142,6 +142,31 @@ def test_service_acknowledgement_is_bound_to_exact_policy_warning(t480s_baseline
     assert any(issue.code == "ACKNOWLEDGEMENT_REQUIRED" and issue.field_path.endswith("profile.smbios") for issue in wrong_evaluation.issues)
 
 
+def test_snapshot_digest_sites_agree(t480s_baseline_fixture: Path) -> None:
+    from macloader.configuration.observations import reconcile_configuration, stable_snapshot_digest
+    snapshot = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    service = ConfigurationService()
+    draft = service.new_draft(snapshot)
+    reconciled = reconcile_configuration(draft, snapshot)
+    assert draft.hardware_snapshot_digest == reconciled.hardware_snapshot_digest
+    assert ConfigurationService._snapshot_digest(snapshot) == stable_snapshot_digest(snapshot) == reconciled.hardware_snapshot_digest
+    assert not any(issue.code == "SNAPSHOT_STALE" for issue in service.evaluate(reconciled, snapshot).issues)
+
+
+def test_snapshot_digest_ignores_usb_devices_but_not_wifi(t480s_baseline_fixture: Path) -> None:
+    from macloader.configuration.observations import stable_snapshot_digest
+    from macloader.domain.hardware import UsbDevice
+    snapshot = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    baseline = stable_snapshot_digest(snapshot)
+    with_stick = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    with_stick.usb_devices.append(UsbDevice(vendor_id="1234", product_id="5678", bus="001", device_num="009", product_name="Example Flash"))
+    assert stable_snapshot_digest(with_stick) == baseline
+    other_wifi = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    assert other_wifi.wifi and other_wifi.wifi[0].pci is not None
+    other_wifi.wifi[0].pci.device_id = "abcd"
+    assert stable_snapshot_digest(other_wifi) != baseline
+
+
 def test_service_rejects_stale_target_and_unknown_option(t480s_baseline_fixture: Path) -> None:
     snapshot = FixtureHardwareProvider(t480s_baseline_fixture).probe()
     service = ConfigurationService()

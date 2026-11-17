@@ -64,6 +64,19 @@ def machine_facts(snapshot: HardwareSnapshot) -> dict[str, object]:
     return {key: facts[key] for key in MACHINE_FACT_KEYS}
 
 
+def stable_snapshot_digest(snapshot: HardwareSnapshot) -> str:
+    """Content digest of a snapshot that binds configurations and build plans.
+
+    ``snapshot_id`` and ``timestamp`` are run metadata. ``usb_devices`` is left
+    out because attaching a removable stick (for example the installer stick)
+    must not invalidate saved work; nothing outside detection consumes it.
+    """
+    data = snapshot.to_dict()
+    for key in ("snapshot_id", "timestamp", "usb_devices"):
+        data.pop(key, None)
+    return canonical_json_digest(data)
+
+
 def scope_digest(snapshot: HardwareSnapshot, scopes: tuple[str, ...]) -> str:
     facts = hardware_facts(snapshot)
     return canonical_json_digest({key: value for key, value in facts.items() if key.split(".")[0] in scopes})
@@ -135,12 +148,9 @@ def reconcile_configuration(draft: UserConfiguration, snapshot: HardwareSnapshot
         elif changed:
             stale = True  # Older metadata has no proven invalidation scope.
         evidence.append(replace(record, completeness=EvidenceCompleteness.STALE) if stale else record)
-    data = snapshot.to_dict()
-    data.pop("snapshot_id", None)
-    data.pop("timestamp", None)
     return replace(
         draft, hardware_snapshot_id=snapshot.snapshot_id,
-        hardware_snapshot_digest=canonical_json_digest(data),
+        hardware_snapshot_digest=stable_snapshot_digest(snapshot),
         observations=result.observations, confirmations=result.confirmations + tuple(
             c for c in draft.confirmations if c.action == "human-confirmed" and c.field_path == "panel.touch"
             and c.input_scope == ("machine", "bios", "panel") and c.input_digest == scope_digest(snapshot, c.input_scope)

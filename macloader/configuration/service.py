@@ -279,10 +279,8 @@ class ConfigurationService:
 
     @staticmethod
     def _snapshot_digest(snapshot: HardwareSnapshot) -> str:
-        data = snapshot.to_dict()
-        data.pop("snapshot_id", None)
-        data.pop("timestamp", None)
-        return canonical_json_digest(data)
+        from macloader.configuration.observations import stable_snapshot_digest
+        return stable_snapshot_digest(snapshot)
 
     @staticmethod
     def _acknowledgement_binding_digest(draft: UserConfiguration) -> str:
