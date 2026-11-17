@@ -174,3 +174,41 @@ def test_late_selection_message_after_unmount_is_harmless(tmp_path: Path) -> Non
             await app.query_one("#choice-one").remove()
             app.on_select_changed(Select.Changed(selector, "USB A"))
     asyncio.run(empty_screen())
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("HARDWARE_UNKNOWN", 1), ("HARDWARE_MISMATCH", 1), ("CAMPAIGN_NOT_FOUND", 1), ("SESSION_BINDING_AMBIGUOUS", 1),
+    ("AUTOMATIC_ACTION_FAILED", 0), ("CONFIGURATION_BLOCKED", 0),
+])
+def test_retry_reprobes_only_for_hardware_and_binding_blockers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, expected: int) -> None:
+    async def exercise() -> None:
+        service = AutoloaderService(root=tmp_path)
+        service.start(candidate(), private_material="test")
+        action = NextAction(Stage.HARDWARE, ActionKind.BLOCKED, "Synthetic blocker", code)
+        monkeypatch.setattr(service, "next_action", lambda: action)
+        monkeypatch.setattr(service, "advance_until_blocked", lambda **kwargs: action)
+        reprobes: list[bool] = []
+        starts: list[bool] = []
+
+        def reprobe(*_args: object) -> NextAction:
+            reprobes.append(True)
+            return action
+
+        def start(*_args: object, **_kwargs: object) -> NextAction:
+            starts.append(True)
+            return action
+
+        monkeypatch.setattr(service, "reprobe", reprobe)
+        monkeypatch.setattr(service, "start", start)
+        app = GuidedApp(service)
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert reprobes == []
+            await pilot.click("#retry-guided")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(reprobes) == expected
+            assert starts == []
+            assert not app._busy
+    asyncio.run(exercise())

@@ -277,3 +277,47 @@ def test_conflicting_writer_is_not_overwritten_after_failed_save(tmp_path: Path)
             writer_a._save_session()
         assert writer_a.session.revision == stale
     assert writer_a.store.load(writer_a.session.session_id) == stored_b
+
+
+def test_reprobe_clears_hardware_unknown_after_complete_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AutoloaderService(root=tmp_path)
+    assert service.start(replace(candidate(), wifi=[]), private_material="test").code == "HARDWARE_UNKNOWN"
+    assert service.session is not None
+    session_id = service.session.session_id
+    probes: list[bool] = []
+
+    def probe(**_kwargs: object) -> HardwareSnapshot:
+        probes.append(True)
+        return candidate()
+
+    monkeypatch.setattr(service.workflow.orchestrator, "probe_hardware", probe)
+    action = service.reprobe()
+    assert probes == [True]
+    assert action.code != "HARDWARE_UNKNOWN"
+    assert service.next_action().code != "HARDWARE_UNKNOWN"
+    # The private material given to start() is reused, so the same session resumes.
+    assert service.session is not None and service.session.session_id == session_id
+
+
+def test_reprobe_without_session_resolves_campaign_not_found(tmp_path: Path) -> None:
+    service = AutoloaderService(root=tmp_path)
+    assert service.start(replace(candidate(), machine_type="20L7"), private_material="test").code == "CAMPAIGN_NOT_FOUND"
+    assert service.session is None
+    assert service.reprobe(candidate()).stage == Stage.ACPI
+    assert service.session is not None
+    assert service.session.machine_binding == service.store.machine_binding("test")
+
+
+def test_reprobe_keeps_artifacts_when_only_usb_devices_changed(tmp_path: Path) -> None:
+    from macloader.domain.hardware import UsbDevice
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    session_id = service.session.session_id
+    for kind in ("tools", "efi", "recovery"):
+        service._record_artifact(kind, digest=f"synthetic-{kind}")
+    changed = candidate()
+    changed.usb_devices.append(UsbDevice(vendor_id="1234", product_id="5678", bus="001", device_num="009", product_name="Example Flash"))
+    service.reprobe(changed)
+    assert service.session is not None and service.session.session_id == session_id
+    assert {"tools", "efi", "recovery"} <= set(service.session.artifacts)

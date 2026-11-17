@@ -9,6 +9,9 @@ from textual.widgets import Button, Footer, Header, Select, Static
 from macloader.autoloader.models import ActionKind, Stage
 from macloader.autoloader.service import AutoloaderService
 
+# Blockers that only a fresh hardware probe can clear.
+REPROBE_CODES = frozenset({"HARDWARE_UNKNOWN", "HARDWARE_MISMATCH", "CAMPAIGN_NOT_FOUND", "SESSION_BINDING_AMBIGUOUS"})
+
 
 class GuidedApp(App[bool]):
     TITLE = "Libre_Core MacLoader — Guided preparation"
@@ -51,10 +54,13 @@ class GuidedApp(App[bool]):
         if not self._busy and not self._cancelled and self.service.next_action().code == "USB_WAITING":
             self._start_advance()
 
-    def _start_advance(self, choice: Optional[str] = None) -> None:
+    def _start_advance(self, choice: Optional[str] = None, reprobe: bool = False) -> None:
         self._cancelled = False
         self._busy = True
-        self._advance(choice)
+        if reprobe:
+            self._advance(choice, reprobe=True)
+        else:
+            self._advance(choice)
 
     @staticmethod
     def _stage_label(stage: Stage) -> str:
@@ -84,14 +90,16 @@ class GuidedApp(App[bool]):
         self.query_one("#open-engineering", Button).disabled = self._busy
 
     @work(thread=True, exclusive=True)
-    def _advance(self, choice: Optional[str] = None) -> None:
+    def _advance(self, choice: Optional[str] = None, reprobe: bool = False) -> None:
         self.call_from_thread(self._render_status)
         error = ""
         try:
             if choice is not None:
                 self.service.perform_choice(choice, cancel=lambda: self._cancelled)
             else:
-                if self.service.session is None:
+                if reprobe:
+                    self.service.reprobe()
+                elif self.service.session is None:
                     self.service.start()
                 self.service.advance_until_blocked(cancel=lambda: self._cancelled)
         except Exception:
@@ -150,8 +158,9 @@ class GuidedApp(App[bool]):
 
     def action_refresh(self) -> None:
         if not self._busy:
+            reprobe = self.service.next_action().code in REPROBE_CODES
             self.service._blocker = None
-            self._start_advance()
+            self._start_advance(reprobe=reprobe)
 
     def action_cancel(self) -> None:
         self._cancelled = True

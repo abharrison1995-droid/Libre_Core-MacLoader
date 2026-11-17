@@ -39,6 +39,7 @@ class AutoloaderService:
         self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery, Stage.MEDIA: self._prepare_media, Stage.FIRST_BOOT: self._prepare_first_boot}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
+        self._private_material: Optional[str] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
         from macloader.autoloader.media import GuidedMediaService
         self.media = GuidedMediaService()
@@ -70,6 +71,19 @@ class AutoloaderService:
 
     def start(self, snapshot: Optional[HardwareSnapshot] = None, *, private_material: Optional[str] = None) -> NextAction:
         """Probe before resuming; supplied snapshots/material are engineering seams."""
+        self._private_material = private_material
+        return self._probe_and_resume(snapshot)
+
+    def reprobe(self, snapshot: Optional[HardwareSnapshot] = None) -> NextAction:
+        """Probe again and reconcile, with or without a current session.
+
+        Reuses the private material ``start()`` was given; ``snapshot`` is the
+        same engineering seam ``start()`` offers.
+        """
+        return self._probe_and_resume(snapshot)
+
+    def _probe_and_resume(self, snapshot: Optional[HardwareSnapshot]) -> NextAction:
+        private_material = self._private_material
         raw = snapshot or self.workflow.orchestrator.probe_hardware()
         candidate = self.workflow.orchestrator.db.candidate_campaign(raw)
         self._blocker = None
