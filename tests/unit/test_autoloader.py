@@ -3,6 +3,8 @@ from dataclasses import replace
 import json
 from pathlib import Path
 
+import pytest
+
 from macloader.autoloader.models import ActionKind, Stage
 from macloader.autoloader.service import AutoloaderService
 from macloader.domain.hardware import HardwareSnapshot
@@ -154,6 +156,38 @@ def test_write_gate_refuses_changed_wifi_card(tmp_path: Path) -> None:
     assert changed.wifi[0].pci is not None
     changed.wifi[0].pci.device_id = "abcd"
     _assert_hardware_changed(tmp_path, changed)
+
+
+def _assert_resume_keeps_artifacts(tmp_path: Path, relaunch: HardwareSnapshot) -> None:
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None
+    for kind in ("tools", "efi", "recovery"):
+        service._record_artifact(kind, digest=f"synthetic-{kind}")
+    restarted = AutoloaderService(root=tmp_path)
+    restarted.start(relaunch, private_material="test")
+    assert restarted.session is not None and restarted.session.session_id == service.session.session_id
+    assert {"tools", "efi", "recovery"} <= set(restarted.session.artifacts)
+
+
+def test_resume_keeps_artifacts_with_identical_snapshot(tmp_path: Path) -> None:
+    _assert_resume_keeps_artifacts(tmp_path, candidate())
+
+
+@pytest.mark.xfail(strict=True, reason="P2.2: resume drops artifacts when hardware_snapshot_digest (full snapshot, usb_devices) changes; see plan")
+def test_resume_keeps_artifacts_with_extra_usb_device(tmp_path: Path) -> None:
+    from macloader.domain.hardware import UsbDevice
+    changed = candidate()
+    changed.usb_devices.append(UsbDevice(vendor_id="1234", product_id="5678", bus="001", device_num="009", product_name="Example Flash"))
+    _assert_resume_keeps_artifacts(tmp_path, changed)
+
+
+@pytest.mark.xfail(strict=True, reason="P2.2: resume drops artifacts when hardware_snapshot_digest and the input.topology observation/confirmation change; see plan")
+def test_resume_keeps_artifacts_with_extra_usb_keyboard(tmp_path: Path) -> None:
+    from macloader.domain.hardware import InputDeviceInfo
+    changed = candidate()
+    changed.input_devices.append(InputDeviceInfo(name="Example USB Keyboard", bus="usb", kind="keyboard", vendor_id="1234", product_id="0001"))
+    _assert_resume_keeps_artifacts(tmp_path, changed)
 
 
 def test_started_action_is_marked_interrupted_on_restart(tmp_path: Path) -> None:
