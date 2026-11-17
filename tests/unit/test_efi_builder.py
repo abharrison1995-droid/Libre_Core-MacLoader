@@ -133,8 +133,10 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
             for component in spec.subcomponents:
                 name = f"Release/{component}"
                 if component.endswith(".kext"):
-                    name += "/Contents/Info.plist"
-                zf.writestr(name, b"fixture")
+                    zf.writestr(f"{name}/Contents/Info.plist", b"fixture")
+                    zf.writestr(f"{name}/Contents/MacOS/{Path(component).stem}", b"fixture")
+                else:
+                    zf.writestr(name, b"fixture")
         catalog_artifact = spec.get_artifact(ArtifactVariant.RELEASE)
         assert catalog_artifact is not None
         catalog_artifact.asset_name = archive.name
@@ -162,6 +164,10 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     assert [entry["Path"] for entry in config["UEFI"]["Drivers"]] == [
         "OpenRuntime.efi", "OpenHfsPlus.efi", "ResetNvramEntry.efi",
     ]
+    assert any(
+        entry["BundlePath"] == "Lilu.kext" and entry["ExecutablePath"] == "Contents/MacOS/Lilu"
+        for entry in config["Kernel"]["Add"]
+    )
     assert (result.output_dir / "EFI/OC/Tools/OpenShell.efi").is_file()
     for dependency_id in ("opencore", "lilu", "virtualsmc"):
         expected_license = (db.data_dir / "licenses" / f"{dependency_id}.txt").read_text(encoding="utf-8")
@@ -182,6 +188,42 @@ def test_builder_extracts_selected_components_and_publishes_validated_tree(tmp_p
     mismatched_plan = BuildPlan("Lenovo ThinkPad T480s", "sequoia", "different-snapshot", CompatibilityState.EXPERIMENTAL, is_actionable=True, build_ready=True)
     with pytest.raises(BuildPlanError, match="different BuildPlan"):
         EfiBuilder(db=db).build(plan=mismatched_plan, dependencies=dep_set, artifact_paths=archives, output_dir=tmp_path / "mismatch", toolchain=toolchain, synthetic_test_mode=True)
+
+
+@pytest.mark.parametrize("case", ["codeless", "wrong-executable", "missing-plist", "missing-aml"])
+def test_structural_validation_checks_kext_and_acpi_files(tmp_path: Path, case: str) -> None:
+    root = tmp_path / "efi"
+    _minimal_tree(root)
+    bundle = root / "EFI/OC/Kexts/Synthetic.kext"
+    contents = bundle / "Contents"
+    contents.mkdir(parents=True)
+    if case != "missing-plist":
+        (contents / "Info.plist").write_bytes(plistlib.dumps({}))
+
+    entry = SchemaDrivenConfigGenerator._kernel_entry(bundle.name, has_executable=False)
+    assert entry["ExecutablePath"] == ""
+    plist_path = root / "EFI/OC/config.plist"
+    config = plistlib.loads(plist_path.read_bytes())
+    config["Kernel"]["Add"] = [entry]
+    if case == "wrong-executable":
+        (contents / "MacOS").mkdir()
+        (contents / "MacOS/Synthetic").write_bytes(b"fixture")
+        entry["ExecutablePath"] = "Contents/MacOS/WrongName"
+    if case == "missing-aml":
+        config["ACPI"] = {"Add": [{"Enabled": True, "Path": "Fixture.aml"}]}
+    plist_path.write_bytes(plistlib.dumps(config))
+
+    report = EfiBuilder().validate_tree(root)
+    if case == "codeless":
+        assert report.status == "STRUCTURAL_ONLY"
+    else:
+        expected = {
+            "wrong-executable": "Configured kext ExecutablePath for Synthetic.kext is missing: Contents/MacOS/WrongName",
+            "missing-plist": "Configured kext PlistPath for Synthetic.kext is missing: Contents/Info.plist",
+            "missing-aml": "Configured ACPI table is missing: Fixture.aml",
+        }
+        assert report.status == "INVALID"
+        assert expected[case] in report.errors
 
 
 def test_identity_validation_rejects_incomplete_or_extra_fields() -> None:

@@ -27,7 +27,8 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
 | P4.3 profile kext set | Stopped | The reviewed profile has no revision to bump |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
-| P4.5 structural validation | **Next chunk** | Phase 4 |
+| P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
+| P4.6 graphics identity and profile data | **Next chunk** | Phase 4 |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -426,6 +427,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Problem:** `macloader/build/efi.py:706-738` checks kext directories exist but not `Info.plist`, not the executable named by `ExecutablePath` (`config.py:167` hard-codes `Contents/MacOS/<name>`), and not `ACPI.Add` files.
 - **Change:** (1) in `_kernel_entry`, accept an `has_executable: bool` argument; set `ExecutablePath` to `""` when the extracted bundle has no `Contents/MacOS/<name>` file. Thread the flag from where bundles are extracted. (2) In `validate_tree`, for each `Kernel.Add` entry verify `PlistPath` exists and, when `ExecutablePath` is non-empty, that file exists; for each `ACPI.Add` entry verify the `.aml` exists; reject entries whose files are missing.
 - **Tests:** codeless bundle → empty `ExecutablePath` and validation passes; wrong executable name → validation fails; missing AML → validation fails. Update fixtures in `tests/unit/test_efi_builder.py:107-110` so normal kexts include a `Contents/MacOS/<name>` file.
+- **Result** (`plan/P4.5`): Confirmed that structural validation lacked the kext plist, executable and ACPI file checks. The builder now passes executable presence from the extracted bundles into config generation, including synthetic builds. Validation checks the configured paths within their component directories. Synthetic tests cover codeless bundles, missing plists and AML, and incorrect executable paths. Targeted tests 66 passed, 1 skipped. Full suite 765 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 
 ### P4.6 Graphics identity check and stale profile data [R]
 - **Change:** before generation, require the captured iGPU PCI ID to be `8086:5917` or `8086:5916` (the IDs the `device-id` spoof `16590000` is valid for); otherwise raise `BuildPlanError`. Remove `HS06` from `usb.routes` in `p4-sequoia.yaml:24` (it is excluded in `evidence/t480s.yaml:28`). Reword `macloader/database/data/macos/sequoia.yaml:8` to "Intel Wi-Fi uses itlwm on Sequoia (not physically verified)".

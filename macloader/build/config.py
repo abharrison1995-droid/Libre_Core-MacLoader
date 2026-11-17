@@ -159,12 +159,14 @@ class SchemaDrivenConfigGenerator:
         return deepcopy(schema)
 
     @staticmethod
-    def _kernel_entry(bundle_path: str) -> Dict[str, Any]:
+    def _kernel_entry(bundle_path: str, has_executable: Optional[bool] = None) -> Dict[str, Any]:
         leaf = bundle_path.rsplit("/", 1)[-1]
         executable = leaf.removesuffix(".kext")
+        if has_executable is None:
+            has_executable = leaf != "MacLoaderUSBMap.kext"
         return {
             "Arch": "Any", "BundlePath": bundle_path, "Comment": "P4 reviewed dependency",
-            "Enabled": True, "ExecutablePath": "" if leaf == "MacLoaderUSBMap.kext" else f"Contents/MacOS/{executable}",
+            "Enabled": True, "ExecutablePath": f"Contents/MacOS/{executable}" if has_executable else "",
             "MaxKernel": "", "MinKernel": "8.0.0", "PlistPath": "Contents/Info.plist",
         }
 
@@ -191,6 +193,14 @@ class SchemaDrivenConfigGenerator:
 
         return tuple(sorted(dict.fromkeys(kexts), key=order))
 
+    def _kernel_entries(
+        self, kexts: Iterable[str], executable_kexts: Optional[set[str]],
+    ) -> list[Dict[str, Any]]:
+        return [
+            self._kernel_entry(item, None if executable_kexts is None else item in executable_kexts)
+            for item in self._ordered_kexts(kexts)
+        ]
+
     @staticmethod
     def _ordered_drivers(drivers: Iterable[str]) -> list[str]:
         return sorted(set(drivers), key=lambda name: (name != "OpenRuntime.efi", name))
@@ -211,6 +221,7 @@ class SchemaDrivenConfigGenerator:
         acpi_digest: str,
         evidence_digests: Iterable[str],
         effective_options: Optional[Mapping[str, str]] = None,
+        executable_kexts: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         # The reviewed profile supplies the safe structural defaults; accepted
         # user selections are projected into this effective profile before any
@@ -237,7 +248,7 @@ class SchemaDrivenConfigGenerator:
         config["#WARNING - 3"] = "USB-C logical correlation is intentionally unresolved; do not treat this as a complete USB map."
         config["#WARNING - 4"] = "Experimental graphics/audio policy requires physical acceptance."
 
-        config["Kernel"]["Add"] = [self._kernel_entry(item) for item in self._ordered_kexts(kexts)]
+        config["Kernel"]["Add"] = self._kernel_entries(kexts, executable_kexts)
         config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in self._ordered_drivers(drivers)]
         config["ACPI"]["Add"] = [
             {"Comment": "P4 reviewed machine-bound ACPI source", "Enabled": True, "Path": item}
@@ -298,11 +309,12 @@ class SchemaDrivenConfigGenerator:
         identity: Mapping[str, str],
         kexts: Iterable[str],
         drivers: Iterable[str],
+        executable_kexts: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         """Build an unprofiled schema-shaped config for synthetic integration tests only."""
         config = self._load_schema()
         config["#WARNING - MacLoader"] = "Synthetic test config; not machine-qualified or install-ready."
-        config["Kernel"]["Add"] = [self._kernel_entry(item) for item in self._ordered_kexts(kexts)]
+        config["Kernel"]["Add"] = self._kernel_entries(kexts, executable_kexts)
         config["UEFI"]["Drivers"] = [self._driver_entry(item) for item in self._ordered_drivers(drivers)]
         config["ACPI"]["Add"] = []
         config["ACPI"]["Delete"] = []

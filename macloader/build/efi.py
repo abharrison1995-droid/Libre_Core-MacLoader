@@ -211,6 +211,7 @@ class EfiBuilder:
             licenses.mkdir()
 
             kexts: List[str] = []
+            executable_kexts: set[str] = set()
             drivers: List[str] = []
             license_digests: Dict[str, str] = {}
             total_build_bytes = 0
@@ -247,6 +248,9 @@ class EfiBuilder:
                     if normalized_component.endswith(".kext"):
                         kext_rel = normalized_component.removeprefix("Kexts/")
                         kexts.append(kext_rel)
+                        executable = Path(kext_rel).stem
+                        if (efi_root / "OC" / "Kexts" / kext_rel / "Contents" / "MacOS" / executable).is_file():
+                            executable_kexts.add(kext_rel)
                     elif normalized_component.startswith("EFI/OC/Drivers/") and Path(normalized_component).name.endswith(".efi"):
                         drivers.append(Path(normalized_component).name)
                 spec = self.db.get_dependency_spec(dependency.dependency_id)
@@ -347,12 +351,15 @@ class EfiBuilder:
                         Path(toolchain.sample_plist_path), toolchain.sample_plist_sha256
                     )
                     config = generator.generate_synthetic_for_test(
-                        identity=identity_data, kexts=kexts, drivers=drivers
+                        identity=identity_data, kexts=kexts, drivers=drivers, executable_kexts=executable_kexts,
                     )
                     generator.write(config, efi_root / "OC" / "config.plist")
                     schema_digest = generator.schema_digest
                 else:
-                    self._write_config(efi_root / "OC" / "config.plist", kexts, drivers, identity_data, toolchain.opencore_version)
+                    self._write_config(
+                        efi_root / "OC" / "config.plist", kexts, drivers, identity_data,
+                        toolchain.opencore_version, executable_kexts,
+                    )
                     schema_digest = ""
                 profile_digest = ""
                 acpi_digest = ""
@@ -374,6 +381,7 @@ class EfiBuilder:
                     acpi_digest=acpi_result.generated_digest if acpi_result is not None else "",
                     evidence_digests=((acpi_result.source_evidence_digest,) if acpi_result is not None else ()),
                     effective_options=dict(plan.effective_option_selections),
+                    executable_kexts=executable_kexts,
                 )
                 generator.write(config, efi_root / "OC" / "config.plist")
                 schema_digest = generator.schema_digest
@@ -698,47 +706,65 @@ class EfiBuilder:
     @staticmethod
     def _config_file_errors(root: Path, config: Dict[str, Any]) -> List[str]:
         errors: List[str] = []
+
+        def check_component(base: Path, name: str, label: str, *, directory: bool = False) -> Optional[Path]:
+            if Path(name).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", name) or name.startswith(("\\\\", "/")):
+                errors.append(f"Configured {label} must use a relative component path: {name}")
+                return None
+            raw_candidate = base / name
+            if raw_candidate.is_symlink():
+                errors.append(f"Configured {label} is a symlink: {name}")
+                return None
+            candidate = raw_candidate.resolve()
+            if not candidate.is_relative_to(base.resolve()):
+                errors.append(f"Configured {label} escapes its component directory: {name}")
+                return None
+            if not (candidate.is_dir() if directory else candidate.is_file()):
+                errors.append(f"Configured {label} is missing: {name}")
+                return None
+            return candidate
+
         uefi = config.get("UEFI")
         kernel = config.get("Kernel")
+        acpi = config.get("ACPI", {})
         if not isinstance(uefi, dict):
             errors.append("UEFI configuration must be a dictionary")
         if not isinstance(kernel, dict):
             errors.append("Kernel configuration must be a dictionary")
-        drivers = uefi.get("Drivers", []) if isinstance(uefi, dict) else []
-        kexts = kernel.get("Add", []) if isinstance(kernel, dict) else []
-        for label, entries, base in (("driver", drivers, root / "EFI" / "OC" / "Drivers"), ("kext", kexts, root / "EFI" / "OC" / "Kexts")):
+        if not isinstance(acpi, dict):
+            errors.append("ACPI configuration must be a dictionary")
+        entries_by_kind = (
+            ("driver", "Drivers", "Path", uefi.get("Drivers", []) if isinstance(uefi, dict) else []),
+            ("kext", "Kexts", "BundlePath", kernel.get("Add", []) if isinstance(kernel, dict) else []),
+            ("ACPI table", "ACPI", "Path", acpi.get("Add", []) if isinstance(acpi, dict) else []),
+        )
+        for label, directory, key, entries in entries_by_kind:
+            base = root / "EFI" / "OC" / directory
             seen: set[str] = set()
             if not isinstance(entries, list):
                 errors.append(f"{label} configuration must be a list")
                 continue
             for entry in entries:
-                key = "Path" if label == "driver" else "BundlePath"
-                if not isinstance(entry, dict) or not isinstance(entry.get(key), str):
+                if not isinstance(entry, dict) or not isinstance(entry.get(key), str) or not entry[key]:
                     errors.append(f"Malformed {label} configuration entry")
                     continue
                 name = entry[key]
-                if Path(name).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", name) or name.startswith(("\\\\", "/")):
-                    errors.append(f"Configured {label} must use a relative component path: {name}")
-                    continue
                 case_key = name.casefold()
                 if case_key in seen:
                     errors.append(f"Duplicate {label} configuration entry: {name}")
                 seen.add(case_key)
-                raw_candidate = base / name
-                if raw_candidate.is_symlink():
-                    errors.append(f"Configured {label} is a symlink: {name}")
+                candidate = check_component(base, name, label, directory=label == "kext")
+                if candidate is None or label != "kext":
                     continue
-                candidate = raw_candidate.resolve()
-                try:
-                    candidate.relative_to(base.resolve())
-                except ValueError:
-                    errors.append(f"Configured {label} escapes its component directory: {name}")
-                    continue
-                valid_kind = candidate.is_file() if label == "driver" else candidate.is_dir()
-                if not valid_kind:
-                    errors.append(f"Configured {label} is missing: {name}")
-                elif any(item.is_symlink() for item in candidate.rglob("*")):
+                if any(item.is_symlink() for item in candidate.rglob("*")):
                     errors.append(f"Configured {label} contains a symlink: {name}")
+                    continue
+                for field in ("PlistPath", "ExecutablePath"):
+                    path = entry.get(field, "" if field == "ExecutablePath" else None)
+                    if not isinstance(path, str) or (field == "PlistPath" and not path):
+                        errors.append(f"Configured kext has an invalid {field}: {name}")
+                    elif path:
+                        check_component(candidate, path, f"kext {field} for {name}")
             if label == "driver":
                 for name in _REQUIRED_DRIVERS:
                     if name.casefold() not in seen:
@@ -921,7 +947,10 @@ class EfiBuilder:
         return errors
 
     @staticmethod
-    def _write_config(path: Path, kexts: List[str], drivers: List[str], identity: Dict[str, str], opencore_version: str) -> None:
+    def _write_config(
+        path: Path, kexts: List[str], drivers: List[str], identity: Dict[str, str],
+        opencore_version: str, executable_kexts: set[str],
+    ) -> None:
         config = {
             "#WARNING": "Generated by MacLoader; validate with matching ocvalidate before use.",
             "OC": {"Version": opencore_version},
@@ -931,7 +960,12 @@ class EfiBuilder:
                     for item in SchemaDrivenConfigGenerator._ordered_drivers(drivers)
                 ],
             },
-            "Kernel": {"Add": [{"BundlePath": item, "Enabled": True} for item in sorted(set(kexts))]},
+            "Kernel": {
+                "Add": [
+                    SchemaDrivenConfigGenerator._kernel_entry(item, item in executable_kexts)
+                    for item in sorted(set(kexts))
+                ],
+            },
             "PlatformInfo": {"Generic": dict(identity)},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
