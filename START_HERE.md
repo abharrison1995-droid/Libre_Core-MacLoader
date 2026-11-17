@@ -1,6 +1,6 @@
 # Start here
 
-MacLoader is a hardware-aware OpenCore preparation tool. Read the [current project status](docs/PROJECT_STATUS.md) for implemented functions, the exact T480s candidate, and its open gates. Development toward the first install follows the [T480s first-install fix plan](docs/T480S_FIRST_INSTALL_FIX_PLAN.md); its "Progress" section names the next chunk. Read the [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) before any physical preparation.
+MacLoader is a hardware-aware OpenCore preparation tool. Read the [current project status](docs/PROJECT_STATUS.md) for implemented functions, the exact T480s candidate, and its open gates. Development toward the first install follows the [T480s first-install fix plan](docs/T480S_FIRST_INSTALL_FIX_PLAN.md); its "Progress" section names the next chunk. An agent picking up the work starts with [AGENTS.md](AGENTS.md) and the [handover](docs/HANDOVER.md). Read the [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) before any physical preparation.
 
 On the Windows development host the interpreter is the repository virtual environment: use `.\.venv\Scripts\python.exe -m ...` where the commands below say `python -m ...`.
 

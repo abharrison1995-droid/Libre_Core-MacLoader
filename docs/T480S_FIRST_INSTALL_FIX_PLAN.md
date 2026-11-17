@@ -21,7 +21,11 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 
 **Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe).
 
+**Handover:** the next implementing agent starts from [HANDOVER.md](HANDOVER.md), which lists the chunks that can be done without the owner and how to hand the work back for review.
+
 ### How each chunk is run (orchestrator protocol)
+
+A single agent working alone plays both roles below; [HANDOVER.md](HANDOVER.md) section 3 spells that out.
 
 1. The orchestrator launches one worker agent (Opus 5.5, medium effort) per chunk, with a prompt that names the chunk, the files it may edit, the current baseline and any context from earlier chunks. Only one chunk is in flight at a time.
 2. The worker branches `plan/<chunk-id>` from `main`, works, commits there, and reports in the format of rule 12. Workers never push or merge.
