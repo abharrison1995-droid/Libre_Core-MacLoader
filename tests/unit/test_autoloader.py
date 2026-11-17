@@ -97,6 +97,65 @@ def test_changed_hardware_invalidates_artifact_without_losing_session(tmp_path: 
     assert "efi" not in service.session.artifacts
 
 
+class _WriteReached(Exception):
+    pass
+
+
+def _write_gate(tmp_path: Path, write_time: HardwareSnapshot) -> None:
+    """Run the write-time hardware gate against ``write_time``; the media write itself is faked."""
+    service = AutoloaderService(root=tmp_path)
+    service.start(candidate(), private_material="test")
+    assert service.session is not None and service.snapshot is not None
+    bound = replace(write_time, snapshot_id=service.snapshot.snapshot_id)
+    service._current_efi_manifest = lambda: None  # type: ignore[assignment,method-assign,return-value]
+    service._current_bound_snapshot = lambda: bound  # type: ignore[method-assign]
+
+    def write(*_args: object) -> None:
+        raise _WriteReached()
+
+    service.media.write = write  # type: ignore[method-assign,assignment]
+    service._write_media()
+
+
+def _assert_write_allowed(tmp_path: Path, write_time: HardwareSnapshot) -> None:
+    import pytest
+    with pytest.raises(_WriteReached):
+        _write_gate(tmp_path, write_time)
+
+
+def _assert_hardware_changed(tmp_path: Path, write_time: HardwareSnapshot) -> None:
+    import pytest
+    from macloader.evidence.acpi_capture import CaptureError
+    with pytest.raises(CaptureError) as error:
+        _write_gate(tmp_path, write_time)
+    assert error.value.code == "HARDWARE_CHANGED"
+
+
+def test_write_gate_allows_extra_usb_keyboard(tmp_path: Path) -> None:
+    from macloader.domain.hardware import InputDeviceInfo
+    changed = candidate()
+    changed.input_devices.append(InputDeviceInfo(name="Example USB Keyboard", bus="usb", kind="keyboard", vendor_id="1234", product_id="0001"))
+    _assert_write_allowed(tmp_path, changed)
+
+
+def test_write_gate_allows_extra_usb_device(tmp_path: Path) -> None:
+    from macloader.domain.hardware import UsbDevice
+    changed = candidate()
+    changed.usb_devices.append(UsbDevice(vendor_id="1234", product_id="5678", bus="001", device_num="009", product_name="Example Flash"))
+    _assert_write_allowed(tmp_path, changed)
+
+
+def test_write_gate_refuses_changed_bios_version(tmp_path: Path) -> None:
+    _assert_hardware_changed(tmp_path, replace(candidate(), bios_version="N22ET99W (1.99 )"))
+
+
+def test_write_gate_refuses_changed_wifi_card(tmp_path: Path) -> None:
+    changed = candidate()
+    assert changed.wifi[0].pci is not None
+    changed.wifi[0].pci.device_id = "abcd"
+    _assert_hardware_changed(tmp_path, changed)
+
+
 def test_started_action_is_marked_interrupted_on_restart(tmp_path: Path) -> None:
     service = AutoloaderService(root=tmp_path)
     service.start(candidate(), private_material="test")

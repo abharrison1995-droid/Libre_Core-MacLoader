@@ -33,6 +33,29 @@ def test_conflicting_observations_do_not_accept() -> None:
     assert result.unresolved == ("machine.type",)
 
 
+def test_machine_facts_is_fixed_identity_subset(t480s_baseline_fixture: Path) -> None:
+    from macloader.configuration.observations import machine_facts
+    from macloader.domain.hardware import DisplayInfo, InputDeviceInfo, UsbDevice
+    observed = snapshot(t480s_baseline_fixture)
+    facts = machine_facts(observed)
+    assert set(facts) == {
+        "machine.manufacturer", "machine.product", "machine.type", "bios.version",
+        "cpu.identity", "graphics.igpu", "audio.codec", "audio.subsystem",
+        "ethernet.identity", "wifi.identity", "bluetooth.identity", "storage.identity",
+    }
+    full = hardware_facts(observed)
+    assert all(facts[key] == full[key] for key in facts)
+    plugged = replace(
+        observed,
+        usb_devices=[*observed.usb_devices, UsbDevice(vendor_id="1234", product_id="5678", product_name="Example Flash")],
+        input_devices=[*observed.input_devices, InputDeviceInfo(name="Example USB Keyboard", bus="usb", kind="keyboard")],
+        displays=[*observed.displays, DisplayInfo(name="Example Monitor", resolution="1920x1080", is_internal=False),
+                  DisplayInfo(name="Other Panel", resolution="1366x768", is_internal=True, touch_capability=True)],
+    )
+    assert hardware_facts(plugged) != full
+    assert machine_facts(plugged) == facts
+
+
 def test_missing_touch_probe_does_not_mean_non_touch(t480s_baseline_fixture: Path) -> None:
     observed = snapshot(t480s_baseline_fixture)
     assert hardware_facts(observed)["panel.touch"] is None

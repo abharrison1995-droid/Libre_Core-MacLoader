@@ -44,6 +44,26 @@ def hardware_facts(snapshot: HardwareSnapshot) -> dict[str, object]:
     }
 
 
+MACHINE_FACT_KEYS = (
+    "machine.manufacturer", "machine.product", "machine.type", "bios.version",
+    "cpu.identity", "graphics.igpu", "audio.codec", "audio.subsystem",
+    "ethernet.identity", "wifi.identity", "bluetooth.identity", "storage.identity",
+)
+
+
+def machine_facts(snapshot: HardwareSnapshot) -> dict[str, object]:
+    """Fixed machine identity used by the write-time hardware gate.
+
+    A subset of ``hardware_facts`` (selected, not recomputed, so the two cannot
+    drift). Input topology, USB controllers/devices, panel/displays,
+    Thunderbolt and dGPUs are left out because plugging in removable devices can
+    change them. ``hardware_facts`` and the evidence scope digests are
+    deliberately unchanged.
+    """
+    facts = hardware_facts(snapshot)
+    return {key: facts[key] for key in MACHINE_FACT_KEYS}
+
+
 def scope_digest(snapshot: HardwareSnapshot, scopes: tuple[str, ...]) -> str:
     facts = hardware_facts(snapshot)
     return canonical_json_digest({key: value for key, value in facts.items() if key.split(".")[0] in scopes})

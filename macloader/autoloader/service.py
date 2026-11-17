@@ -374,9 +374,10 @@ class AutoloaderService:
         if self.session is None:
             raise ValueError("No campaign")
         self._current_efi_manifest()
-        from macloader.configuration.observations import hardware_facts
+        from macloader.configuration.observations import machine_facts
         from macloader.evidence.acpi_capture import CaptureError
-        if self.snapshot is None or hardware_facts(self._current_bound_snapshot()) != hardware_facts(self.snapshot):
+        # Fixed identity only: plugged-in USB devices must not refuse the write.
+        if self.snapshot is None or machine_facts(self._current_bound_snapshot()) != machine_facts(self.snapshot):
             raise CaptureError("HARDWARE_CHANGED", "Laptop hardware changed since preparation. No write was authorized; restart to reconcile the observations.")
         def mark_started() -> None:
             assert self.session is not None
