@@ -149,12 +149,25 @@ class WindowsAcpiCaptureProvider:
             version = subprocess.run([str(self.tool), "-v"], capture_output=True, timeout=10, check=False)
             if b"20260408" not in version.stdout + version.stderr:
                 raise CaptureError("ACPI_TOOL_VERSION", "The firmware capture tool has the wrong version.")
-            completed = subprocess.run([str(self.tool), "-b"], cwd=self.destination, capture_output=True, timeout=60, check=False)
-            if cancel():
-                raise CaptureError("CANCELLED", "Firmware capture paused; partial tables were not accepted.")
-            if completed.returncode:
-                raise CaptureError("ACPI_PERMISSION", "Windows must grant the capture tool access to firmware tables.")
-            paths = AcpiProcessor._find_tables(self.destination)
+            return_codes = []
+            for signature in ("DSDT", "SSDT"):
+                completed = subprocess.run(
+                    [str(self.tool), "-b", "-n", signature], cwd=self.destination,
+                    capture_output=True, timeout=60, check=False,
+                )
+                return_codes.append(completed.returncode)
+                if cancel():
+                    raise CaptureError("CANCELLED", "Firmware capture paused; partial tables were not accepted.")
+            try:
+                paths = AcpiProcessor._find_tables(self.destination)
+            except BuildPlanError as exc:
+                if any(return_codes):
+                    raise CaptureError(
+                        "ACPI_PERMISSION",
+                        "The capture tool could not read the firmware tables. "
+                        "Run MacLoader from an elevated (Administrator) terminal and retry.",
+                    ) from exc
+                raise
             first = {p.name.lower(): AcpiProcessor._read_table_bytes(p) for p in paths}
             if first != {p.name.lower(): AcpiProcessor._read_table_bytes(p) for p in paths}:
                 raise CaptureError("ACPI_CHANGED", "Firmware files changed during capture.")

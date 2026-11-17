@@ -6,6 +6,7 @@ import pytest
 from macloader.build.acpi import AcpiProcessor, TABLE_NAMES
 from macloader.evidence.acpi_capture import CaptureError, LinuxAcpiCaptureProvider, validate_capture
 from macloader.autoloader.service import AutoloaderService
+from macloader.exceptions import BuildPlanError
 from tests.unit.test_autoloader import candidate
 
 
@@ -91,7 +92,10 @@ def test_workflow_binds_capture_and_rejects_changed_machine(tmp_path: Path) -> N
         validate_capture({"dsdt.dat": table(b"DSDT")})
 
 
-def test_windows_capture_pins_version_count_and_protects_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("case", ["complete", "denied", "wrong-count"])
+def test_windows_capture_pins_version_count_and_protects_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
     import hashlib
     import subprocess
     from macloader.evidence.acpi_capture import WindowsAcpiCaptureProvider
@@ -100,16 +104,38 @@ def test_windows_capture_pins_version_count_and_protects_failure(tmp_path: Path,
     dest = tmp_path / "capture"
     dest.mkdir()
     provider = WindowsAcpiCaptureProvider(tool, hashlib.sha256(tool.read_bytes()).hexdigest(), dest)
+    invocations: list[list[str]] = []
+
     def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         if args[-1] == "-v":
             return subprocess.CompletedProcess(args, 0, b"20260408", b"")
-        for name in TABLE_NAMES:
-            (dest / name).write_bytes(table(b"DSDT" if name == "dsdt.dat" else b"SSDT"))
-        return subprocess.CompletedProcess(args, 0, b"", b"")
+        assert kwargs["cwd"] == dest
+        invocations.append(args[1:])
+        if case != "denied":
+            signature = args[-1] if "-n" in args else None
+            names = TABLE_NAMES[:-1] if case == "wrong-count" else TABLE_NAMES
+            for name in names:
+                table_signature = "DSDT" if name == "dsdt.dat" else "SSDT"
+                if signature is None or signature == table_signature:
+                    (dest / name).write_bytes(table(table_signature.encode("ascii")))
+            if signature is None:
+                (dest / "facp.dat").write_bytes(table(b"FACP"))
+                (dest / "apic.dat").write_bytes(table(b"APIC"))
+        return subprocess.CompletedProcess(args, 0 if case == "wrong-count" else -1, b"", b"")
+
     monkeypatch.setattr(subprocess, "run", run)
-    assert len(provider.capture()) == 12
-    with pytest.raises(CaptureError, match="empty private"):
-        provider.capture()
+    if case == "complete":
+        assert set(provider.capture()) == set(TABLE_NAMES)
+        with pytest.raises(CaptureError, match="empty private"):
+            provider.capture()
+    elif case == "denied":
+        with pytest.raises(CaptureError, match="Administrator") as error:
+            provider.capture()
+        assert error.value.code == "ACPI_PERMISSION"
+    else:
+        with pytest.raises(BuildPlanError, match="exactly one DSDT and eleven SSDTs"):
+            provider.capture()
+    assert invocations == [["-b", "-n", "DSDT"], ["-b", "-n", "SSDT"]]
     provider.expected_sha256 = "0" * 64
     with pytest.raises(CaptureError, match="hash"):
         provider.capture()

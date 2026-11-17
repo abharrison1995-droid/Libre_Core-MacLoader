@@ -15,7 +15,9 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P2.7 flaky guided tests | Done, merged to local `main` | `plan/P2.7`; Result at the end of Phase 2 |
 | P0.2-P0.5 (owner at the machine) | Not started | Phase 0 |
 | P0.5a (orchestrator confirms BIOS table) | Not started | Under P0.5 |
-| Phase 3 | **P3.1 next** | P3.2 awaits owner input |
+| P3.1 Windows capture | Done, merged to local `main` | `plan/P3.1` |
+| P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
+| P3.3 generated SSDT resolution | **Next chunk** | Phase 3 |
 | Phases 4-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -299,6 +301,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Read first:** `acpi_capture.py:135-163`; `tools/capture_t480s_followup.ps1:150-170` (the working invocation uses `-b -n DSDT` then `-b -n SSDT`).
 - **Change:** run the tool twice in `self.destination`: `[tool, "-b", "-n", "DSDT"]` then `[tool, "-b", "-n", "SSDT"]`. Do not raise on a non-zero return code. Keep the cancel checks. After both runs, call the existing `_find_tables` / double-read / `validate_capture`. If `_find_tables` raises **and** either return code was non-zero, raise `CaptureError("ACPI_PERMISSION", "The capture tool could not read the firmware tables. Run MacLoader from an elevated (Administrator) terminal and retry.")`. If it raises with both return codes zero, let the existing table-set error surface.
 - **Tests** (`tests/unit/test_acpi_capture.py`): update the fake tool at lines 103-108 so it (a) honours `-n`, (b) can exit `-1` after writing files, (c) writes extra `facp.dat` / `apic.dat` when called without `-n`. Cases: exit -1 with full set → accepted; exit -1 with no files → `ACPI_PERMISSION`; exit 0 with wrong count → table-set error.
+- **Result** (`plan/P3.1`): Confirmed the reference exit of -1 and the separate DSDT/SSDT calls in the follow-up script. Windows capture now checks the table set after both filtered calls and preserves cancellation between them. Synthetic tests covered all three exit/set cases. Targeted tests 16 passed, 1 skipped. Full suite 755 passed, 16 skipped, 1 xfailed. Mypy passed for 88 source files.
 
 ### P3.2 SSDT count is policy data, not a constant [C] — REVIEW
 - **Problem:** `macloader/build/acpi.py:26` and `290-292` hard-code eleven.
