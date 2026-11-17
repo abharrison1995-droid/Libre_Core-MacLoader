@@ -1,11 +1,11 @@
 """Windows hardware detection provider using CIM / WMI / PowerShell queries."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import logging
 import re
 import subprocess
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from macloader.detection.base import BaseHardwareProvider
 from macloader.detection.normalize import (
@@ -53,6 +53,26 @@ _PCI_LOCATION_QUERY = (
     "Select-Object InstanceId,KeyName,Data | ConvertTo-Json"
 )
 
+_DEFAULT_QUERY_TIMEOUT_S = 15
+# Win32_PnPEntity enumerates every device and is the slowest query, notably
+# right after boot. It gets a longer timeout and one retry on timeout only.
+_PNP_QUERY_TIMEOUT_S = 45
+
+
+def _failure_reason(result: "CimQueryResult") -> Optional[str]:
+    """Short fixed failure code for query_status; never raw output or paths."""
+    if result.is_complete:
+        return None
+    if result.timed_out:
+        return "timeout"
+    if not result.execution_success:
+        return "failed"
+    return "unreadable"
+
+
+def _query_status(result: "CimQueryResult") -> Dict[str, Any]:
+    return {**result.to_dict(), "failure_reason": _failure_reason(result)}
+
 
 @dataclass(frozen=True)
 class CimQueryResult:
@@ -63,6 +83,7 @@ class CimQueryResult:
     rows: List[Dict[str, Any]]
     raw: Optional[str] = None
     error_message: Optional[str] = None
+    timed_out: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -86,10 +107,22 @@ class WindowsHardwareProvider(BaseHardwareProvider):
     def __init__(self, command_runner: Optional[Callable[[str], Optional[str]]] = None):
         self.command_runner = command_runner
 
-    def _run_ps(self, script: str, timeout: int = 15) -> Optional[str]:
+    def _run_ps(self, script: str, timeout: int = _DEFAULT_QUERY_TIMEOUT_S) -> Optional[str]:
         """Execute a PowerShell command returning stdout."""
+        return self._run_ps_detailed(script, timeout)[0]
+
+    def _run_ps_detailed(self, script: str, timeout: int) -> Tuple[Optional[str], bool]:
+        """Execute a PowerShell command returning (stdout, timed_out).
+
+        An injected command runner may raise subprocess.TimeoutExpired to
+        simulate a timeout without waiting.
+        """
         if self.command_runner:
-            return self.command_runner(script)
+            try:
+                return self.command_runner(script), False
+            except subprocess.TimeoutExpired:
+                logger.warning(f"PowerShell command timed out after {timeout}s")
+                return None, True
 
         try:
             cmd = f"$ErrorActionPreference = 'Stop'; {script}"
@@ -103,15 +136,16 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 check=False,
             )
             if res.returncode == 0:
-                return res.stdout.strip()
+                return res.stdout.strip(), False
             logger.debug(f"PowerShell error ({res.returncode}): {res.stderr}")
         except FileNotFoundError:
             logger.debug("PowerShell binary not found")
         except subprocess.TimeoutExpired:
             logger.warning(f"PowerShell command timed out after {timeout}s")
+            return None, True
         except Exception as e:
             logger.debug(f"Unexpected error running PowerShell: {e}")
-        return None
+        return None, False
 
     @staticmethod
     def _parse_cim_output(
@@ -244,12 +278,21 @@ class WindowsHardwareProvider(BaseHardwareProvider):
         script: str,
         required_fields: Optional[List[str]] = None,
         allow_empty: bool = True,
+        timeout: int = _DEFAULT_QUERY_TIMEOUT_S,
+        retry_on_timeout: bool = False,
     ) -> CimQueryResult:
-        return self._parse_cim_output(
-            self._run_ps(script),
+        raw, timed_out = self._run_ps_detailed(script, timeout)
+        if timed_out and retry_on_timeout:
+            logger.warning("Retrying timed-out PowerShell query once")
+            raw, timed_out = self._run_ps_detailed(script, timeout)
+        result = self._parse_cim_output(
+            raw,
             required_fields=required_fields,
             allow_empty=allow_empty,
         )
+        if timed_out:
+            result = replace(result, timed_out=True, error_message="Query timed out")
+        return result
 
     @staticmethod
     def _usable_pnp_inventory(result: CimQueryResult) -> CimQueryResult:
@@ -368,11 +411,14 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             required_fields=["Manufacturer", "Model"],
             allow_empty=False,
         )
-        mfg = "Unknown"
+        # An unread manufacturer stays empty (the snapshot's "missing" value,
+        # as in HardwareSnapshot.from_dict) so model matching reports unknown
+        # instead of an unsupported "Unknown" manufacturer.
+        mfg = ""
         model = "Unknown"
         if cs_res.rows:
             cs = cs_res.rows[0]
-            mfg = normalize_dmi_string(cs.get("Manufacturer")) or "Unknown"
+            mfg = normalize_dmi_string(cs.get("Manufacturer")) or ""
             model = normalize_dmi_string(cs.get("Model")) or "Unknown"
 
         # 2. BIOS info
@@ -472,6 +518,8 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             "Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.PNPDeviceID) } | "
             "Select-Object Name,PNPDeviceID,Class,Service | ConvertTo-Json",
             allow_empty=False,
+            timeout=_PNP_QUERY_TIMEOUT_S,
+            retry_on_timeout=True,
         ))
         if pnp_res.rows:
             for row in pnp_res.rows:
@@ -639,13 +687,13 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                     "storage": disk_res.is_complete,
                 },
                 "query_status": {
-                    "computer": cs_res.to_dict(),
-                    "bios": bios_res.to_dict(),
-                    "cpu": cpu_res.to_dict(),
-                    "video": video_res.to_dict(),
-                    "pnp": pnp_res.to_dict(),
-                    "storage": disk_res.to_dict(),
-                    "pci_location": pci_location_res.to_dict(),
+                    "computer": _query_status(cs_res),
+                    "bios": _query_status(bios_res),
+                    "cpu": _query_status(cpu_res),
+                    "video": _query_status(video_res),
+                    "pnp": _query_status(pnp_res),
+                    "storage": _query_status(disk_res),
+                    "pci_location": _query_status(pci_location_res),
                 },
             },
         )

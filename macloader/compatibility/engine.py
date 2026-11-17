@@ -34,6 +34,48 @@ def _deduplicate_preserve_order(items: Optional[List[str]]) -> List[str]:
     return result
 
 
+# Fixed warning texts for failed hardware queries, keyed by the provider's
+# query_status names. Only these texts are ever shown: no paths, no raw output.
+_QUERY_LABELS = {
+    "computer": "Windows computer-system query",
+    "bios": "Windows BIOS query",
+    "cpu": "Windows processor query",
+    "video": "Windows video query",
+    "pnp": "Windows device query",
+    "storage": "Windows disk query",
+}
+_QUERY_FAILURE_TEXTS = {
+    "timeout": "timed out",
+    "failed": "failed",
+    "unreadable": "returned unreadable output",
+}
+# Optional evidence: informational only, it never changes completeness.
+_PCI_LOCATION_WARNING = (
+    "Note: PCI slot locations could not be read; USB mapping may need a re-probe."
+)
+
+
+def _query_failure_warnings(snapshot: Any) -> List[str]:
+    """Short, fixed warnings for queries the provider recorded as failed."""
+    raw_ev = getattr(snapshot, "raw_evidence", None)
+    status = raw_ev.get("query_status") if isinstance(raw_ev, dict) else None
+    if not isinstance(status, dict):
+        return []
+
+    def reason(name: str) -> Optional[str]:
+        entry = status.get(name)
+        code = entry.get("failure_reason") if isinstance(entry, dict) else None
+        return code if isinstance(code, str) and code in _QUERY_FAILURE_TEXTS else None
+
+    warnings: List[str] = []
+    for name, label in _QUERY_LABELS.items():
+        code = reason(name)
+        if code is not None:
+            warnings.append(f"{label} {_QUERY_FAILURE_TEXTS[code]}.")
+    if reason("pci_location") is not None:
+        warnings.append(_PCI_LOCATION_WARNING)
+    return warnings
+
 
 class CompatibilityEngine:
     """Evaluates hardware compatibility against a target macOS version and generates BuildPlans."""
@@ -59,7 +101,7 @@ class CompatibilityEngine:
 
         model_schema, model_decision = match_model(snapshot, self.db)
         component_results: List[ComponentCompatibilityResult] = []
-        warnings: List[str] = []
+        warnings: List[str] = _query_failure_warnings(snapshot)
         unresolved_requirements: List[str] = []
 
         if not model_schema:

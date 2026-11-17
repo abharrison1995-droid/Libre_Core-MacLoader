@@ -64,6 +64,18 @@ def test_reject_non_lenovo_hardware(non_lenovo_fixture: Path, db: Database) -> N
     assert "Unsupported manufacturer 'Dell Inc.'" in decision.reason
 
 
+def test_unread_manufacturer_is_unknown_not_blocked(db: Database) -> None:
+    for manufacturer in (None, "", "   "):
+        snapshot = HardwareSnapshot(
+            manufacturer=manufacturer,  # type: ignore[arg-type]
+            product_name="ThinkPad T480s", product_version="ThinkPad T480s", machine_type="20L7",
+        )
+        model, decision = match_model(snapshot, db)
+        assert model is None
+        assert decision.state == CompatibilityState.UNKNOWN
+        assert "Unsupported manufacturer" not in decision.reason
+
+
 def test_name_only_t480s_does_not_match_t480(db: Database) -> None:
     snapshot = HardwareSnapshot(
         manufacturer="LENOVO", product_name="ThinkPad T480s", product_version="ThinkPad T480s"

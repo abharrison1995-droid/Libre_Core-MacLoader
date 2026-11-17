@@ -19,6 +19,15 @@ def match_model(snapshot: HardwareSnapshot, db: Database) -> Tuple[Optional[Mode
     Rejects neighbouring ThinkPads or non-Lenovo PCs conservatively.
     """
     mfg = (snapshot.manufacturer or "").strip().upper()
+    if not mfg:
+        # A manufacturer that could not be read is missing evidence, not an
+        # unsupported vendor.
+        return None, SupportDecision(
+            target="system:model",
+            state=CompatibilityState.UNKNOWN,
+            reason="System manufacturer could not be read; refusing to choose a model policy.",
+            evidence=f"Manufacturer: unknown, Product: {snapshot.product_name}",
+        )
     if mfg not in {"LENOVO", "LENOVO GROUP LIMITED", "LENOVO LIMITED"}:
         return None, SupportDecision(
             target="system:model",

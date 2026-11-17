@@ -1,11 +1,13 @@
 """Unit tests for WindowsHardwareProvider using mock PowerShell command runner."""
 
 import json
+import subprocess
 from typing import Callable, Optional
 
 import pytest
 
 from macloader.compatibility.engine import CompatibilityEngine
+from macloader.compatibility.model_matcher import match_model
 from macloader.configuration.campaign_match import match_campaign
 from macloader.configuration.observations import snapshot_observations
 from macloader.database.loader import Database, get_database
@@ -294,9 +296,13 @@ def test_missing_required_fields_keeps_inventory_unknown_and_denies_build_plan(d
     snapshot_cs = provider_cs.probe()
 
     assert snapshot_cs.raw_evidence["inventory_status"]["computer"] is False
+    assert not snapshot_cs.manufacturer
     report_cs = engine.evaluate(snapshot_cs, target_macos="sequoia")
-    assert report_cs.overall_state in (CompatibilityState.UNKNOWN, CompatibilityState.BLOCKED)
+    # Unread computer-system evidence is unknown, never an unsupported manufacturer.
+    assert report_cs.overall_state == CompatibilityState.UNKNOWN
+    assert report_cs.model_decision.state == CompatibilityState.UNKNOWN
     assert report_cs.can_generate_build_plan is False
+    assert "Windows computer-system query returned unreadable output." in report_cs.warnings
 
 
 def test_empty_pnp_entities_rejected_and_denies_build_plan(db: Database) -> None:
@@ -959,3 +965,166 @@ def test_conflicting_duplicate_pci_location_rows_leave_slot_none() -> None:
 
     assert snapshot.usb_controllers[0].pci_slot is None
     assert snapshot.igpu is not None and snapshot.igpu.pci.pci_slot == "0000:00:02.0"
+
+
+def _pnp_failing_runner(
+    failures: list[Optional[BaseException]], attempts: list[str]
+) -> Callable[[str], Optional[str]]:
+    """Slot runner whose PnP query raises the queued failures before answering."""
+    located = _slot_runner(json.dumps(_SLOT_ROWS))
+
+    def runner(script: str) -> Optional[str]:
+        if "Win32_PnPEntity" in script:
+            attempts.append(script)
+            if failures:
+                failure = failures.pop(0)
+                if failure is None:
+                    return None
+                raise failure
+        return located(script)
+
+    return runner
+
+
+def _timeout() -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(cmd="powershell", timeout=45)
+
+
+def test_pnp_timeout_then_success_is_retried_once_and_complete(db: Database) -> None:
+    attempts: list[str] = []
+    snapshot = WindowsHardwareProvider(command_runner=_pnp_failing_runner([_timeout()], attempts)).probe()
+
+    assert len(attempts) == 2
+    assert all(snapshot.raw_evidence["inventory_status"].values())
+    assert snapshot.raw_evidence["query_status"]["pnp"]["failure_reason"] is None
+    assert snapshot.wifi and snapshot.ethernet and snapshot.input_devices
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert report.can_generate_build_plan is True
+    assert not any("device query" in w for w in report.warnings)
+
+
+def test_pnp_double_timeout_warns_naming_the_device_query(db: Database) -> None:
+    attempts: list[str] = []
+    snapshot = WindowsHardwareProvider(
+        command_runner=_pnp_failing_runner([_timeout(), _timeout()], attempts)
+    ).probe()
+
+    assert len(attempts) == 2
+    status = snapshot.raw_evidence["query_status"]["pnp"]
+    assert status["failure_reason"] == "timeout"
+    assert status["error_message"] == "Query timed out"
+    for category in ("pnp", "audio", "ethernet", "wifi", "bluetooth", "input"):
+        assert snapshot.raw_evidence["inventory_status"][category] is False
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert "Windows device query timed out." in report.warnings
+    assert report.overall_state == CompatibilityState.UNKNOWN
+    assert report.can_generate_build_plan is False
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("boom")])
+def test_non_timeout_pnp_failure_is_not_retried(failure: Optional[BaseException], db: Database) -> None:
+    attempts: list[str] = []
+    runner = _pnp_failing_runner([failure], attempts)
+    if failure is not None:
+        with pytest.raises(RuntimeError):
+            WindowsHardwareProvider(command_runner=runner).probe()
+        assert len(attempts) == 1
+        return
+
+    snapshot = WindowsHardwareProvider(command_runner=runner).probe()
+    assert len(attempts) == 1
+    assert snapshot.raw_evidence["query_status"]["pnp"]["failure_reason"] == "failed"
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert "Windows device query failed." in report.warnings
+
+
+def test_pnp_query_uses_longer_timeout_and_other_queries_keep_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers = _slot_runner(json.dumps(_SLOT_ROWS))
+    calls: list[tuple[str, int]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        script = cmd[-1]
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, int)
+        calls.append((script, timeout))
+        if "Win32_PnPEntity" in script and sum("Win32_PnPEntity" in s for s, _ in calls) == 1:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        return subprocess.CompletedProcess(cmd, 0, stdout=answers(script) or "", stderr="")
+
+    monkeypatch.setattr("macloader.detection.windows.subprocess.run", fake_run)
+    snapshot = WindowsHardwareProvider().probe()
+
+    pnp_timeouts = [t for s, t in calls if "Win32_PnPEntity" in s]
+    other_timeouts = {t for s, t in calls if "Win32_PnPEntity" not in s}
+    assert pnp_timeouts == [45, 45]
+    assert other_timeouts == {15}
+    assert all(snapshot.raw_evidence["inventory_status"].values())
+
+
+def test_failed_pci_location_query_warns_without_changing_completeness(db: Database) -> None:
+    located = WindowsHardwareProvider(command_runner=_slot_runner(json.dumps(_SLOT_ROWS))).probe()
+    failed = WindowsHardwareProvider(command_runner=_slot_runner(None)).probe()
+
+    assert failed.raw_evidence["query_status"]["pci_location"]["failure_reason"] == "failed"
+    assert failed.raw_evidence["inventory_status"] == located.raw_evidence["inventory_status"]
+
+    engine = CompatibilityEngine(db=db)
+    located_report = engine.evaluate(located, target_macos="sequoia")
+    failed_report = engine.evaluate(failed, target_macos="sequoia")
+    pci_warnings = [w for w in failed_report.warnings if "PCI slot locations" in w]
+    assert pci_warnings == ["Note: PCI slot locations could not be read; USB mapping may need a re-probe."]
+    assert not any("PCI slot locations" in w for w in located_report.warnings)
+    assert failed_report.overall_state == located_report.overall_state
+    assert failed_report.can_generate_build_plan is True
+
+
+def test_computer_system_query_failure_gives_unknown_not_blocked(db: Database) -> None:
+    def runner(script: str) -> Optional[str]:
+        if "Win32_ComputerSystem" in script:
+            return None
+        return _valid_baseline_windows_runner(script)
+
+    snapshot = WindowsHardwareProvider(command_runner=runner).probe()
+    assert snapshot.manufacturer == ""
+    assert snapshot.raw_evidence["query_status"]["computer"]["failure_reason"] == "failed"
+
+    model, decision = match_model(snapshot, db)
+    assert model is None
+    assert decision.state == CompatibilityState.UNKNOWN
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert report.overall_state == CompatibilityState.UNKNOWN
+    assert report.can_generate_build_plan is False
+    assert "Windows computer-system query failed." in report.warnings
+    assert not any("Unsupported manufacturer" in w for w in report.warnings)
+
+
+def test_query_failure_warnings_hold_no_paths_or_raw_output(db: Database) -> None:
+    raw_output = r"Get-CimInstance : Access denied at C:\Windows\System32\example.ps1:1"
+
+    def runner(script: str) -> Optional[str]:
+        if "Win32_PnPEntity" in script or "Win32_DiskDrive" in script:
+            return raw_output  # not JSON: unreadable output
+        if "Win32_BIOS" in script:
+            return None
+        return _valid_baseline_windows_runner(script)
+
+    snapshot = WindowsHardwareProvider(command_runner=runner).probe()
+    statuses = snapshot.raw_evidence["query_status"]
+    assert statuses["pnp"]["failure_reason"] == "unreadable"
+    assert statuses["storage"]["failure_reason"] == "unreadable"
+    assert statuses["bios"]["failure_reason"] == "failed"
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    assert "Windows device query returned unreadable output." in report.warnings
+    assert "Windows disk query returned unreadable output." in report.warnings
+    assert "Windows BIOS query failed." in report.warnings
+    error_messages = [s["error_message"] for s in statuses.values() if s["error_message"]]
+    assert error_messages
+    for warning in report.warnings:
+        assert ":\\" not in warning
+        assert raw_output not in warning
+        assert "Access denied" not in warning
+        assert not any(message in warning for message in error_messages)
