@@ -171,6 +171,17 @@ def test_generated_usbx_has_darwin_power_properties() -> None:
     assert '"kUSBWakePortCurrentLimit", 0x0834' in source
 
 
+def test_generated_pnlf_has_kaby_lake_backlight_identity_and_darwin_status() -> None:
+    source = AcpiProcessor._generated_sources("synthetic-bios")["SSDT-PNLF-T480S"]
+    assert 'Name (_HID, EisaId ("APP0002"))' in source
+    assert 'Name (_CID, "backlight")' in source
+    assert "Name (_UID, 0x10)" in source
+    assert "Method (_STA, 0, NotSerialized)" in source
+    assert 'If (_OSI ("Darwin"))' in source
+    assert "Return (0x0B)" in source
+    assert "Return (Zero)" in source
+
+
 def test_acpi_processor_rejects_missing_capture_and_untrusted_tool(tmp_path: Path) -> None:
     missing_tool = AcpiProcessor(tmp_path / "missing-iasl", "0" * 64, tmp_path / "work")
     with pytest.raises(BuildPlanError, match="missing or unsafe"):

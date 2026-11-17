@@ -447,10 +447,17 @@ class AcpiProcessor:
     {{
         Device (PNLF)
         {{
-            Name (_HID, "APP0002")
-            Name (_CID, "APP0002")
-            Name (_UID, 0x13)
-            Name (_STA, 0x0B)
+            Name (_HID, EisaId ("APP0002"))
+            Name (_CID, "backlight")
+            Name (_UID, 0x10)
+            Method (_STA, 0, NotSerialized)
+            {{
+                If (_OSI ("Darwin"))
+                {{
+                    Return (0x0B)
+                }}
+                Return (Zero)
+            }}
         }}
     }}
 }}
