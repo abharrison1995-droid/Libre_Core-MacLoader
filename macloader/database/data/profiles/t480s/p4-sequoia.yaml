@@ -5,6 +5,13 @@ product_id: sequoia
 version: "15.0"
 build: "24A335"
 bios_binding: "N22ET85W-1.62"
+required_capabilities:
+  - accelerated_intel_uhd_620
+  - alc257_audio
+  - intel_gigabit_ethernet
+  - intel_wireless_lan
+  - intel_bluetooth
+  - ps2_trackpad_trackpoint
 graphics:
   device_path: "PciRoot(0x0)/Pci(0x2,0x0)"
   platform_id: "0000C087"

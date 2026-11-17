@@ -47,6 +47,7 @@ class ReviewedEfiProfile:
     version: str
     build: str
     bios_binding: str
+    required_capabilities: Tuple[str, ...]
     graphics: ReviewedGraphicsPolicy
     audio: ReviewedAudioPolicy
     usb: ReviewedUsbPolicy
@@ -97,9 +98,20 @@ def load_reviewed_profile(path: Optional[Path] = None) -> ReviewedEfiProfile:
     graphics = cast(Dict[str, Any], graphics)
     audio = cast(Dict[str, Any], audio)
     usb = cast(Dict[str, Any], usb)
-    required = {"schema_version", "profile_id", "model_id", "product_id", "version", "build", "bios_binding", "graphics", "audio", "usb", "wwan_policy", "acpi_source_scope"}
+    required = {
+        "schema_version", "profile_id", "model_id", "product_id", "version", "build", "bios_binding",
+        "required_capabilities", "graphics", "audio", "usb", "wwan_policy", "acpi_source_scope",
+    }
     if set(data) != required:
         raise BuildPlanError("Reviewed EFI profile contains unknown or missing fields")
+    capabilities = data["required_capabilities"]
+    if (
+        not isinstance(capabilities, list)
+        or not capabilities
+        or not all(isinstance(item, str) and item.strip() for item in capabilities)
+        or len(set(capabilities)) != len(capabilities)
+    ):
+        raise BuildPlanError("Reviewed EFI profile required capabilities must be distinct nonempty strings")
     for key in ("source_refs",):
         if not isinstance(graphics.get(key), list) or not all(isinstance(item, str) for item in graphics[key]):
             raise BuildPlanError("Reviewed graphics source references are invalid")
@@ -115,6 +127,7 @@ def load_reviewed_profile(path: Optional[Path] = None) -> ReviewedEfiProfile:
     return ReviewedEfiProfile(
         profile_id=str(data["profile_id"]), model_id=str(data["model_id"]), product_id=str(data["product_id"]),
         version=str(data["version"]), build=str(data["build"]), bios_binding=str(data["bios_binding"]),
+        required_capabilities=tuple(capabilities),
         graphics=ReviewedGraphicsPolicy(
             device_path=str(graphics["device_path"]),
             platform_id=_data_bytes(str(graphics["platform_id"]), "graphics platform-id"),

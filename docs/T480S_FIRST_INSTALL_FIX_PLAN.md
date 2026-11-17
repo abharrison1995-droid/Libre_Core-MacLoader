@@ -25,10 +25,10 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.5 ACPI intermediate cleanup | Done, merged to local `main` | `plan/P3.5`; cleanup on success and failure |
 | P4.1 HFS+ driver | Done, merged to local `main` | `plan/P4.1` |
 | P4.2 explicit config | Deferred to owner input | Requires P0.2 |
-| P4.3 profile kext set | **Next** | Bump the campaign `revision` only |
+| P4.3 profile kext set | Done, merged to local `main` | `plan/P4.3`; campaign revision `4` |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
 | P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
-| P4.6 graphics identity and profile data | Pending, unblocked by review | After P4.3; bump the campaign `revision` only |
+| P4.6 graphics identity and profile data | **Next** | Bump the campaign `revision` only |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -430,6 +430,8 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Tests:** snapshot without an input device → `PROFILE_CAPABILITY_MISSING: ps2_trackpad_trackpoint`; complete snapshot → no issue.
 - **Result** (`plan/P4.3`): Stopped before editing code. Confirmed all six capability names in the engine and resolver. `ConfigurationService.evaluate` is where the build plan and reviewed profile meet. Handover section 2 calls for a profile revision bump, but `p4-sequoia.yaml` has only `schema_version`; `ReviewedEfiProfile` has no revision and its loader rejects unknown keys. Campaign revision 3 is separate. The plan needs to define the initial profile revision and compatibility rules or specify a campaign-only revision bump. No implementation tests were run.
 - **Review decision (2026-11-17):** the stop was correct; "profile revision" was an error in this plan and the handover. Reviewed profiles carry no revision. Their content is bound by `effective_profile_digest`, so a profile edit already invalidates earlier builds. For every chunk that edits `p4-sequoia.yaml` (P4.2, P4.3, P4.6): add no field to the profile or its loader; bump only the campaign `revision` in `campaigns/t480s-20l8-sequoia-15.0.yaml` by one per chunk (P4.3: `"3"` → `"4"`). P4.3 is unblocked.
+
+- **Result after review** (`plan/P4.3`): Confirmed the six capability names in the engine and resolver. The strict reviewed profile loader consumes the required list. Configuration evaluation blocks each missing capability with its hardware category and leaves the detected capability list intact. Missing input and complete snapshot cases passed. Only the campaign revision changed, from `3` to `4`. Targeted tests, including the catalog checks: 57 passed. Full suite: 776 passed, 17 skipped, 1 xfailed, exit 0. Mypy passed for 89 source files.
 
 ### P4.4 Kext load order [C/R] — REVIEW
 - **Problem:** `config.py:172-188` orders by leaf name. Plug-ins nested under a parent (for example `VoodooPS2Controller.kext/Contents/PlugIns/VoodooInput.kext`) can sort before the parent [R]; BlueToolFixup sorts before IntelBluetoothFirmware [R].

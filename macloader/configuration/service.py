@@ -24,6 +24,16 @@ from macloader.evidence.acpi import AcpiEvidenceBundle
 from macloader.evidence.usb import UsbEvidenceSession
 
 
+_CAPABILITY_CATEGORIES = {
+    "accelerated_intel_uhd_620": "graphics",
+    "alc257_audio": "audio",
+    "intel_gigabit_ethernet": "ethernet",
+    "intel_wireless_lan": "wifi",
+    "intel_bluetooth": "bluetooth",
+    "ps2_trackpad_trackpoint": "input",
+}
+
+
 @dataclass(frozen=True)
 class ConfigurationEvaluation:
     configuration: UserConfiguration
@@ -106,6 +116,16 @@ class ConfigurationService:
                     "PROFILE_SCOPE_MISMATCH", "build_profile", "The reviewed EFI profile does not exactly match the accepted model and target.",
                     "Select the reviewed profile for the exact model, version, and build.",
                 ))
+            else:
+                detected_capabilities = set(plan.required_capabilities)
+                for capability in reviewed_profile.required_capabilities:
+                    if capability not in detected_capabilities:
+                        category = _CAPABILITY_CATEGORIES.get(capability, "hardware")
+                        issues.append(self._issue(
+                            "PROFILE_CAPABILITY_MISSING", f"hardware.{category}",
+                            f"{capability}: the required {category} hardware capability was not detected.",
+                            f"Verify the {category} hardware and reconcile the snapshot before building.",
+                        ))
 
         self._validate_options(draft, target, issues)
         self._validate_evidence(draft, snapshot, issues)

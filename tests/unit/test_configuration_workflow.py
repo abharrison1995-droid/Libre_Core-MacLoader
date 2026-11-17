@@ -84,6 +84,35 @@ def test_fixture_configuration_path_requires_exact_target_and_usb_evidence(t480s
     assert not any(issue.code == "USB_PHYSICAL_EVIDENCE_REQUIRED" for issue in evidence_evaluation.issues)
 
 
+@pytest.mark.parametrize("missing_input", [False, True])
+def test_reviewed_profile_requires_detected_input_capability(
+    t480s_baseline_fixture: Path, missing_input: bool,
+) -> None:
+    snapshot = FixtureHardwareProvider(t480s_baseline_fixture).probe()
+    if missing_input:
+        snapshot = replace(snapshot, input_devices=[])
+    service = ConfigurationService()
+    release = service.policy.get_release("sequoia", "15.0", "24A335")
+    assert release is not None
+    draft = replace(service.new_draft(snapshot), target=release.target())
+
+    evaluation = service.evaluate(draft, snapshot)
+
+    issues = [issue for issue in evaluation.issues if issue.code == "PROFILE_CAPABILITY_MISSING"]
+    capability = "ps2_trackpad_trackpoint"
+    if missing_input:
+        assert len(issues) == 1
+        issue = issues[0]
+        assert issue.blocking
+        assert issue.field_path == "hardware.input"
+        assert issue.explanation.startswith(f"{capability}:")
+        assert issue.explanation in evaluation.plan.unresolved_requirements
+        assert capability not in evaluation.plan.required_capabilities
+    else:
+        assert not issues
+        assert capability in evaluation.plan.required_capabilities
+
+
 def test_legacy_plan_import_is_a_draft_with_blocking_issue() -> None:
     draft, issues = import_configuration({
         "target_model": "Lenovo ThinkPad T480s",
