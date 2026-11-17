@@ -22,7 +22,9 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P3.4b USBX | Done, merged to local `main` | `plan/P3.4b` |
 | P3.4c PNLF | Done, merged to local `main` | `plan/P3.4c` |
 | P3.4d EC | Skipped | Requires the EC path from P3.3 |
-| Phases 4-11 | Not started | |
+| P3.5 ACPI BIOS binding and cleanup | Stopped | Import already checks the normalized BIOS |
+| Phase 4 | **P4.1 next** | P4.2 awaits owner input |
+| Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
 
@@ -341,6 +343,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Problem:** `macloader/workflow/service.py:126-134` takes `bios_binding` from the campaign profile and never compares against the current probe; decompiled DSL persists under the work root (`acpi.py:128-135`).
 - **Change:** (1) at import, require the current snapshot's normalised BIOS to equal the profile's `bios_binding`, else raise with "This capture can only be imported on BIOS <binding>". (2) After a successful or failed build, delete the `disassembled` directory and iasl logs in a `finally`; keep only digests.
 - **Tests:** import with snapshot BIOS `N22ET76W-1.53` fails; work directory has no `.dsl` after build.
+- **Result** (`plan/P3.5`): Stopped before editing code. `import_acpi_capture` already requires `candidate_campaign(snapshot)`, which compares the normalized snapshot BIOS with the campaign BIOS. The campaign loader requires the profile to have the same BIOS, and `test_machine_bound_acpi_import_rejects_wrong_bios_or_corrupt_capture` already covers rejection. The disassembly and raw logs still persist. The plan needs a separate cleanup chunk or a revised import requirement. No implementation tests were run.
 
 ---
 
