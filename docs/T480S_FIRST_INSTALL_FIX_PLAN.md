@@ -17,7 +17,7 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P0.5a (orchestrator confirms BIOS table) | Not started | Under P0.5 |
 | P3.1 Windows capture | Done, merged to local `main` | `plan/P3.1` |
 | P3.2 SSDT count | Deferred to owner input | Requires P0.3 |
-| P3.3 generated SSDT resolution | **Next chunk** | Phase 3 |
+| P3.3 generated SSDT resolution | Stopped | Recording the PNLF omission in the build manifest requires out-of-scope files |
 | Phases 4-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
@@ -316,6 +316,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Do not write a second DSL parser.** Move the nesting-aware tokenizer from `usb_capture.py:36-66` into a shared helper (same module or a new `macloader/build/dsl_names.py`) that yields `(full_path, kind, attributes)` for each `Device`/`Scope`/`Processor`, and make `usb_capture.py` call it so its existing tests still pass. If that refactor is more than about 60 lines, stop and report.
 - **Change:** after disassembly, add `_resolve_names(dsl_dir) -> dict` built on that helper. It returns: `cpu0` (`\_PR.PR00` or `\_PR.CPU0`, or `\_SB.PR00`), `xhc` (the device **directly under `\_SB.PCI0`** whose `_ADR` is `0x00140000`), `ec` (full path of the device with `_HID` `PNP0C09`), `igpu` (the device **directly under `\_SB.PCI0`** whose `_ADR` is `0x00020000`), `has_pnlf` (bool). More than one match for any name is an error, not a pick-the-first. If `cpu0` or `xhc` is not found, raise `BuildPlanError("Captured firmware does not define <name>; generated ACPI cannot be bound")`. Pass the resolved names into `_generated_sources` instead of the literals. If `has_pnlf` is true, omit SSDT-PNLF and record that in the manifest.
 - **Tests** (`tests/unit/test_p4_acpi.py`): DSL fixture with `PR00` → source uses `\_PR.PR00`; fixture with `CPU0` → uses `\_PR.CPU0`; fixture without an XHCI device → `BuildPlanError`; fixture with existing PNLF → no PNLF table.
+- **Result** (`plan/P3.3`): Stopped before editing code. The fixed names and existing tokenizer match the plan. The generated ACPI processor writes a qualification report, while the EFI build manifest is constructed in `macloader/build/efi.py` and parsed against the strict field set in `macloader/domain/contracts.py`. The required manifest record for an existing PNLF needs a change outside this chunk's scope. The plan needs to specify the qualification report or authorize the manifest changes. No implementation tests were run.
 
 ### P3.4 Make the generated tables do what they claim [C] — REVIEW
 - **Problem:** SSDT-PLUG is `Name (PLUG, One)` with no `_DSM`; SSDT-USBX has no properties (`acpi.py:433-471`). PNLF uses `_CID "APP0002"` and `_UID 0x13` [R: differs from the Dortania reference].
