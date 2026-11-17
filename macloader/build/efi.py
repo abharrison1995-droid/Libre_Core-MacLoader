@@ -46,6 +46,7 @@ from macloader.toolchain.loader import TrustedToolchainLoader, ToolchainTrustErr
 
 
 _REQUIRED_DRIVERS = ("OpenRuntime.efi", "OpenHfsPlus.efi")
+_REVIEWED_IGPU_IDS = frozenset(("8086:5917", "8086:5916"))
 
 
 @dataclass
@@ -142,6 +143,18 @@ class EfiBuilder:
             )
             if plan.effective_profile_digest.lower() != expected_effective_profile_digest.lower():
                 raise BuildPlanError("Reviewed EFI profile digest does not match the effective BuildPlan profile")
+            from macloader.configuration.observations import stable_snapshot_digest
+            if (
+                hardware_snapshot is None
+                or hardware_snapshot.snapshot_id != plan.hardware_snapshot_id
+                or stable_snapshot_digest(hardware_snapshot) != plan.hardware_content_digest
+            ):
+                raise BuildPlanError("Hardware snapshot does not match the accepted BuildPlan")
+            igpu = hardware_snapshot.igpu
+            if igpu is None or igpu.pci.canonical_id.lower() not in _REVIEWED_IGPU_IDS:
+                raise BuildPlanError("Reviewed EFI graphics injection requires a captured iGPU PCI ID of 8086:5917 or 8086:5916")
+            # The USB injector uses controller locations from this same bound snapshot.
+            controller_slots = {device.pci_slot for device in hardware_snapshot.usb_controllers if device.pci_slot}
         if not dependencies.is_complete or dependencies.unresolved_requirements:
             reasons = "; ".join(dependencies.unresolved_requirements) or "dependency set is incomplete"
             raise BuildPlanError(f"EFI build is blocked by unresolved dependency or policy requirements: {reasons}")
@@ -314,11 +327,6 @@ class EfiBuilder:
                 if private_acpi_capture is None or not toolchain.acpi_compiler_path or not toolchain.acpi_compiler_sha256:
                     raise BuildPlanError("USB map requires current private firmware proof")
                 addresses = collect_firmware_usb_addresses(private_acpi_capture, Path(toolchain.acpi_compiler_path), toolchain.acpi_compiler_sha256, staging / "private-usb-work", cancel or (lambda: False))
-                # Only the reference controller's PCI identity/topology can drive the injector.
-                from macloader.configuration.service import ConfigurationService
-                if hardware_snapshot is None or hardware_snapshot.snapshot_id != plan.hardware_snapshot_id or ConfigurationService._snapshot_digest(hardware_snapshot) != plan.hardware_content_digest:
-                    raise BuildPlanError("USB map hardware topology does not match the accepted BuildPlan")
-                controller_slots = {device.pci_slot for device in hardware_snapshot.usb_controllers if device.pci_slot}
                 generated_usb = generate_usb_map(usb_evidence, campaigns[0].evidence_policy["usb_capture"],
                     snapshot_id=plan.hardware_snapshot_id, bios_binding=reviewed_profile.bios_binding,
                     smbios=dict(plan.effective_option_selections).get("profile.smbios", ""),

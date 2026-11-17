@@ -17,9 +17,13 @@ from tests.unit.test_acpi_capture import sysfs
 from tests.unit.test_usb_map import evidence
 
 
-def ready(tmp_path: Path) -> AutoloaderService:
+def ready(tmp_path: Path, *, igpu_device_id: str | None = None) -> AutoloaderService:
     service = AutoloaderService(root=tmp_path / 'private')
-    service.start(candidate(), private_material='test')
+    snapshot = candidate()
+    if igpu_device_id is not None:
+        assert snapshot.igpu is not None
+        snapshot.igpu.pci.device_id = igpu_device_id
+    service.start(snapshot, private_material='test')
     assert service.configuration is not None and service.snapshot is not None
     source = tmp_path / 'source'
     source.mkdir()
@@ -127,6 +131,37 @@ def test_profiled_builder_consumes_generated_map_and_binds_manifest(tmp_path: Pa
     info = result.output_dir / 'EFI/OC/Kexts/MacLoaderUSBMap.kext/Contents/Info.plist'
     assert hashlib.sha256(info.read_bytes()).hexdigest() in result.manifest.evidence_digests
     assert b'P4TEST' not in (result.output_dir / 'manifest.json').read_bytes()
+
+
+def test_profiled_builder_refuses_unreviewed_igpu_before_generating_efi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macloader.build.acpi import AcpiProcessor
+    from macloader.build.config import load_reviewed_profile
+    from macloader.build.efi import EfiBuilder
+    from macloader.dependencies.resolver import DependencyResolver
+    from macloader.exceptions import BuildPlanError
+    from macloader.toolchain.loader import TrustedToolchainLoader
+    from tests.unit.test_p4_toolchain import _synthetic_loader
+
+    service = ready(tmp_path, igpu_device_id="3ea0")
+    assert service.configuration is not None and service.snapshot is not None
+    plan = service.workflow.evaluate(service.configuration, service.snapshot).evaluation.plan
+    dependencies = DependencyResolver().resolve(plan)
+    tools = _synthetic_loader(tmp_path).select()
+    monkeypatch.setattr(TrustedToolchainLoader, "verify_selection", lambda _self, selected: selected)
+    record = next(r for r in service.configuration.evidence if r.kind == "acpi")
+    capture = Path(record.private_ref).parent
+    acpi_digest = AcpiProcessor.capture_evidence_digest(capture, record.bios_binding, service.snapshot.snapshot_id)
+    output = tmp_path / "output"
+
+    with pytest.raises(BuildPlanError, match="captured iGPU PCI ID of 8086:5917 or 8086:5916"):
+        EfiBuilder().build(
+            plan, dependencies, {}, output, toolchain=tools,
+            reviewed_profile=load_reviewed_profile(), private_acpi_capture=capture,
+            expected_acpi_evidence_digest=acpi_digest, hardware_snapshot=service.snapshot,
+        )
+    assert not output.exists()
 
 
 def test_mutated_raw_firmware_is_rejected_before_acceptance(tmp_path: Path) -> None:

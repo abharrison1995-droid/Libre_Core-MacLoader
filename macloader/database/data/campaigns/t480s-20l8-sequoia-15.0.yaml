@@ -1,6 +1,6 @@
 schema_version: "1"
 campaign_id: t480s-20l8-n22et85w-162-sequoia
-revision: "4"
+revision: "5"
 model_id: thinkpad-t480s
 machine_type: "20L8"
 bios_binding: N22ET85W-1.62

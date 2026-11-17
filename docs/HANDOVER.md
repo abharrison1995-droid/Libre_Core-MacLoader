@@ -124,3 +124,22 @@ Reviewed every commit from `bcd72df` to `3fd8998` against its chunk. The full su
   - P3.5 is cut to the cleanup of intermediate files only, because the BIOS gate already exists.
   - P4.3 and P4.6 bump only the campaign `revision`. Profiles have no revision field, and `effective_profile_digest` already binds their content.
 - **Remaining work list, in order:** P3.3, P3.4a, P3.4d, P3.5, P4.3, P4.6. Section 3 applies unchanged. Hand back again under a new heading in this section.
+
+### 2026-11-17 follow-up implementation hand-back
+
+All six review chunks landed in order on local `main`, starting from review commit `295edcf`. The existing plan branches were fast-forwarded from their earlier stop commits before implementation and retained at the new chunk commits.
+
+| Chunk | Commit | Outcome |
+|---|---|---|
+| P3.3 | `adfb7f4` | Shared the DSL tokenizer with USB evidence and resolved the ACPI namespace before generation. Native PNLF suppresses the generated table and records an omission in the qualification report and digest. |
+| P3.4a | `c79d27e` | Generated the Darwin-guarded `plugin-type` method on the resolved CPU. |
+| P3.4d | `c83baa3` | Generated Darwin-only EC when firmware uses another EC name. The native EC omission is recorded in the qualification report and digest. |
+| P3.5 | `dbb8ce0` | Removed the captured DSL, recompiled OEM tables and raw diagnostics after success or failure. Retained generated DSL, AML and digests. |
+| P4.3 | `53c85a5` | Blocked missing reviewed profile capabilities and bumped the campaign revision from `3` to `4`. |
+| P4.6 | `plan/P4.6` | Bound the iGPU check to the accepted snapshot before generation, removed HS06, corrected the Sequoia Wi-Fi note and bumped the campaign revision to `5`. |
+
+Each chunk passed its targeted tests, the full suite, mypy and `git diff --check` before fast-forward. The reference-campaign and database-loader checks passed after both data edits. The final full suite had **777 passed, 17 skipped, 1 xfailed and 0 failed**, exit 0. Mypy passed for 89 source files. The expected failure is the existing strict USB-keyboard resume case. The new directory symlink test skipped because the host could not create the link. The ACPI tests used invented DSL and a synthetic compiler.
+
+The implementation followed the review decisions. USBX already uses the system bus after P3.4b, so P3.3 validates the resolved XHCI path without placing it in generated DSL. The EFI builder consumes the ACPI processor's dynamic output list, so P3.3 and P3.4d needed no edits to the EFI manifest or its builder. P3.5 was limited to cleanup because the existing campaign matcher enforces the BIOS binding. P4.3 added the required capability list to the profile and its strict reader, and both profile edits used campaign-only revision bumps.
+
+No review chunk was stopped or skipped. The EFI iGPU allow-list includes `8086:5916`, but the component catalog classifies it as HD 620 and the current guided campaign requires UHD 620. The allow-list governs EFI generation and the campaign governs guided qualification. P3.2, P4.2, Phase 5 and later, and the owner steps remain deferred.

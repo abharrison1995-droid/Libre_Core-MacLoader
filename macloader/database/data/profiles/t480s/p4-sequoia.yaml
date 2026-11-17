@@ -28,7 +28,7 @@ audio:
     - "https://github.com/acidanthera/AppleALC/wiki/Supported-codecs"
     - "https://github.com/acidanthera/AppleALC/blob/master/Changelog.md"
 usb:
-  routes: [SS01, SS02, SS03, HS06, HS07, HS08]
+  routes: [SS01, SS02, SS03, HS07, HS08]
   first_install_route: SS01
   usb_c_correlation: unresolved
 wwan_policy: disabled-by-omission

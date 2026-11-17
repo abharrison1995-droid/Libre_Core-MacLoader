@@ -28,12 +28,14 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P4.3 profile kext set | Done, merged to local `main` | `plan/P4.3`; campaign revision `4` |
 | P4.4 kext order | Done, merged to local `main` | `plan/P4.4` |
 | P4.5 structural validation | Done, merged to local `main` | `plan/P4.5` |
-| P4.6 graphics identity and profile data | **Next** | Bump the campaign `revision` only |
+| P4.6 graphics identity and profile data | Done, merged to local `main` | `plan/P4.6`; campaign revision `5` |
 | Phases 5-11 | Not started | |
 
 **P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
 
 **Hand-back checkpoint:** 765 passed, 16 skipped, 1 xfailed, 0 failed. Mypy passed for all 88 source files. The authorized work list has been reviewed in order and is ready for owner review. See section 6 of [HANDOVER.md](HANDOVER.md) for blockers.
+
+**Follow-up hand-back checkpoint:** P3.3, P3.4a, P3.4d, P3.5, P4.3 and P4.6 are merged to local `main`. The final full suite had 777 passed, 17 skipped, 1 xfailed and 0 failed. Mypy passed for 89 source files. See section 6 of [HANDOVER.md](HANDOVER.md) for the commit list and verification limits.
 
 **Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe), I25 read `CFBundleExecutable` for kexts.
 
@@ -451,6 +453,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Tests:** iGPU `8086:3ea0` → build refused.
 - **Result** (`plan/P4.6`): Stopped before editing code. Confirmed the EFI builder has no reviewed iGPU PCI allow-list, the profile still includes the USB route excluded by the evidence policy, and the Sequoia note mentions both Wi-Fi drivers while the resolver selects itlwm. As in P4.3, the required profile revision bump has no existing field in the YAML or its strict loader. The chunk needs an explicit versioning decision before changing the profile. No implementation tests were run.
 - **Review decision (2026-11-17):** same rule as P4.3: no profile revision; bump the campaign `revision` by one. `macos/sequoia.yaml` has no version field, so its wording change needs no bump. P4.6 is unblocked; do it after P4.3.
+- **Result after review** (`plan/P4.6`): Confirmed the reviewed builder lacked the iGPU gate, the evidence policy excluded HS06 and the resolver selected itlwm. The builder now validates the accepted snapshot and refuses a missing or unreviewed iGPU before generation. The synthetic test exercises refusal of `8086:3ea0`. Removed HS06, corrected the Sequoia note and bumped campaign revision from `4` to `5`. The EFI preflight allows `8086:5916`, which the component catalog classifies as HD 620; the current guided campaign requires UHD 620. Targeted tests, including the catalog checks: 38 passed. Full suite: 777 passed, 17 skipped, 1 xfailed, exit 0. Mypy passed for 89 source files.
 
 ---
 

@@ -5,5 +5,5 @@ min_opencore_version: "1.0.0"
 status: EXPERIMENTAL
 notes:
   - "Requires OpenCore 1.0.0+ for boot compatibility"
-  - "Intel Wi-Fi requires Sequoia-specific AirportItlwm or itlwm"
+  - "Intel Wi-Fi uses itlwm on Sequoia (not physically verified)"
   - "Graphics acceleration supported on Kaby Lake-R UHD 620 via WhateverGreen"
