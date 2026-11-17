@@ -195,7 +195,9 @@ class AcpiProcessor:
 
         names = self._resolve_names(disassembled)
         generated_specs = self._generated_sources(expected_bios_binding, names)
-        notes = ("firmware defines PNLF; SSDT-PNLF omitted",) if names["has_pnlf"] else ()
+        notes: tuple[str, ...] = ("firmware defines PNLF; SSDT-PNLF omitted",) if names["has_pnlf"] else ()
+        if names["ec"] is not None and "SSDT-EC-T480S" not in generated_specs:
+            notes += ("native EC present; SSDT-EC omitted",)
         generated_records: List[Dict[str, object]] = []
         generated_diagnostics: List[AcpiSourceResult] = []
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -564,4 +566,25 @@ class AcpiProcessor:
         }
         if names["has_pnlf"]:
             del sources["SSDT-PNLF-T480S"]
+        ec = names["ec"]
+        if ec is not None and ec.lstrip("\\").rsplit(".", 1)[-1] != "EC":
+            sources["SSDT-EC-T480S"] = r'''DefinitionBlock ("", "SSDT", 2, "MLDR", "ECT480S", 0x00000001)
+{
+    Scope (\_SB)
+    {
+        Device (EC)
+        {
+            Name (_HID, "ACID0001")
+            Method (_STA, 0, NotSerialized)
+            {
+                If (_OSI ("Darwin"))
+                {
+                    Return (0x0F)
+                }
+                Return (Zero)
+            }
+        }
+    }
+}
+'''
         return sources

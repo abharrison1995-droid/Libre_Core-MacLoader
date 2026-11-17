@@ -131,7 +131,7 @@ exit 2
 
 
 def _write_dsl(directory: Path, *, cpu: str = "PR00", controller: str = "XHC0",
-               controller_address: str = "0x00140000", extra: str = "") -> None:
+               controller_address: str = "0x00140000", ec: str = "EC00", extra: str = "") -> None:
     directory.joinpath("dsdt.dsl").write_text(
         f'''DefinitionBlock ("", "DSDT", 2, "LENOVO", "P4TEST", 1)
 {{
@@ -143,7 +143,7 @@ def _write_dsl(directory: Path, *, cpu: str = "PR00", controller: str = "XHC0",
             Device ({controller}) {{ Name (_ADR, {controller_address}) }}
             Device (VID0) {{ Name (_ADR, 0x00020000) }}
             Device (BRG0) {{ Device (USB0) {{ Name (_ADR, 0x00140000) }} }}
-            Device (LPC0) {{ Device (EC00) {{ Name (_HID, EisaId ("PNP0C09")) }} }}
+            Device (LPC0) {{ Device ({ec}) {{ Name (_HID, EisaId ("PNP0C09")) }} }}
             {extra}
         }}
     }}
@@ -152,8 +152,10 @@ def _write_dsl(directory: Path, *, cpu: str = "PR00", controller: str = "XHC0",
     )
 
 
-@pytest.mark.parametrize("native_pnlf", [False, True])
-def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: Path, native_pnlf: bool) -> None:
+@pytest.mark.parametrize(("native_pnlf", "ec"), [(False, "EC00"), (True, "EC00"), (True, "EC__")])
+def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(
+    tmp_path: Path, native_pnlf: bool, ec: str,
+) -> None:
     tool = tmp_path / "iasl"
     tool_digest = _fake_iasl(tool)
     capture = tmp_path / "capture"
@@ -162,7 +164,7 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: P
     for name in TABLE_NAMES:
         signature = "DSDT" if name == "dsdt.dat" else "SSDT"
         (table_dir / name).write_bytes(_table(signature, name.encode("ascii")))
-    _write_dsl(table_dir, extra="Device (PNLF) {}" if native_pnlf else "")
+    _write_dsl(table_dir, ec=ec, extra="Device (PNLF) {}" if native_pnlf else "")
 
     if os.name == "nt":
         tool = tool.with_suffix(".cmd")
@@ -171,8 +173,11 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: P
     result = processor.build(capture, output, expected_bios_binding="N22ET85W-1.62")
 
     pnlf_files = () if native_pnlf else ("SSDT-PNLF-T480S.aml",)
-    assert result.output_files == ("SSDT-PLUG-T480S.aml", *pnlf_files, "SSDT-USBX-T480S.aml")
+    ec_files = () if ec == "EC__" else ("SSDT-EC-T480S.aml",)
+    assert result.output_files == ("SSDT-PLUG-T480S.aml", *pnlf_files, "SSDT-USBX-T480S.aml", *ec_files)
     notes = ("firmware defines PNLF; SSDT-PNLF omitted",) if native_pnlf else ()
+    if ec == "EC__":
+        notes += ("native EC present; SSDT-EC omitted",)
     assert result.notes == notes
     assert result.tool_digest == tool_digest
     assert result.to_dict()["table_count"] == len(TABLE_NAMES)
@@ -180,6 +185,7 @@ def test_acpi_processor_runs_machine_bound_pipeline_with_pinned_tool(tmp_path: P
     report = json.loads((output.parent / "P4-ACPI-qualification.json").read_text(encoding="utf-8"))
     assert report["notes"] == list(notes)
     assert (output / "SSDT-PNLF-T480S.aml").is_file() == (not native_pnlf)
+    assert (output / "SSDT-EC-T480S.aml").is_file() == bool(ec_files)
     assert result.generated_digest == canonical_json_digest({
         "bios_binding": "N22ET85W-1.62",
         "notes": notes,
@@ -253,6 +259,19 @@ def test_generated_usbx_has_darwin_power_properties(tmp_path: Path) -> None:
     assert '"kUSBSleepPortCurrentLimit", 0x0834' in source
     assert '"kUSBWakePowerSupply", 0x13EC' in source
     assert '"kUSBWakePortCurrentLimit", 0x0834' in source
+
+
+def test_generated_ec_has_darwin_status(tmp_path: Path) -> None:
+    _write_dsl(tmp_path, ec="EC0")
+    names = AcpiProcessor._resolve_names(tmp_path)
+    source = AcpiProcessor._generated_sources("synthetic-bios", names)["SSDT-EC-T480S"]
+    assert r"Scope (\_SB)" in source
+    assert "Device (EC)" in source
+    assert 'Name (_HID, "ACID0001")' in source
+    assert "Method (_STA, 0, NotSerialized)" in source
+    assert 'If (_OSI ("Darwin"))' in source
+    assert "Return (0x0F)" in source
+    assert "Return (Zero)" in source
 
 
 def test_generated_pnlf_has_kaby_lake_backlight_identity_and_darwin_status(tmp_path: Path) -> None:
