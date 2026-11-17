@@ -623,6 +623,111 @@ def test_display_audio_does_not_reach_engine_as_unknown_audio(db: Database) -> N
     assert not any(r.component_id == "unknown-audio" for r in report.component_results)
 
 
+# Win32_DiskDrive rows. Instance suffixes and serial numbers are invented test values.
+_SSSTC_NVME_DISK = {
+    "Model": "SSSTC CA5-8D256-HP",
+    "InterfaceType": "SCSI",
+    "Size": "256052966400",
+    "SerialNumber": "TEST-SERIAL-0001",
+    "PNPDeviceID": r"SCSI\DISK&VEN_NVME&PROD_SSSTC_CA5-8D256\5&TEST&0&000000",
+}
+_PM981_NVME_DISK = {
+    "Model": "SAMSUNG MZVLB256HAHQ-000L7",
+    "InterfaceType": "SCSI",
+    "Size": "256052966400",
+    "SerialNumber": "TEST-SERIAL-0002",
+    "PNPDeviceID": r"SCSI\DISK&VEN_NVME&PROD_SAMSUNG_MZVLB256\5&TEST&0&000000",
+}
+_SATA_IDE_DISK = {
+    "Model": "TEST SATA SSD 512GB",
+    "InterfaceType": "IDE",
+    "Size": "512105932800",
+    "SerialNumber": "TEST-SERIAL-0003",
+    "PNPDeviceID": r"SCSI\DISK&VEN_TEST&PROD_SATA_SSD\4&TEST&0&000100",
+}
+_USBSTOR_DISK = {
+    "Model": "SanDisk Ultra USB 3.0 USB Device",
+    "InterfaceType": "SCSI",
+    "Size": "30752636928",
+    "SerialNumber": "TEST-SERIAL-0004",
+    "PNPDeviceID": r"USBSTOR\DISK&VEN_SANDISK&PROD_ULTRA&REV_1.00\TEST0001&0",
+}
+_USB_INTERFACE_DISK = {
+    "Model": "Test External NVMe Enclosure",
+    "InterfaceType": "usb",
+    "Size": "1000204886016",
+    "SerialNumber": "TEST-SERIAL-0005",
+    "PNPDeviceID": r"SCSI\DISK&VEN_NVME&PROD_TEST_ENCLOSURE\7&TEST&0&000000",
+}
+
+
+def _runner_with_disk_rows(disk_rows: list[dict[str, str]]) -> Callable[[str], Optional[str]]:
+    def runner(script: str) -> Optional[str]:
+        if "Win32_DiskDrive" in script:
+            return json.dumps(disk_rows)
+        return _valid_baseline_windows_runner(script)
+
+    return runner
+
+
+def test_scsi_interface_disk_with_ven_nvme_pnp_id_is_nvme() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_disk_rows([_SSSTC_NVME_DISK])).probe()
+
+    assert [(disk.model, disk.kind) for disk in snapshot.storage] == [("SSSTC CA5-8D256-HP", "nvme")]
+
+
+def test_usbstor_disk_is_absent_from_storage() -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_disk_rows([_SSSTC_NVME_DISK, _USBSTOR_DISK])
+    ).probe()
+
+    assert [disk.model for disk in snapshot.storage] == ["SSSTC CA5-8D256-HP"]
+    # Skipping a removable disk must not mark the storage query incomplete.
+    assert snapshot.raw_evidence["inventory_status"]["storage"] is True
+
+
+def test_usb_interface_disk_is_absent_from_storage() -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_disk_rows([_SSSTC_NVME_DISK, _USB_INTERFACE_DISK])
+    ).probe()
+
+    assert [disk.model for disk in snapshot.storage] == ["SSSTC CA5-8D256-HP"]
+    assert snapshot.raw_evidence["inventory_status"]["storage"] is True
+
+
+def test_only_usb_disks_leave_storage_confirmed_empty() -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_disk_rows([_USBSTOR_DISK, _USB_INTERFACE_DISK])
+    ).probe()
+
+    assert snapshot.storage == []
+    assert snapshot.raw_evidence["inventory_status"]["storage"] is True
+
+
+def test_ide_interface_sata_disk_is_classified_as_sata() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_disk_rows([_SATA_IDE_DISK])).probe()
+
+    assert [disk.kind for disk in snapshot.storage] == ["sata"]
+
+
+def test_pm981_model_is_still_nvme() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_disk_rows([_PM981_NVME_DISK])).probe()
+
+    assert [disk.kind for disk in snapshot.storage] == ["nvme"]
+
+
+def test_ssstc_nvme_disk_reaches_engine_as_known_storage_and_usb_stick_is_ignored(db: Database) -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_disk_rows([_SSSTC_NVME_DISK, _USBSTOR_DISK, _USB_INTERFACE_DISK])
+    ).probe()
+
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+    storage_results = [r for r in report.component_results if r.category == "storage"]
+
+    assert [(r.component_id, r.component_name) for r in storage_results] == [("standard-nvme", "SSSTC CA5-8D256-HP")]
+    assert not any(r.component_id == "unknown-storage" for r in report.component_results)
+
+
 def test_general_cim_parser_remains_strict_for_required_fields() -> None:
     result = WindowsHardwareProvider._parse_cim_output(
         json.dumps({"Manufacturer": "LENOVO", "Model": None}),

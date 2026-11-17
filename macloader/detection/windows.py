@@ -448,8 +448,18 @@ class WindowsHardwareProvider(BaseHardwareProvider):
             for row in disk_res.rows:
                 model_name = normalize_dmi_string(row.get("Model")) or "Unknown storage device"
                 interface = normalize_dmi_string(row.get("InterfaceType")) or ""
+                disk_pnp = str(row.get("PNPDeviceID") or "").upper()
+                # Removable USB disks (installer sticks, external drives) are not part of the machine.
+                if interface.upper() == "USB" or disk_pnp.startswith("USBSTOR\\"):
+                    continue
                 storage_text = f"{model_name} {interface}".lower()
-                kind = "nvme" if any(token in storage_text for token in ("nvme", "pm981", "mzvlb")) else "sata" if interface.upper() in {"SATA", "ATA"} else "unknown"
+                # Windows reports NVMe drives behind stornvme as InterfaceType SCSI; the PnP ID carries VEN_NVME.
+                is_nvme = (
+                    any(token in storage_text for token in ("nvme", "pm981", "mzvlb"))
+                    or "VEN_NVME" in disk_pnp
+                    or "\\NVME" in disk_pnp
+                )
+                kind = "nvme" if is_nvme else "sata" if interface.upper() in {"SATA", "ATA", "IDE"} else "unknown"
                 try:
                     raw_size = row.get("Size")
                     size = int(str(raw_size)) if raw_size else None
