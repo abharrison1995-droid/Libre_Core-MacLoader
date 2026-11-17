@@ -23,8 +23,7 @@ Libre_Core-MacLoader/
 │   ├── diagnostics/        logging and diagnostics
 │   └── ui/                 Click CLI and Textual TUI
 ├── tests/                  unit/integration tests and sanitized fixtures
-├── docs/                   status, design, research, safety and acceptance
-├── prompts/                archived development prompts and handoffs
+├── docs/                   status, the active fix plan, design, research, safety and acceptance
 ├── tools/                  T480s evidence collection scripts
 └── workspace/              ignored local state; not shipped or committed
 ```

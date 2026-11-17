@@ -1,9 +1,9 @@
 # Libre_Core MacLoader
 ## Engineering Specification — v0.1 Draft A
 
-> **Design reference, not a current-state report.** This draft predates the implemented workflow and includes proposed/future module names and requirements. Check [Project status](PROJECT_STATUS.md), [Architecture](ARCHITECTURE.md), and [Implementation plan](IMPLEMENTATION_PLAN.md) for what exists and what remains. A requirement in this draft is not evidence that its feature is implemented or qualified.
+> **Design reference, not a current-state report.** This draft predates the implemented workflow and includes proposed/future module names and requirements. Check [Project status](PROJECT_STATUS.md), [Architecture](ARCHITECTURE.md), and the [T480s first-install fix plan](T480S_FIRST_INSTALL_FIX_PLAN.md) for what exists and what remains. A requirement in this draft is not evidence that its feature is implemented or qualified.
 
-Execution update (2026-09-08): use [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for current status, sequencing and acceptance gates. It adds a foundation repair tranche, moves matching ocvalidate into the first EFI build, and records the user-confirmed Sequoia-first qualification target. This specification remains the product contract.
+Execution update (2026-11-17): current status is in [PROJECT_STATUS.md](PROJECT_STATUS.md) and current sequencing in the [T480s first-install fix plan](T480S_FIRST_INSTALL_FIX_PLAN.md). The 2026-09-08 note that followed here pointed to a plan that has since been removed; it read: use IMPLEMENTATION_PLAN.md for current status, sequencing and acceptance gates. It adds a foundation repair tranche, moves matching ocvalidate into the first EFI build, and records the user-confirmed Sequoia-first qualification target. This specification remains the product contract.
 
 **Project:** Libre_Core-MacLoader  
 **Package:** `macloader`  

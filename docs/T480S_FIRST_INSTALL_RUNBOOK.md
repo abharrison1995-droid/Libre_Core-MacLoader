@@ -1,5 +1,7 @@
 # ThinkPad T480s first-install runbook
 
+> **Being rewritten.** This runbook predates the Windows-host workflow. The current preparation host is Windows 11 on the T480s itself, and the [fix plan](T480S_FIRST_INSTALL_FIX_PLAN.md) chunk P11.4a rewrites this page around it, with the decided erase-the-disk path, the rescue stick and the install procedure (P10.2-P10.7). Until then, treat the Linux-first host guidance below as historical, and follow the fix plan's Phase 0 for owner steps. Do not plug in an external USB keyboard or mouse during a guided session: it changes the recorded input layout and MacLoader then redoes its earlier steps.
+
 ## Scope and current readiness
 
 This runbook is for the reference ThinkPad T480s machine type **20L8**, BIOS **N22ET85W 1.62**, with the frozen target **macOS Sequoia 15.0, build 24A335**. Do not change the target without a separate user decision.

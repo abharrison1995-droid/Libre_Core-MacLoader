@@ -1,5 +1,7 @@
 # Libre_Core MacLoader — v1 True Autoloader Master Plan
 
+> **Design record, not an active plan.** The autoloader this document specified is implemented ([implementation status](AUTOLOADER_V1_IMPLEMENTATION_STATUS.md)). Current work toward the first T480s install follows the [T480s first-install fix plan](T480S_FIRST_INSTALL_FIX_PLAN.md).
+
 **Planning baseline:** 2026-10-03
 
 **Repository:** abharrison1995-droid/Libre_Core-MacLoader

@@ -2,7 +2,7 @@
 
 MacLoader is a Python CLI and Textual application for inspecting ThinkPad hardware, reviewing OpenCore configuration policy, and preparing EFI output. Its guided workflow currently has one reviewed candidate: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, macOS Sequoia 15.0 build 24A335. That candidate is **experimental**; physical installation and hardware acceptance have not been completed.
 
-For the guided implementation and current qualification gaps, see [Autoloader implementation status](docs/AUTOLOADER_V1_IMPLEMENTATION_STATUS.md). [Project status](docs/PROJECT_STATUS.md) retains the earlier host audit. The [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) describes the physical checkpoints. No model is currently `SUPPORTED` by MacLoader physical acceptance.
+[Project status](docs/PROJECT_STATUS.md) is the current status and open gates. Active work toward the first T480s install follows the [T480s first-install fix plan](docs/T480S_FIRST_INSTALL_FIX_PLAN.md). The guided implementation is described in [Autoloader implementation status](docs/AUTOLOADER_V1_IMPLEMENTATION_STATUS.md), and the [first-install runbook](docs/T480S_FIRST_INSTALL_RUNBOOK.md) describes the physical checkpoints (being rewritten for the Windows host). No model is currently `SUPPORTED` by MacLoader physical acceptance.
 
 ## Install and inspect
 

@@ -1,9 +1,11 @@
 # Autoloader v1 implementation status
 
-Implementation branch: `codex/autoloader-v1`; draft PR #1. The master specification
-is [AUTOLOADER_V1_MASTER_PLAN.md](AUTOLOADER_V1_MASTER_PLAN.md). This page describes
-the new guided implementation; the earlier host observations in Project Status
-and the runbook remain historical evidence, not a current T480s capture.
+The autoloader is merged on `main`. Its design record is
+[AUTOLOADER_V1_MASTER_PLAN.md](AUTOLOADER_V1_MASTER_PLAN.md). This page describes the
+guided implementation as delivered; current status is in [Project status](PROJECT_STATUS.md)
+and the work toward the first install follows the
+[T480s first-install fix plan](T480S_FIRST_INSTALL_FIX_PLAN.md), whose Phases 1-2
+(2026-11-17) changed Windows detection and the session engine described below.
 
 ## What is implemented
 
@@ -65,9 +67,9 @@ acceptances originally proposed.
 
 ## Exact next readiness boundary
 
-The current host is not the target laptop. Do not begin a boot campaign yet.
-A real candidate capture and port evidence are needed; the fixture cannot supply
-them. The Windows-first native backend is implemented. Its full physical writer
+The preparation host is now Windows 11 on the target T480s itself. Do not begin a
+boot campaign yet: a real candidate capture and port evidence are needed (fix plan
+Phase 0 and Phase 5), and the fixture cannot supply them. The Windows-first native backend is implemented. Its full physical writer
 qualification and reviewed exact-source/Windows-build approval remain required
 before production USB writing can be enabled. See
 [Windows writer qualification](WINDOWS_WRITER_QUALIFICATION.md). Windows USB physical firmware correlation is also absent;
@@ -108,10 +110,9 @@ approval catalog binds reviewed physical evidence to exact backend source and
 Windows build/AMD64; it remains empty. The explicit sacrificial-device harness
 uses non-bootable qualification bytes and labels controlled fault injection.
 All previous machine, identity, Recovery, media-consent and support boundaries
-remain. PR #1 stays draft.
+remain.
 
-Native follow-on final local checks: **660 tests passed, 80.31% branch coverage**;
-native/Windows-target mypy passed (144 files), wheel/sdist outside-checkout smoke
-and real pinned reference EFI/ocvalidate passed. Exact final hosted run links are
-retained in draft PR #1. Current read-only host is Linux MSI MS-7C02 (BIOS 3.K0),
-not a T480s; physical evidence remains absent.
+Native follow-on final local checks at the time: **660 tests passed, 80.31% branch
+coverage**; native/Windows-target mypy passed (144 files), wheel/sdist outside-checkout
+smoke and real pinned reference EFI/ocvalidate passed. Physical evidence remains absent.
+The current test baseline is in [Project status](PROJECT_STATUS.md).
