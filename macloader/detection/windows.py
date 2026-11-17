@@ -29,6 +29,10 @@ from macloader.domain.hardware import (
 
 logger = logging.getLogger(__name__)
 
+# WWAN modems are unsupported and deliberately not reported as network hardware.
+# The word boundary on "lte" keeps names such as "... Filter ..." from matching.
+_WWAN_PATTERN = re.compile(r"wwan|mobile broadband|fibocom|l830|\blte\b|sierra wireless")
+
 
 @dataclass(frozen=True)
 class CimQueryResult:
@@ -397,7 +401,9 @@ class WindowsHardwareProvider(BaseHardwareProvider):
                 # adapters, Bluetooth protocol drivers). They are not hardware
                 # and must not become unknown network components.
                 has_hw_id = pnp_pci is not None or usb is not None
-                if "bluetooth" in lower:
+                if _WWAN_PATTERN.search(lower):
+                    pass  # WWAN is unsupported and deliberately not network hardware.
+                elif "bluetooth" in lower:
                     if has_hw_id:
                         bluetooth.append(NetworkInfo(name=name, kind="bluetooth", pci=pnp_pci, usb=usb))
                 elif dev_class.lower() == "net" or any(token in lower for token in ("ethernet", "wireless", "wi-fi", "wifi")):

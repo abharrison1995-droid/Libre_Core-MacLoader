@@ -541,6 +541,51 @@ def test_software_network_rows_do_not_reach_engine_as_unknown_components(db: Dat
     assert report.can_generate_build_plan is True
 
 
+# WWAN modems are unsupported. Vendor/product IDs and instance suffixes are invented.
+_FIBOCOM_WWAN_ROW = {"Name": "Fibocom L830-EB-00 LTE WWAN Module", "PNPDeviceID": r"USB\VID_FFF1&PID_0A01&MI_00\6&TEST&0&0000", "Class": "Net"}
+_SIERRA_WWAN_ROW = {"Name": "Sierra Wireless Snapdragon X7 LTE-A", "PNPDeviceID": r"USB\VID_FFF2&PID_0B02&MI_08\6&TEST&0&0008", "Class": "Net"}
+
+
+def test_wwan_usb_net_row_is_not_reported_as_network_hardware() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows([_FIBOCOM_WWAN_ROW])).probe()
+
+    assert snapshot.ethernet == []
+    assert snapshot.wifi == []
+    assert snapshot.bluetooth == []
+    assert "fff1:0a01" in [device.canonical_id for device in snapshot.usb_devices]
+
+
+def test_sierra_wireless_wwan_row_is_not_classified_as_wifi() -> None:
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows([_SIERRA_WWAN_ROW])).probe()
+
+    assert snapshot.wifi == []
+    assert snapshot.ethernet == []
+    assert "fff2:0b02" in [device.canonical_id for device in snapshot.usb_devices]
+
+
+def test_filter_row_with_pci_identity_is_not_treated_as_wwan() -> None:
+    # "Filter" contains the letters "lte"; the word boundary keeps it out of WWAN.
+    filter_row = {"Name": "Intel(R) Ethernet Connection I219-V-WFP LightWeight Filter", "PNPDeviceID": r"PCI\VEN_8086&DEV_15D7&SUBSYS_FFFF17AA\3&TEST&0&FF", "Class": "Net"}
+    snapshot = WindowsHardwareProvider(command_runner=_runner_with_pnp_rows([filter_row])).probe()
+
+    assert [eth.pci.canonical_id for eth in snapshot.ethernet if eth.pci] == ["8086:15d7"]
+    assert snapshot.wifi == []
+
+
+def test_wwan_row_does_not_reach_engine_as_unknown_component(db: Database) -> None:
+    snapshot = WindowsHardwareProvider(
+        command_runner=_runner_with_pnp_rows(_HARDWARE_NETWORK_ROWS + [_FIBOCOM_WWAN_ROW])
+    ).probe()
+
+    assert len(snapshot.ethernet) == 1
+    assert len(snapshot.wifi) == 1
+    assert len(snapshot.bluetooth) == 1
+    report = CompatibilityEngine(db=db).evaluate(snapshot, target_macos="sequoia")
+
+    unknown = [r.component_id for r in report.component_results if r.component_id.startswith("unknown-")]
+    assert unknown == []
+
+
 def test_general_cim_parser_remains_strict_for_required_fields() -> None:
     result = WindowsHardwareProvider._parse_cim_output(
         json.dumps({"Manufacturer": "LENOVO", "Model": None}),
