@@ -792,14 +792,28 @@ def test_identity_reuse_rejects_broad_permissions_after_validating_content(tmp_p
         service.reuse(IdentityReference("0.1", stored.storage_ref, True))
 
 
-def test_tui_apply_target_is_clickable_at_supported_small_sizes(t480s_baseline_fixture: Path) -> None:
+def test_tui_apply_target_is_clickable_at_supported_small_sizes(
+    t480s_baseline_fixture: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def exercise() -> None:
         for size in ((80, 24), (100, 35)):
             app = WorkflowApp(fixture=t480s_baseline_fixture)
+            target_applied = asyncio.Event()
+            apply_target = app._apply_target
+
+            def apply_and_signal() -> None:
+                apply_target()
+                target_applied.set()
+
+            monkeypatch.setattr(app, "_apply_target", apply_and_signal)
             async with app.run_test(size=size) as pilot:
-                await pilot.pause()
-                await pilot.click("#apply-target")
+                await app.wait_for_refresh()
                 assert app._draft is not None
+                revision = app._draft.revision
+                assert await pilot.click("#apply-target")
+                await asyncio.wait_for(target_applied.wait(), timeout=10)
+                assert app._draft is not None
+                assert app._draft.revision == revision + 1
 
     asyncio.run(exercise())
 

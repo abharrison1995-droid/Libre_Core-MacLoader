@@ -11,13 +11,14 @@ Target: ThinkPad T480s 20L8, BIOS N22ET85W 1.62, prepared from a Windows 11 AMD6
 | P0.1 baseline | Done | Result under P0.1 |
 | P0.6 green baseline | Done, merged | `299d1bb` |
 | Phase 1 (P1.1-P1.7) | Done, merged, **pushed** | `origin/main` at `78bdc4b`; checkpoint note above Phase 2 |
-| Phase 2 (P2.1, P2.2, P2.2b, P2.3-P2.6) | Done, merged to local `main`, **not pushed** | `4d0ad32`; checkpoint note at the end of Phase 2 |
-| P2.7 flaky guided tests | **Next chunk** | Entry at the end of Phase 2 |
+| Phase 2 (P2.1, P2.2, P2.2b, P2.3-P2.6) | Done, merged and pushed | `4d0ad32`; checkpoint note at the end of Phase 2 |
+| P2.7 flaky guided tests | Done, merged to local `main` | `plan/P2.7`; Result at the end of Phase 2 |
 | P0.2-P0.5 (owner at the machine) | Not started | Phase 0 |
 | P0.5a (orchestrator confirms BIOS table) | Not started | Under P0.5 |
-| Phases 3-11 | Not started | |
+| Phase 3 | **P3.1 next** | P3.2 awaits owner input |
+| Phases 4-11 | Not started | |
 
-**Current baseline on local `main` (`4d0ad32`):** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed; mypy "Success: no issues found in 88 source files". One known intermittent failure remains; P2.7 fixes it.
+**P2.7 checkpoint:** 753 passed, 16 skipped, 1 xfailed (the deliberate USB-keyboard resume case from P2.2b), 0 failed in each of two full runs. Mypy passed for all 88 source files.
 
 **Improvements logged while implementing** (Phase 12 table): I21 typed WWAN field, I22 PM981-from-Windows and UASP disks, I23 Linux removable disks and `usb_count`, I24 test hygiene (a suite test runs a live probe).
 
@@ -281,7 +282,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 
 **Phase 2 checkpoint (2026-11-17, orchestrator):** P2.1-P2.6 and P2.2b merged to local `main` at `4d0ad32`, **not pushed**. Full suite 753 passed, 16 skipped, 1 xfailed; mypy clean. Decisions taken during the phase: P2.1 re-scoped (the real removable trigger is a USB input device, not `usb_devices`); P2.2 split, with P2.2b removing `usb_devices` from the stored snapshot digest and the USB-keyboard resume case left as a strict xfail plus a runbook note; P2.5 part (b) was not a real problem in the service (the related guided-screen wording moved to P7.5). Open: P2.7.
 
-### P2.7 Make the two intermittent guided-UI tests deterministic — next chunk
+### P2.7 Make the two intermittent guided-UI tests deterministic
 - **Why:** two tests fail intermittently, so a red suite no longer reliably means a broken change:
   - `tests/unit/test_guided.py::test_retry_reprobes_only_for_hardware_and_binding_blockers` (about 1 in 6 runs of that file);
   - `tests/unit/test_readiness_repairs.py::test_tui_apply_target_is_clickable_at_supported_small_sizes` (seen once in a full run).
@@ -289,6 +290,7 @@ Main file `macloader/autoloader/service.py`; tests in `tests/unit/test_autoloade
 - **Change:** fix the tests, not the production code, by waiting on the right condition. If the race is in production code (for example a busy flag cleared before a worker finishes), stop and report with the evidence instead of changing it.
 - **Files:** `tests/unit/test_guided.py`, `tests/unit/test_readiness_repairs.py`.
 - **Done when:** each test passes 30 runs in a row, and the full suite passes twice in a row.
+- **Result** (`plan/P2.7`): Retry failed in 1 of 20 runs on `assert not app._busy` for `CONFIGURATION_BLOCKED`. The test now waits for the Retry handler to register its worker before waiting for workers to finish. Apply target passed 20 of 20 baseline runs. Its test now waits for layout refresh before clicking and verifies that the click increments the draft revision at each size. Both tests passed 30 consecutive runs after the changes. The two test files passed with 60 passed and 2 skipped. Both full runs finished with 753 passed, 16 skipped and 1 xfailed. Mypy passed for 88 source files.
 
 ## Phase 3 — ACPI capture and generated tables
 

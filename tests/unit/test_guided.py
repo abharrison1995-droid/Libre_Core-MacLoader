@@ -201,13 +201,23 @@ def test_retry_reprobes_only_for_hardware_and_binding_blockers(tmp_path: Path, m
         monkeypatch.setattr(service, "reprobe", reprobe)
         monkeypatch.setattr(service, "start", start)
         app = GuidedApp(service)
+        retry_scheduled = asyncio.Event()
+        refresh = app.action_refresh
+
+        def schedule_retry() -> None:
+            refresh()
+            retry_scheduled.set()
+
+        monkeypatch.setattr(app, "action_refresh", schedule_retry)
         async with app.run_test() as pilot:
             await app.workers.wait_for_complete()
-            await pilot.pause()
+            await app.wait_for_refresh()
             assert reprobes == []
-            await pilot.click("#retry-guided")
+            assert not app._busy
+            assert await pilot.click("#retry-guided")
+            # The button message can reach the app after the pilot click returns.
+            await asyncio.wait_for(retry_scheduled.wait(), timeout=10)
             await app.workers.wait_for_complete()
-            await pilot.pause()
             assert len(reprobes) == expected
             assert starts == []
             assert not app._busy
