@@ -39,6 +39,8 @@ class AutoloaderService:
         self.handlers: dict[Stage, Callable[[], None]] = {Stage.ACPI: self._capture_acpi, Stage.TOOLS: self._prepare_tools, Stage.DEPENDENCIES: self._prepare_dependencies, Stage.BUILD: self._build_efi, Stage.RECOVERY: self._prepare_recovery, Stage.MEDIA: self._prepare_media, Stage.FIRST_BOOT: self._prepare_first_boot}
         self._cancel: Callable[[], bool] = lambda: False
         self._blocker: Optional[NextAction] = None
+        # True only while this process is inside the media write call.
+        self._write_in_progress = False
         self._private_material: Optional[str] = None
         self.usb_collector: Optional["UsbEvidenceCollector"] = None
         from macloader.autoloader.media import GuidedMediaService
@@ -221,6 +223,10 @@ class AutoloaderService:
             if self.session.artifacts.get("first_boot", {}).get("binding") != binding:
                 return NextAction(Stage.FIRST_BOOT, ActionKind.AUTOMATIC, "Prepare current first-boot instructions; no boot result is inferred.")
             return next_checkpoint(self.session.checkpoints, self._first_boot_instructions())
+        if ("media_attempt" in self.session.artifacts and "media_write" not in self.session.artifacts
+                and not self._write_in_progress):
+            # A write crossed the destructive boundary but never recorded completion.
+            return NextAction(Stage.MEDIA, ActionKind.HUMAN, "A previous USB write did not finish. That USB may be partly erased and must not be booted.", "MEDIA_ATTEMPT_UNRESOLVED", ("I will reuse or discard that USB; start again",))
         if not self.media.qualified:
             return NextAction(Stage.MEDIA, ActionKind.BLOCKED, "Preparation is saved. ADR-007 requires a physically qualified Windows writer with full readback and safe eject before a USB can be erased.", "WRITER_UNQUALIFIED")
         if self.media.selected is not None:
@@ -395,9 +401,13 @@ class AutoloaderService:
             assert self.session is not None
             self.session.actions.append(dict(stage="write", state="destructive-boundary", destructive="may-have-occurred"))
             self._record_artifact("media_attempt", destructive="may-have-occurred")
-        plan = self.media.write(self._cancel, mark_started)
-        self.session.actions.append(dict(stage="write", state="readback-eject-complete", destructive="performed"))
-        self._record_artifact("media_write", digest=plan.plan_digest, readback="complete", eject="complete", purpose=plan.bindings.purpose)
+        self._write_in_progress = True
+        try:
+            plan = self.media.write(self._cancel, mark_started)
+            self.session.actions.append(dict(stage="write", state="readback-eject-complete", destructive="performed"))
+            self._record_artifact("media_write", digest=plan.plan_digest, readback="complete", eject="complete", purpose=plan.bindings.purpose)
+        finally:
+            self._write_in_progress = False
 
     def _record_artifact(self, kind: str, **metadata: str) -> None:
         if self.configuration is None or self.session is None:
@@ -617,7 +627,12 @@ class AutoloaderService:
             record_checkpoint(self.session.checkpoints, choice)
             self._save_session()
         elif action.stage == Stage.MEDIA:
-            if choice == "Find USB devices":
+            if action.code == "MEDIA_ATTEMPT_UNRESOLVED":
+                if self.session is None:
+                    raise ValueError("No campaign")
+                self.session.artifacts.pop("media_attempt", None)
+                self._save_session()
+            elif choice == "Find USB devices":
                 self.media.discover()
             else:
                 self.media.select(choice)
